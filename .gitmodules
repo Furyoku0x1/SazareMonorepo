@@ -1,0 +1,9 @@
+[submodule "tokens/lib/forge-std"]
+	path = tokens/lib/forge-std
+	url = https://github.com/foundry-rs/forge-std
+[submodule "hooks/lib/forge-std"]
+	path = hooks/lib/forge-std
+	url = https://github.com/foundry-rs/forge-std
+[submodule "add-ons/lib/forge-std"]
+	path = add-ons/lib/forge-std
+	url = https://github.com/foundry-rs/forge-std
