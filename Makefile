@@ -1,4 +1,4 @@
-PROJECTS := tokens hooks add-ons
+PROJECTS := tokens hooks add-ons core
 PROJECT ?=
 
 ifneq ($(strip $(PROJECT)),)
@@ -28,7 +28,7 @@ help:
 	  'make clean      Remove all Foundry build artifacts' \
 	  '' \
 	  'Select one project: make test PROJECT=tokens' \
-	  'Available projects: tokens, hooks, add-ons'
+	  'Available projects: tokens, hooks, add-ons, core'
 
 build test fmt fmt-check clean:
 	@set -eu; \

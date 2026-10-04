@@ -7,3 +7,6 @@
 [submodule "add-ons/lib/forge-std"]
 	path = add-ons/lib/forge-std
 	url = https://github.com/foundry-rs/forge-std
+[submodule "core/lib/forge-std"]
+	path = core/lib/forge-std
+	url = https://github.com/foundry-rs/forge-std
