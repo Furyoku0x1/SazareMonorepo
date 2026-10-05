@@ -1,11 +1,15 @@
 # SazareMono
 
-One Git repository containing four independent Foundry projects:
+One Git repository containing four Foundry projects with shared dependencies:
 
 ```text
 SazareMono/
 ├── .github/workflows/     # CI for all projects
 ├── .gitmodules           # Dependency submodules registered at the root
+├── foundry.lock          # Shared dependency versions and revisions
+├── lib/
+│   ├── forge-std/
+│   └── openzeppelin-contracts/  # OpenZeppelin v5.6.1
 ├── Makefile              # Shared build and test commands
 ├── tokens/
 ├── hooks/
@@ -13,16 +17,30 @@ SazareMono/
 └── core/
 ```
 
-Each project keeps its own `foundry.toml`, `src/`, `test/`, `script/`, and `lib/` dependencies. Build output and caches stay in the individual project directories. Project code is tracked by the root Git repository; dependencies in `lib/` are Git submodules.
+Each project keeps its own `foundry.toml`, `src/`, `test/`, and `script/`. Build output (`out/`) and caches (`cache/`) stay in the individual project directories. All projects import from the root `lib/` Git submodules; dependency versions and revisions are recorded once in the root `foundry.lock`.
 
-Install [Foundry](https://getfoundry.sh/), then clone the repository with its dependencies:
+Each project's configuration resolves shared imports explicitly:
 
-```sh
-git clone --recurse-submodules <repository-url> SazareMono
-cd SazareMono
+```toml
+[profile.default]
+src = "src"
+out = "out"
+libs = ["../lib"]
+remappings = [
+    "forge-std/=../lib/forge-std/src/",
+    "@openzeppelin/contracts/=../lib/openzeppelin-contracts/contracts/",
+]
 ```
 
-For an existing checkout, initialize dependencies with:
+Install [Foundry](https://getfoundry.sh/), then clone the repository and initialize its shared dependencies:
+
+```sh
+git clone <repository-url> SazareMono
+cd SazareMono
+make install
+```
+
+For an existing checkout, initialize the shared dependencies with:
 
 ```sh
 make install
@@ -42,7 +60,15 @@ make clean PROJECT=add-ons
 make check PROJECT=core
 ```
 
-`PROJECT` accepts `tokens`, `hooks`, `add-ons`, or `core`. Commands stop on the first failure. `make install` always initializes dependencies for the whole repository.
+`PROJECT` accepts `tokens`, `hooks`, `add-ons`, or `core`. Commands stop on the first failure. `make install` initializes the direct shared dependencies for the whole repository. OpenZeppelin's nested testing dependencies are not needed by Sazare projects. If a future library needs transitive submodules for its production imports, initialize that library explicitly with `git submodule update --init --recursive -- lib/LIBRARY`.
+
+Install a new dependency from the monorepo root:
+
+```sh
+forge install --root "$PWD" OWNER/REPOSITORY@TAG
+```
+
+Replace `OWNER/REPOSITORY@TAG` with the repository and pinned version. The dependency is installed in the root `lib/`; add an explicit `../lib/` remapping in each project that imports it. Commit the root `.gitmodules`, `foundry.lock`, and dependency submodule revisions together.
 
 Foundry can also run directly from the root:
 
@@ -58,7 +84,7 @@ The root `.github/workflows/` runs CI for each project using that project's conf
 To add another Foundry project, run this from the monorepo root:
 
 ```sh
-forge init --use-parent-git new-project
+forge init --no-deps --use-parent-git new-project
 ```
 
-`--use-parent-git` keeps the project in SazareMono's Git repository. Add the new directory to `PROJECTS` in `Makefile` and to the project matrix in `.github/workflows/ci.yml`. Use the root CI workflow for its checks.
+`--no-deps` skips dependency installation, and `--use-parent-git` keeps the project in SazareMono's Git repository. Configure `new-project/foundry.toml` with the shared `libs` and remappings shown above, and remove any empty project-local `lib/` created by the scaffold. Add the new directory to `PROJECTS` in `Makefile` and to the project matrix in `.github/workflows/ci.yml`.

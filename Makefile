@@ -19,7 +19,7 @@ help:
 	@printf '%s\n' \
 	  'SazareMono — independent Foundry projects in one Git repository' \
 	  '' \
-	  'make install    Initialize all Git submodule dependencies' \
+	  'make install    Initialize the shared library dependencies' \
 	  'make build      Build all projects' \
 	  'make test       Test all projects' \
 	  'make fmt        Format all projects' \
@@ -46,4 +46,4 @@ check:
 	@$(MAKE) test
 
 install:
-	git submodule update --init --recursive
+	git submodule update --init
