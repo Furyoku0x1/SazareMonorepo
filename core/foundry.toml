@@ -6,6 +6,11 @@ libs = ["../lib"]
 auto_detect_remappings = false
 # Uniswap v4 uses transient storage (EIP-1153).
 evm_version = "cancun"
+# Keep KernelHook compatible with Solidity's standard compilation pipeline.
+via_ir = false
+# Standard optimization keeps deployed contracts within the bytecode size limits.
+optimizer = true
+optimizer_runs = 200
 remappings = [
     "forge-std/=../lib/forge-std/src/",
     "@openzeppelin/contracts/=../lib/openzeppelin-contracts/contracts/",

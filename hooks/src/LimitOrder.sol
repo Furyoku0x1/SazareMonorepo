@@ -1,4 +1,4 @@
-/// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 pragma solidity 0.8.37;
 
 import {IERC20} from "oz/contracts/token/ERC20/IERC20.sol";
@@ -11,7 +11,7 @@ contract LimitOrder is IHookExtension {
     using SafeERC20 for IERC20;
 
     /// Data types
-    struct LimitOrder {
+    struct Order {
         address owner;
         address fromToken;
         address toToken;
@@ -21,8 +21,8 @@ contract LimitOrder is IHookExtension {
     }
 
     /// Storage
-    mapping(bytes32 => LimitOrder) public orders;
-    mapping(address => uint256) public orderIds;
+    mapping(bytes32 => Order) public orders;
+    mapping(address => uint256) public nextOrderNonce;
 
     /// Errors and Events
 
@@ -30,10 +30,10 @@ contract LimitOrder is IHookExtension {
 
     /// External Functions
 
-    function placeOrder(LimitOrder calldata order) external {
+    function placeOrder(Order calldata order) external {
         IERC20(order.fromToken).safeTransferFrom(msg.sender, address(this), order.amount);
-        bytes32 orderId = keccak256(abi.encode(msg.sender, orderIds[msg.sender]));
-        orderIds[msg.sender] += 1;
+        bytes32 orderId = keccak256(abi.encode(msg.sender, nextOrderNonce[msg.sender]));
+        nextOrderNonce[msg.sender] += 1;
     }
 
     function cancelOrder() external {}
