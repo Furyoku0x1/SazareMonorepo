@@ -10,5 +10,26 @@
       "name": "v5.6.1",
       "rev": "5fd1781b1454fd1ef8e722282f86f9293cacf256"
     }
+  },
+  "lib/permit2": {
+    "rev": "cc56ad0f3439c502c246fc5cfcc3db92bb8b7219"
+  },
+  "lib/solmate": {
+    "rev": "4b47a19038b798b4a33d9749d25e570443520647"
+  },
+  "lib/uniswap-hooks": {
+    "tag": {
+      "name": "v1.1.1",
+      "rev": "bd5287c4a9f5c22c2393f7587a9b357662916115"
+    }
+  },
+  "lib/v4-core": {
+    "rev": "d153b048868a60c2403a3ef5b2301bb247884d46"
+  },
+  "lib/v4-hooks-public": {
+    "rev": "e4eabe526f9b516fff78d98ba781251747f0fd6e"
+  },
+  "lib/v4-periphery": {
+    "rev": "07336f2144f522874e2c3c85e04d1d3f8d5fa471"
   }
 }

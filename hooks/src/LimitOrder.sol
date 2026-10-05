@@ -3,10 +3,11 @@ pragma solidity 0.8.37;
 
 import {IERC20} from "oz/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "oz/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IHookExtension} from "core/src/interfaces/IHookExtension.sol";
 
 /// @notice Uniswap V4 Hook contract that allows for limit orders for any tokens.
 /// @author Furyoku0x1 https://x.com/Furyoku0x1
-contract LimitOrder {
+contract LimitOrder is IHookExtension {
     using SafeERC20 for IERC20;
 
     /// Data types
