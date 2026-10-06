@@ -10,7 +10,7 @@ import {BoundedCall} from "./BoundedCall.sol";
 import {CallbackLibrary} from "./CallbackLibrary.sol";
 import {KernelHookConstants} from "./KernelHookConstants.sol";
 import {KernelHookState} from "./KernelHookState.sol";
-import {KernelHookOperations} from "./KernelHookOperations.sol";
+import {KernelHookOperations, OperationFrame} from "./KernelHookOperations.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {LPFeeLibrary} from "v4-core/src/libraries/LPFeeLibrary.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
@@ -40,60 +40,60 @@ library KernelHookDispatch {
 
     /// @notice Calls one extension, validates its result, and settles its deltas in one rollback scope.
     /// @param state The pool and installation state
-    /// @param runtime The operation stack and active invocation counts
     /// @param manager The PoolManager whose deltas are settled
     /// @param vault The vault holding the installation's funds
     /// @param invocation The extension, callback arguments, and accumulated result
     /// @return next The accumulated result including this extension
     function invokeExtension(
         KernelHookState.State storage state,
-        KernelHookOperations.Runtime storage runtime,
         IPoolManager manager,
         KernelHookVault vault,
         Invocation memory invocation
     ) external returns (CallbackResult memory next) {
         if (msg.sender != address(this)) revert IKernelHook.Unauthorized();
-        if (runtime.frames.length == 0) revert IKernelHook.Unauthorized();
-        KernelHookOperations.OperationFrame storage frame = KernelHookOperations.currentFrame(runtime);
+        if (KernelHookOperations.frameCount() == 0) revert IKernelHook.Unauthorized();
+        OperationFrame frame = KernelHookOperations.currentFrame();
         address extension = invocation.extension;
-        if (frame.extension != extension) revert IKernelHook.Unauthorized();
-        if (PoolId.unwrap(frame.poolId) != PoolId.unwrap(invocation.key.toId())) revert IKernelHook.Unauthorized();
-        KernelHookState.Installation storage installation = state.installations[frame.poolId][extension];
+        if (frame.extension() != extension) revert IKernelHook.Unauthorized();
+        if (PoolId.unwrap(frame.poolId()) != PoolId.unwrap(invocation.key.toId())) revert IKernelHook.Unauthorized();
+        KernelHookState.Installation storage installation = state.installations[frame.poolId()][extension];
         if (extension.codehash != installation.entry.codeHash) revert IKernelHook.ExtensionCodeMismatch();
-        ++runtime.activeInvocations[frame.poolId][extension];
-        CallbackResult memory result = _callExtension(runtime, installation, invocation);
+        KernelHookOperations.enterInvocation(frame.poolId(), extension);
+        CallbackResult memory result = _callExtension(installation, invocation, frame.callback());
         next = _accumulate(invocation.aggregate, result);
         _validateResult(frame, invocation.key, invocation.data, result, next);
-        _settleExtensionDelta(manager, vault, frame.poolId, extension, invocation.key.currency0, result.delta0);
-        _settleExtensionDelta(manager, vault, frame.poolId, extension, invocation.key.currency1, result.delta1);
-        if (frame.callback.isInitialization()) installation.completedInitializationCallbacks |= frame.callback.mask();
-        --runtime.activeInvocations[frame.poolId][extension];
+        _settleExtensionDelta(manager, vault, frame.poolId(), extension, invocation.key.currency0, result.delta0);
+        _settleExtensionDelta(manager, vault, frame.poolId(), extension, invocation.key.currency1, result.delta1);
+        if (frame.callback().isInitialization()) {
+            installation.completedInitializationCallbacks |= frame.callback().mask();
+        }
+        KernelHookOperations.exitInvocation(frame.poolId(), extension);
     }
 
     function _callExtension(
-        KernelHookOperations.Runtime storage runtime,
         KernelHookState.Installation storage installation,
-        Invocation memory invocation
+        Invocation memory invocation,
+        CallbackType callback
     ) private returns (CallbackResult memory) {
-        // BoundedCall caps return and revert data so extension payloads cannot exhaust the caller's gas.
-        (bool success, bytes memory response) = BoundedCall.tryCall(
-            invocation.extension,
-            gasleft(),
-            abi.encodeCall(
-                IKernelHookExtension.onCallback,
-                (
-                    KernelHookOperations.context(runtime),
-                    invocation.key,
-                    installation.settings.configuration,
-                    invocation.data
-                )
-            ),
-            KernelHookConstants.CALLBACK_RESULT_BYTES
+        bytes memory input = abi.encodeCall(
+            IKernelHookExtension.onCallback,
+            (KernelHookOperations.context(), invocation.key, installation.settings.configuration, invocation.data)
         );
+        uint256 gasLimit = installation.settings.callbackGasLimits[uint8(callback)];
+        // The invocation gas of this self-call covers the work before this point and the 1/64 that the EVM keeps
+        // back, so the extension receives its whole gas limit. Less gas would charge KernelHook's cost to it.
+        if (gasleft() < gasLimit + gasLimit / 63 + KernelHookConstants.COLD_CALL_GAS) {
+            revert IKernelHook.GasBudgetExceeded();
+        }
+        // BoundedCall caps return and revert data so extension payloads cannot exhaust the caller's gas.
+        (bool success, bytes memory response) =
+            BoundedCall.tryCall(invocation.extension, gasLimit, input, KernelHookConstants.CALLBACK_RESULT_BYTES);
+        // Pass the extension's revert data on unchanged. The dispatch loop adds the extension and the callback once:
+        // in ExtensionFailed for a required extension, or in ExtensionSkipped for an optional one.
         if (!success) {
-            revert IKernelHook.ExtensionFailed(
-                invocation.extension, KernelHookOperations.currentFrame(runtime).callback, response
-            );
+            assembly ("memory-safe") {
+                revert(add(response, 32), mload(response))
+            }
         }
         return abi.decode(response, (CallbackResult));
     }
@@ -112,79 +112,79 @@ library KernelHookDispatch {
 
     /// @notice Runs the active subscribers of one callback in their configured order.
     /// @param state The pool, installation, and callback-order state
-    /// @param runtime The operation stack and active invocation counts
     /// @param key The pool key of the current operation
     /// @param callback The callback to run
     /// @param data The encoded callback arguments
     /// @return aggregate The accumulated result of successful extension attempts
     function runCallbacks(
         KernelHookState.State storage state,
-        KernelHookOperations.Runtime storage runtime,
         PoolKey calldata key,
         CallbackType callback,
         bytes memory data
     ) public returns (CallbackResult memory aggregate) {
-        KernelHookOperations.OperationFrame storage frame = KernelHookOperations.currentFrame(runtime);
-        frame.callback = callback;
-        frame.callbackStartGas = gasleft();
-        frame.callbackGasBudget = state.pools[frame.poolId].callbackGasBudgets[uint8(callback)];
-        frame.remainingMandatoryGas = KernelHookState.mandatoryCallbackGas(state, frame.poolId, callback);
-        address[] storage order = state.callbackOrders[frame.poolId][callback];
+        OperationFrame frame = KernelHookOperations.currentFrame();
+        frame.setCallback(callback);
+        frame.setCallbackStartGas(gasleft());
+        frame.setCallbackGasBudget(state.pools[frame.poolId()].callbackGasBudgets[uint8(callback)]);
+        frame.setRemainingMandatoryGas(KernelHookState.mandatoryCallbackGas(state, frame.poolId(), callback));
+        address[] storage order = state.callbackOrders[frame.poolId()][callback];
         CallbackSequence memory sequence = CallbackSequence(key, data, aggregate);
         // order.length <= MAX_EXTENSIONS
         for (uint256 i; i < order.length; ++i) {
-            _attemptExtension(state, runtime, sequence, order[i], order.length - i - 1);
+            _attemptExtension(state, sequence, order[i], order.length - i - 1);
         }
-        frame.extension = address(0);
-        if (frame.callbackStartGas - gasleft() > frame.callbackGasBudget) revert IKernelHook.GasBudgetExceeded();
+        frame.setExtension(address(0));
+        if (frame.callbackStartGas() - gasleft() > frame.callbackGasBudget()) revert IKernelHook.GasBudgetExceeded();
         return sequence.aggregate;
     }
 
     function _attemptExtension(
         KernelHookState.State storage state,
-        KernelHookOperations.Runtime storage runtime,
         CallbackSequence memory sequence,
         address extension,
         uint256 remainingCount
     ) private {
-        KernelHookOperations.OperationFrame storage frame = KernelHookOperations.currentFrame(runtime);
-        KernelHookState.Installation storage installation = state.installations[frame.poolId][extension];
+        OperationFrame frame = KernelHookOperations.currentFrame();
+        KernelHookState.Installation storage installation = state.installations[frame.poolId()][extension];
         uint32 bit = uint32(1) << installation.extensionIndex;
         if (!installation.active) return;
-        if (frame.skippedExtensions & bit != 0) return;
+        if (frame.skippedExtensions() & bit != 0) return;
         bool optional = installation.settings.optionalCallbacks;
-        if (!_passesReentrancyRule(runtime, frame, installation, extension, bit, optional)) return;
+        if (!_passesReentrancyRule(frame, installation, extension, bit, optional)) return;
 
-        uint256 gasLimit = installation.settings.callbackGasLimits[uint8(frame.callback)];
+        uint256 invocationGas = KernelHookState.invocationGas(
+            installation.settings.callbackGasLimits[uint8(frame.callback())],
+            frame.callback(),
+            installation.configurationWords
+        );
         bytes memory input = abi.encodeCall(
             IKernelCallbackRunner.invokeExtension, (extension, sequence.key, sequence.data, sequence.aggregate)
         );
-        if (!_admitCallbackGas(frame, extension, bit, gasLimit, optional, remainingCount)) return;
+        if (!_admitCallbackGas(frame, extension, bit, invocationGas, optional, remainingCount)) return;
 
         // Validation and settlement share this self-call with the extension callback.
         // If it fails, all effects of that extension roll back before an optional skip.
-        frame.extension = extension;
+        frame.setExtension(extension);
         (bool success, bytes memory response) =
-            BoundedCall.tryCall(address(this), gasLimit, input, KernelHookConstants.CALLBACK_RESULT_BYTES);
-        frame.extension = address(0);
+            BoundedCall.tryCall(address(this), invocationGas, input, KernelHookConstants.CALLBACK_RESULT_BYTES);
+        frame.setExtension(address(0));
         // tryCall succeeds only if the response is exactly one CallbackResult.
         if (!success) {
             _handleAttemptFailure(frame, extension, bit, optional, response);
             return;
         }
         sequence.aggregate = abi.decode(response, (CallbackResult));
-        if (!optional) frame.remainingMandatoryGas -= gasLimit;
+        if (!optional) frame.setRemainingMandatoryGas(frame.remainingMandatoryGas() - invocationGas);
     }
 
     function _passesReentrancyRule(
-        KernelHookOperations.Runtime storage runtime,
-        KernelHookOperations.OperationFrame storage frame,
+        OperationFrame frame,
         KernelHookState.Installation storage installation,
         address extension,
         uint32 bit,
         bool optional
     ) private returns (bool) {
-        if (runtime.activeInvocations[frame.poolId][extension] == 0) return true;
+        if (KernelHookOperations.activeInvocations(frame.poolId(), extension) == 0) return true;
         if (!optional) {
             if (!installation.entry.supportsReentrancy) revert IKernelHook.ReentrancyDenied();
             return true;
@@ -194,69 +194,68 @@ library KernelHookDispatch {
     }
 
     function _admitCallbackGas(
-        KernelHookOperations.OperationFrame storage frame,
+        OperationFrame frame,
         address extension,
         uint32 bit,
-        uint256 gasLimit,
+        uint256 invocationGas,
         bool optional,
         uint256 remainingCount
     ) private returns (bool) {
-        if (_hasCallbackGas(frame, gasLimit, optional, remainingCount)) return true;
+        if (_hasCallbackGas(frame, invocationGas, optional, remainingCount)) return true;
         if (!optional) revert IKernelHook.GasBudgetExceeded();
         _skipExtension(frame, extension, bit, abi.encodePacked(IKernelHook.GasBudgetExceeded.selector));
         return false;
     }
 
     function _handleAttemptFailure(
-        KernelHookOperations.OperationFrame storage frame,
+        OperationFrame frame,
         address extension,
         uint32 bit,
         bool optional,
         bytes memory response
     ) private {
-        if (!optional) revert IKernelHook.ExtensionFailed(extension, frame.callback, response);
+        if (!optional) revert IKernelHook.ExtensionFailed(extension, frame.callback(), response);
         // A failed optional after attempt rolls back only that attempt,
         // preserving an earlier successful before attempt.
         _skipExtension(frame, extension, bit, response);
     }
 
-    function _hasCallbackGas(
-        KernelHookOperations.OperationFrame storage frame,
-        uint256 gasLimit,
-        bool optional,
-        uint256 remainingCount
-    ) private view returns (bool) {
+    function _hasCallbackGas(OperationFrame frame, uint256 invocationGas, bool optional, uint256 remainingCount)
+        private
+        view
+        returns (bool)
+    {
         // Keep gas for returning to the PoolManager, mandatory callbacks still to run,
         // and the overhead of each remaining iteration.
-        uint256 reserveGas = KernelHookConstants.RETURN_GAS_RESERVE + frame.remainingMandatoryGas + remainingCount
+        uint256 reserveGas = KernelHookConstants.RETURN_GAS_RESERVE + frame.remainingMandatoryGas() + remainingCount
             * KernelHookConstants.ITERATION_GAS_RESERVE;
-        // The current mandatory limit is charged below, so it must not also remain in the reserve.
-        if (!optional) reserveGas -= gasLimit;
-        uint256 spentGas = frame.callbackStartGas - gasleft();
-        if (spentGas + gasLimit + reserveGas > frame.callbackGasBudget) return false;
+        // The current mandatory call is charged below, so it must not also remain in the reserve.
+        if (!optional) reserveGas -= invocationGas;
+        uint256 spentGas = frame.callbackStartGas() - gasleft();
+        if (spentGas + invocationGas + reserveGas > frame.callbackGasBudget()) return false;
         uint256 availableGas = gasleft();
-        // Allow EIP-150 forwarding headroom (a call receives at most 63/64 of the remaining gas) in addition
-        // to the reserve for the work after the call.
-        uint256 forwardingGas = gasLimit + gasLimit / 63 + reserveGas;
+        // Allow EIP-150 forwarding headroom (a call receives at most 63/64 of the remaining gas) for this call, and
+        // for the later required calls in the reserve, so that this call cannot take their headroom.
+        uint256 forwardingGas = invocationGas + invocationGas / 63 + reserveGas + reserveGas / 63;
         return availableGas >= forwardingGas;
     }
 
     function _validateResult(
-        KernelHookOperations.OperationFrame storage frame,
+        OperationFrame frame,
         PoolKey memory key,
         bytes memory data,
         CallbackResult memory result,
         CallbackResult memory aggregate
     ) private view {
-        if (frame.callback == CallbackType.BeforeSwap) {
+        if (frame.callback() == CallbackType.BeforeSwap) {
             _validateBeforeSwapResult(key, data, result, aggregate);
             return;
         }
-        if (frame.callback == CallbackType.AfterSwap) {
+        if (frame.callback() == CallbackType.AfterSwap) {
             _validateAfterSwapResult(frame, data, result, aggregate);
             return;
         }
-        _validateNonSwapResult(frame.callback, result);
+        _validateNonSwapResult(frame.callback(), result);
     }
 
     function _validateBeforeSwapResult(
@@ -277,7 +276,7 @@ library KernelHookDispatch {
     }
 
     function _validateAfterSwapResult(
-        KernelHookOperations.OperationFrame storage frame,
+        OperationFrame frame,
         bytes memory data,
         CallbackResult memory result,
         CallbackResult memory aggregate
@@ -289,7 +288,7 @@ library KernelHookDispatch {
         if (specified != 0) revert IKernelHook.InvalidDelta();
         if (result.feeOverride != 0) revert IKernelHook.InvalidFeeOverride();
         // Uniswap combines these deltas after the callback returns, so their sum must still fit.
-        int256 combined = int256(frame.beforeSwapUnspecifiedDelta) + int256(unspecified);
+        int256 combined = int256(frame.beforeSwapUnspecifiedDelta()) + int256(unspecified);
         if (combined > type(int128).max) revert IKernelHook.DeltaOverflow();
         if (combined < type(int128).min) revert IKernelHook.DeltaOverflow();
     }
@@ -323,14 +322,9 @@ library KernelHookDispatch {
         }
     }
 
-    function _skipExtension(
-        KernelHookOperations.OperationFrame storage frame,
-        address extension,
-        uint32 bit,
-        bytes memory reason
-    ) private {
+    function _skipExtension(OperationFrame frame, address extension, uint32 bit, bytes memory reason) private {
         // A skip lasts through the rest of this operation, including its after callback.
-        frame.skippedExtensions |= bit;
-        emit IKernelHook.ExtensionSkipped(frame.poolId, extension, frame.callback, reason);
+        frame.setSkippedExtensions(frame.skippedExtensions() | bit);
+        emit IKernelHook.ExtensionSkipped(frame.poolId(), extension, frame.callback(), reason);
     }
 }

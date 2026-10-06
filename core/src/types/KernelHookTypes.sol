@@ -54,6 +54,8 @@ struct ExtensionSettings {
     /// @notice The gas limit for onInstall, onConfigure, onUninstall, canActivate and canUninstall.
     uint32 lifecycleGasLimit;
     /// @notice The gas limit of each callback, indexed by CallbackType. Only subscribed entries are used.
+    /// @dev The extension's onCallback receives exactly this much gas. KernelHook's own work around the call,
+    /// including the settlement of the result's deltas, uses a separate reserve that the pool's budget pays.
     uint32[CALLBACK_COUNT] callbackGasLimits;
     /// @notice Extension-defined data. KernelHook passes it back in onCallback and onUninstall, and inside
     /// the settings in onInstall, onConfigure and canActivate.

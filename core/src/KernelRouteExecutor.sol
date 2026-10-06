@@ -35,7 +35,8 @@ contract KernelRouteExecutor is IUnlockCallback {
     /// @return The installation's open position count.
     mapping(PoolId => mapping(address => uint256)) public openPositionCount;
     mapping(bytes32 => uint256) private _liquidity;
-    bool private _unlockInProgress;
+    /// @dev True while this contract's own PoolManager unlock runs. Transient: the EVM clears it after each transaction.
+    bool private transient _unlockInProgress;
 
     error InvalidRoute();
     error InvalidLiquidity();

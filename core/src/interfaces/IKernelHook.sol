@@ -72,9 +72,14 @@ interface IKernelHook {
     error InvalidDelta();
 
     /// @notice Thrown when a required (not optional) extension callback fails.
+    /// @dev reason is one of: the extension's revert data; its return data, if that is not exactly one
+    /// CallbackResult; or the error of KernelHook's check or settlement of the result. KernelHook raises
+    /// GasBudgetExceeded here when its own reserve cannot give the extension its whole gas limit, for example with
+    /// very large hookData; an extension can also raise the same error itself. Empty data can also mean that the
+    /// settlement ran out of gas, for example with a token whose transfer costs more than a standard ERC20 transfer.
     /// @param extension The extension that failed
     /// @param callback The callback that failed
-    /// @param reason Up to 256 bytes of the revert data
+    /// @param reason Up to 256 bytes of the revert or return data
     error ExtensionFailed(address extension, CallbackType callback, bytes reason);
 
     /// @notice Thrown when preparePool is called for a pool key that is already prepared.
@@ -225,6 +230,10 @@ interface IKernelHook {
     /// @notice Reserves a pool key for the caller, who must then initialize the pool in the PoolManager.
     /// @dev The caller is the pool's only admin until initialization. A factory can prepare and initialize
     /// a pool, grant admin to its user, and then revoke its own role.
+    /// WARNING: the first caller reserves the key permanently, and a reservation does not expire. Any account can
+    /// reserve a key first and never initialize it. The key is then blocked, but other keys are not: a pool with a
+    /// different fee or tick spacing has a different key. To keep the gap small, prepare, install, and initialize
+    /// in one transaction from a factory contract.
     /// @param key The pool key. key.hooks must be this contract.
     function preparePool(PoolKey calldata key) external;
 
@@ -284,6 +293,16 @@ interface IKernelHook {
         uint32[CALLBACK_COUNT] calldata callbackGasBudgets
     ) external;
 
+    /// @notice Runs several calls to this contract in order, in one transaction. If one call fails, all fail.
+    /// @dev Use it to change a live pool without a gap in which swaps run without its extensions: deactivate the
+    /// subscribers, make the change, and activate them again. Each activation calls canActivate again, so each
+    /// extension accepts the new set of subscribers, their order and the limits. A management call that needs
+    /// inactive subscribers (installExtension, configureExtension, removeExtension, setCallbackOrder,
+    /// setExecutionLimits) can therefore run on a live pool. Each call keeps its own caller and its own checks.
+    /// @param data The encoded calls
+    /// @return results The return data of each call
+    function multicall(bytes[] calldata data) external returns (bytes[] memory results);
+
     /// @notice Grants a pool role to an account.
     /// @dev Only a pool admin can call this. POOL_ADMIN_ROLE can be granted only after initialization.
     /// @param key The pool key
@@ -300,7 +319,8 @@ interface IKernelHook {
 
     /// @notice Runs a nested route of PoolManager actions for the extension whose callback runs now.
     /// @dev Only that extension can call this, and only if its installation allows nesting. All nested work
-    /// uses the gas limit of the current callback. Net debts are paid from the extension's own vault balance.
+    /// uses the gas limit of the current callback, including KernelHook's reserves for the extension calls of each
+    /// nested operation. Net debts are paid from the extension's own vault balance.
     /// @param actions The actions, in order
     /// @return The balance delta of each action
     function executeRoute(RouteAction[] calldata actions) external returns (BalanceDelta[] memory);
@@ -359,4 +379,7 @@ interface IKernelHook {
 
     /// @notice Returns the context of the operation in progress, or an empty context if there is none.
     function currentContext() external view returns (ExecutionContext memory);
+
+    /// @notice The number of authorized nested actions that have not finished. Zero outside an operation.
+    function ticketCount() external view returns (uint256);
 }

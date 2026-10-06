@@ -12,7 +12,7 @@ import {CallbackLibrary} from "./libraries/CallbackLibrary.sol";
 import {KernelHookConfiguration} from "./libraries/KernelHookConfiguration.sol";
 import {KernelHookConstants} from "./libraries/KernelHookConstants.sol";
 import {KernelHookDispatch} from "./libraries/KernelHookDispatch.sol";
-import {KernelHookOperations} from "./libraries/KernelHookOperations.sol";
+import {KernelHookOperations, OperationFrame} from "./libraries/KernelHookOperations.sol";
 import {KernelHookState} from "./libraries/KernelHookState.sol";
 import {
     CALLBACK_COUNT,
@@ -34,13 +34,14 @@ import {SwapParams, ModifyLiquidityParams} from "v4-core/src/types/PoolOperation
 import {BalanceDelta, toBalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, toBeforeSwapDelta} from "v4-core/src/types/BeforeSwapDelta.sol";
 import {BaseHook} from "uniswap-hooks/src/base/BaseHook.sol";
+import {Multicall} from "@openzeppelin/contracts/utils/Multicall.sol";
 
 /// @notice A Uniswap v4 hook in which each pool controls an ordered list of extensions.
 /// @dev Deploy to an address mined for all fourteen hook flags. See IKernelHook for the execution model.
 /// Preparation reserves one exact PoolId for its preparer, who must initialize it directly.
 /// Catalog admission is checked only at installation; the copied entry and code hash of an installation
 /// do not change afterwards.
-contract KernelHook is BaseHook, IKernelHook, IKernelCallbackRunner, IKernelExecutorCallback {
+contract KernelHook is BaseHook, Multicall, IKernelHook, IKernelCallbackRunner, IKernelExecutorCallback {
     using TransientStateLibrary for IPoolManager;
 
     uint256 public constant MAX_EXTENSIONS = KernelHookConstants.MAX_EXTENSIONS;
@@ -57,6 +58,10 @@ contract KernelHook is BaseHook, IKernelHook, IKernelCallbackRunner, IKernelExec
 
     KernelHookOperations.Runtime private _runtime;
 
+    /// @dev True during a management call, so that no pool operation can start inside it. The EVM clears transient
+    /// storage at the end of each transaction; managementLock also clears it at the end of each call.
+    bool private transient _managementInProgress;
+
     constructor(IPoolManager manager, address catalog) BaseHook(manager) {
         if (catalog.code.length == 0) revert InvalidConfiguration();
         CATALOG = IHookCatalog(catalog);
@@ -69,9 +74,9 @@ contract KernelHook is BaseHook, IKernelHook, IKernelCallbackRunner, IKernelExec
     /// can start: lifecycle calls go to untrusted extensions, which could otherwise start a swap.
     modifier managementLock() {
         _requireIdle();
-        _runtime.managementInProgress = true;
+        _managementInProgress = true;
         _;
-        _runtime.managementInProgress = false;
+        _managementInProgress = false;
     }
 
     /// @inheritdoc IKernelHook
@@ -125,6 +130,15 @@ contract KernelHook is BaseHook, IKernelHook, IKernelCallbackRunner, IKernelExec
         uint32[CALLBACK_COUNT] calldata callbackGasBudgets
     ) external managementLock {
         KernelHookConfiguration.setExecutionLimits(_state, key, maxOperationDepth, callbackGasBudgets);
+    }
+
+    /// @inheritdoc IKernelHook
+    /// @dev Each call is a delegatecall to this contract, so it keeps msg.sender and all of its caller checks: a batch
+    /// gives no right that the caller does not have alone. Each management call takes the management lock itself.
+    /// The PoolManager callbacks, invokeExtension and the route executor callbacks check msg.sender, so a batch
+    /// cannot reach them. The function is not payable, so a batch cannot reuse msg.value.
+    function multicall(bytes[] calldata data) public override(IKernelHook, Multicall) returns (bytes[] memory results) {
+        return super.multicall(data);
     }
 
     /// @inheritdoc IKernelHook
@@ -194,26 +208,31 @@ contract KernelHook is BaseHook, IKernelHook, IKernelCallbackRunner, IKernelExec
 
     /// @inheritdoc IKernelHook
     function currentContext() external view returns (ExecutionContext memory) {
-        return KernelHookOperations.context(_runtime);
+        return KernelHookOperations.context();
+    }
+
+    /// @inheritdoc IKernelHook
+    function ticketCount() external view returns (uint256) {
+        return KernelHookOperations.ticketCount();
     }
 
     /// @inheritdoc IKernelHook
     /// @dev The route executor keeps Uniswap v4 hook dispatch for nested actions, and settles net debts
     /// without borrowing the inventory of another installation.
     function executeRoute(RouteAction[] calldata actions) external returns (BalanceDelta[] memory) {
-        if (_runtime.frames.length == 0) revert NestingDenied();
+        if (KernelHookOperations.frameCount() == 0) revert NestingDenied();
         if (VAULT.transferInProgress()) revert NestingDenied();
-        KernelHookOperations.OperationFrame storage frame = KernelHookOperations.currentFrame(_runtime);
+        OperationFrame frame = KernelHookOperations.currentFrame();
         KernelHookState.Installation storage installation =
-            KernelHookState.requireInstalled(_state, frame.poolId, msg.sender);
-        if (frame.extension != msg.sender) revert NestingDenied();
+            KernelHookState.requireInstalled(_state, frame.poolId(), msg.sender);
+        if (frame.extension() != msg.sender) revert NestingDenied();
         if (!installation.settings.allowNesting) revert NestingDenied();
-        if (poolManager.isUnlocked()) return ROUTE_EXECUTOR.executeWhileUnlocked(frame.poolId, msg.sender, actions);
+        if (poolManager.isUnlocked()) return ROUTE_EXECUTOR.executeWhileUnlocked(frame.poolId(), msg.sender, actions);
         // Only initialize can run while the PoolManager is locked. The route executor must then unlock the
         // PoolManager itself, which KernelHook allows only from afterInitialize. Such a route can act on any
         // initialized pool, and on this new pool only through the initial-liquidity seed exception.
-        if (frame.callback != CallbackType.AfterInitialize) revert NestingDenied();
-        return ROUTE_EXECUTOR.unlockAndExecute(frame.poolId, msg.sender, actions);
+        if (frame.callback() != CallbackType.AfterInitialize) revert NestingDenied();
+        return ROUTE_EXECUTOR.unlockAndExecute(frame.poolId(), msg.sender, actions);
     }
 
     /// @inheritdoc IKernelHook
@@ -229,16 +248,16 @@ contract KernelHook is BaseHook, IKernelHook, IKernelCallbackRunner, IKernelExec
         KernelHookOperations.pushExitFrame(_runtime, poolId, msg.sender);
         results = ROUTE_EXECUTOR.unlockAndExecute(poolId, msg.sender, actions);
         // Each nested action must have closed its own frame and ticket.
-        if (_runtime.frames.length != 1) revert UnexpectedCallback();
-        if (_runtime.tickets.length != 0) revert UnexpectedCallback();
-        KernelHookOperations.popFrame(_runtime);
+        if (KernelHookOperations.frameCount() != 1) revert UnexpectedCallback();
+        if (KernelHookOperations.ticketCount() != 0) revert UnexpectedCallback();
+        KernelHookOperations.popFrame();
     }
 
     /// @inheritdoc IKernelExecutorCallback
     function authorizeAction(RouteAction calldata action) external {
         if (msg.sender != address(ROUTE_EXECUTOR)) revert Unauthorized();
-        if (_runtime.frames.length == 0) revert Unauthorized();
-        KernelHookOperations.OperationFrame storage parent = KernelHookOperations.currentFrame(_runtime);
+        if (KernelHookOperations.frameCount() == 0) revert Unauthorized();
+        OperationFrame parent = KernelHookOperations.currentFrame();
         _requireNestingAllowed(parent, action);
         PoolId targetPoolId = action.key.toId();
         KernelHookState.validatePoolKey(action.key);
@@ -247,17 +266,17 @@ contract KernelHook is BaseHook, IKernelHook, IKernelCallbackRunner, IKernelExec
             if (!isInitialLiquiditySeed) revert PoolNotInitialized();
         }
         _requireDepthBelowLimits(targetPoolId);
-        if (!isInitialLiquiditySeed) KernelHookOperations.requireNoReentryInto(_runtime, targetPoolId);
+        if (!isInitialLiquiditySeed) KernelHookOperations.requireNoReentryInto(targetPoolId);
         CallbackType beforeCallback = CallbackLibrary.beforeCallbackOf(action.operation);
         KernelHookOperations.pushTicket(
-            _runtime, KernelHookOperations.actionHash(action.key, beforeCallback, action.parameters, action.hookData)
+            KernelHookOperations.actionHash(action.key, beforeCallback, action.parameters, action.hookData)
         );
     }
 
     /// @inheritdoc IKernelExecutorCallback
     function finishAction() external {
         if (msg.sender != address(ROUTE_EXECUTOR)) revert Unauthorized();
-        KernelHookOperations.popTicket(_runtime);
+        KernelHookOperations.popTicket();
     }
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
@@ -323,7 +342,7 @@ contract KernelHook is BaseHook, IKernelHook, IKernelCallbackRunner, IKernelExec
         bool specified0 = (params.amountSpecified < 0) == params.zeroForOne;
         int128 specified = specified0 ? result.delta0 : result.delta1;
         int128 unspecified = specified0 ? result.delta1 : result.delta0;
-        KernelHookOperations.currentFrame(_runtime).beforeSwapUnspecifiedDelta = unspecified;
+        KernelHookOperations.currentFrame().setBeforeSwapUnspecifiedDelta(unspecified);
         return (IHooks.beforeSwap.selector, toBeforeSwapDelta(specified, unspecified), result.feeOverride);
     }
 
@@ -426,14 +445,14 @@ contract KernelHook is BaseHook, IKernelHook, IKernelCallbackRunner, IKernelExec
         CallbackResult calldata aggregate
     ) external returns (CallbackResult memory) {
         KernelHookDispatch.Invocation memory invocation = KernelHookDispatch.Invocation(extension, key, data, aggregate);
-        return KernelHookDispatch.invokeExtension(_state, _runtime, poolManager, VAULT, invocation);
+        return KernelHookDispatch.invokeExtension(_state, poolManager, VAULT, invocation);
     }
 
     function _runCallbacks(PoolKey calldata key, CallbackType callback, bytes memory data)
         private
         returns (CallbackResult memory)
     {
-        return KernelHookDispatch.runCallbacks(_state, _runtime, key, callback, data);
+        return KernelHookDispatch.runCallbacks(_state, key, callback, data);
     }
 
     function _beginOperation(
@@ -443,14 +462,14 @@ contract KernelHook is BaseHook, IKernelHook, IKernelCallbackRunner, IKernelExec
         bytes memory parameters,
         bytes memory hookData
     ) private {
-        if (_runtime.managementInProgress) revert ExecutionInProgress();
+        if (_managementInProgress) revert ExecutionInProgress();
         if (VAULT.transferInProgress()) revert ExecutionInProgress();
         PoolId poolId = KernelHookState.requireKnownPool(_state, key);
         bytes32 hash = KernelHookOperations.actionHash(key, callback, parameters, hookData);
-        if (_runtime.frames.length != 0) {
+        if (KernelHookOperations.frameCount() != 0) {
             // A nested operation: only the route executor can start it, with the ticket of this exact action.
             if (sender != address(ROUTE_EXECUTOR)) revert UnexpectedCallback();
-            KernelHookOperations.consumeTicket(_runtime, hash);
+            KernelHookOperations.consumeTicket(hash);
         } else if (callback != CallbackType.BeforeInitialize) {
             // A top-level operation other than initialize needs an initialized pool.
             if (!KernelHookState.isInitialized(_state, poolId)) revert PoolNotInitialized();
@@ -465,53 +484,51 @@ contract KernelHook is BaseHook, IKernelHook, IKernelCallbackRunner, IKernelExec
         bytes memory parameters,
         bytes memory hookData
     ) private view {
-        bytes32 expectedHash = KernelHookOperations.requireMatchingFrame(_runtime, sender, beforeCallback);
+        bytes32 expectedHash = KernelHookOperations.requireMatchingFrame(sender, beforeCallback);
         bytes32 hash = KernelHookOperations.actionHash(key, beforeCallback, parameters, hookData);
         if (hash != expectedHash) revert UnexpectedCallback();
     }
 
     function _endOperation() private {
-        KernelHookOperations.popFrame(_runtime);
+        KernelHookOperations.popFrame();
     }
 
     function _requireIdle() private view {
-        KernelHookOperations.requireIdle(_runtime);
+        if (_managementInProgress) revert ExecutionInProgress();
+        KernelHookOperations.requireIdle();
         if (VAULT.transferInProgress()) revert ExecutionInProgress();
     }
 
     /// @dev Inside a callback, only the active installation can route, and only if it allows nesting.
     /// In the synthetic exit frame of unwindPositions, only liquidity removals and fee collections are allowed.
-    function _requireNestingAllowed(KernelHookOperations.OperationFrame storage parent, RouteAction calldata action)
-        private
-        view
-    {
-        if (parent.extension == address(0)) revert NestingDenied();
-        if (parent.isExitContext) {
+    function _requireNestingAllowed(OperationFrame parent, RouteAction calldata action) private view {
+        if (parent.extension() == address(0)) revert NestingDenied();
+        if (parent.isExitContext()) {
             if (action.operation != Operation.ModifyLiquidity) revert NestingDenied();
             if (abi.decode(action.parameters, (ModifyLiquidityParams)).liquidityDelta > 0) revert NestingDenied();
             return;
         }
-        if (!_state.installations[parent.poolId][parent.extension].settings.allowNesting) revert NestingDenied();
+        if (!_state.installations[parent.poolId()][parent.extension()].settings.allowNesting) revert NestingDenied();
     }
 
     /// @dev Nested actions need an initialized pool, with one exception: in afterInitialize, an installation
     /// of that pool may add (or collect) liquidity before KernelHook marks the pool Initialized.
-    function _isInitialLiquiditySeed(
-        KernelHookOperations.OperationFrame storage parent,
-        PoolId targetPoolId,
-        RouteAction calldata action
-    ) private view returns (bool) {
+    function _isInitialLiquiditySeed(OperationFrame parent, PoolId targetPoolId, RouteAction calldata action)
+        private
+        view
+        returns (bool)
+    {
         if (_state.pools[targetPoolId].status != PoolStatus.Initializing) return false;
-        if (PoolId.unwrap(targetPoolId) != PoolId.unwrap(parent.poolId)) return false;
-        if (parent.callback != CallbackType.AfterInitialize) return false;
+        if (PoolId.unwrap(targetPoolId) != PoolId.unwrap(parent.poolId())) return false;
+        if (parent.callback() != CallbackType.AfterInitialize) return false;
         if (action.operation != Operation.ModifyLiquidity) return false;
         return abi.decode(action.parameters, (ModifyLiquidityParams)).liquidityDelta >= 0;
     }
 
     /// @dev Both the target pool and the root pool limit how deep a route can go.
     function _requireDepthBelowLimits(PoolId targetPoolId) private view {
-        uint256 depth = KernelHookOperations.operationDepth(_runtime);
-        PoolId rootPoolId = _runtime.frames[0].poolId;
+        uint256 depth = KernelHookOperations.operationDepth();
+        PoolId rootPoolId = KernelHookOperations.frameAt(0).poolId();
         if (depth >= _state.pools[targetPoolId].maxOperationDepth) revert DepthLimitReached();
         if (depth >= _state.pools[rootPoolId].maxOperationDepth) revert DepthLimitReached();
     }

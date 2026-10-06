@@ -26,6 +26,13 @@ library CallbackLibrary {
         return callback == CallbackType.BeforeInitialize || callback == CallbackType.AfterInitialize;
     }
 
+    /// @notice Returns true for the callbacks whose result can contain deltas: both swap callbacks and the after
+    /// callbacks of a liquidity change. The result of every other callback must be zero.
+    function canReturnDeltas(CallbackType callback) internal pure returns (bool) {
+        return callback == CallbackType.BeforeSwap || callback == CallbackType.AfterSwap
+            || callback == CallbackType.AfterAddLiquidity || callback == CallbackType.AfterRemoveLiquidity;
+    }
+
     /// @notice Returns true for the after callback of a swap, a liquidity change, or a donation.
     /// @dev AfterInitialize is not included: initialization is not a route Operation.
     function isAfterOperation(CallbackType callback) internal pure returns (bool) {

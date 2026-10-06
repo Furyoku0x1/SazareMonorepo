@@ -63,6 +63,8 @@ library KernelHookConfiguration {
         installation.extensionIndex = uint8(pool.extensions.length);
         installation.entry = entry;
         installation.settings = settings;
+        // _validateSettings limits the configuration to MAX_CONFIGURATION_BYTES, which is 256 words.
+        installation.configurationWords = uint16((settings.configuration.length + 31) / 32);
         pool.extensions.push(account);
         _subscribe(state, poolId, account, settings.callbackMask);
         _callLifecycleHook(
@@ -102,6 +104,8 @@ library KernelHookConfiguration {
             IKernelHookExtension.onConfigure.selector
         );
         installation.settings = settings;
+        // _validateSettings limits the configuration to MAX_CONFIGURATION_BYTES, which is 256 words.
+        installation.configurationWords = uint16((settings.configuration.length + 31) / 32);
         emit IKernelHook.ExtensionConfigured(poolId, account);
     }
 
@@ -197,7 +201,11 @@ library KernelHookConfiguration {
         if (maxOperationDepth > KernelHookConstants.MAX_OPERATION_DEPTH) revert IKernelHook.InvalidExecutionLimits();
         // i < CALLBACK_COUNT
         for (uint256 i; i < CALLBACK_COUNT; ++i) {
-            if (callbackGasBudgets[i] < KernelHookConstants.RETURN_GAS_RESERVE + KernelHookConstants.MIN_CALL_GAS) {
+            // A budget must fit at least one extension call with the smallest gas limit.
+            uint256 smallestCall = KernelHookState.invocationGas(KernelHookConstants.MIN_CALL_GAS, CallbackType(i), 0);
+            uint256 smallestBudget = KernelHookConstants.RETURN_GAS_RESERVE + KernelHookConstants.SEQUENCE_GAS_RESERVE
+                + KernelHookConstants.ITERATION_GAS_RESERVE + smallestCall;
+            if (callbackGasBudgets[i] < smallestBudget) {
                 revert IKernelHook.InvalidExecutionLimits();
             }
         }
@@ -304,8 +312,8 @@ library KernelHookConfiguration {
             // The reserves that the dispatch gas check keeps at the start of a callback sequence: the limits
             // of the active required callbacks, the return work, and the loop overhead of each subscriber.
             uint256 requiredGas = KernelHookState.mandatoryCallbackGas(state, poolId, CallbackType(i))
-                + KernelHookConstants.RETURN_GAS_RESERVE + state.callbackOrders[poolId][CallbackType(i)].length
-                * KernelHookConstants.ITERATION_GAS_RESERVE;
+                + KernelHookConstants.RETURN_GAS_RESERVE + KernelHookConstants.SEQUENCE_GAS_RESERVE
+                + state.callbackOrders[poolId][CallbackType(i)].length * KernelHookConstants.ITERATION_GAS_RESERVE;
             if (requiredGas > state.pools[poolId].callbackGasBudgets[i]) revert IKernelHook.GasBudgetExceeded();
         }
     }

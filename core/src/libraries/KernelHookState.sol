@@ -4,6 +4,8 @@ pragma solidity 0.8.37;
 import {IHookCatalog} from "../interfaces/IHookCatalog.sol";
 import {IKernelHook} from "../interfaces/IKernelHook.sol";
 import {CALLBACK_COUNT, CallbackType, ExtensionSettings, PoolStatus} from "../types/KernelHookTypes.sol";
+import {CallbackLibrary} from "./CallbackLibrary.sol";
+import {KernelHookConstants} from "./KernelHookConstants.sol";
 import {LPFeeLibrary} from "v4-core/src/libraries/LPFeeLibrary.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
@@ -33,6 +35,9 @@ library KernelHookState {
         uint8 extensionIndex;
         /// @dev A callback mask of the initialization callbacks that this installation has completed.
         uint16 completedInitializationCallbacks;
+        /// @dev The size of settings.configuration in 32-byte words. The gas checks of each callback read this copy,
+        /// which shares a slot with active, instead of the configuration's own slot.
+        uint16 configurationWords;
         /// @dev A copy of the catalog entry at installation time.
         IHookCatalog.Entry entry;
         ExtensionSettings settings;
@@ -81,7 +86,7 @@ library KernelHookState {
         return state.pools[poolId].status == PoolStatus.Initialized;
     }
 
-    /// @notice Returns the sum of the callback gas limits of the active, required (not optional) subscribers of callback.
+    /// @notice Returns the sum of the invocation gas of the active, required (not optional) subscribers of callback.
     /// @dev KernelHook reserves this gas so that an optional extension cannot use gas that a required one needs.
     function mandatoryCallbackGas(State storage state, PoolId poolId, CallbackType callback)
         internal
@@ -94,7 +99,25 @@ library KernelHookState {
             Installation storage installation = state.installations[poolId][order[i]];
             if (!installation.active) continue;
             if (installation.settings.optionalCallbacks) continue;
-            gasAmount += installation.settings.callbackGasLimits[uint8(callback)];
+            gasAmount += invocationGas(
+                installation.settings.callbackGasLimits[uint8(callback)], callback, installation.configurationWords
+            );
         }
+    }
+
+    /// @notice Returns the gas that one extension call takes from a callback's budget: the extension's gas limit,
+    /// the gas that the EVM keeps back on the way to the extension, and KernelHook's own reserve.
+    /// @dev The gas passes three calls: the self-call to KernelHook, the delegatecall into the dispatch library, and
+    /// the call to the extension. Each call keeps back 1/64 of the available gas (EIP-150). The dispatch loop's
+    /// admission check adds the headroom of the self-call; this amount covers the other two, as (64/63)^2 < 1 + 1/31.
+    function invocationGas(uint256 gasLimit, CallbackType callback, uint256 configurationWords)
+        internal
+        pure
+        returns (uint256)
+    {
+        uint256 reserve = KernelHookConstants.INVOCATION_GAS_RESERVE + configurationWords
+            * KernelHookConstants.CONFIGURATION_WORD_GAS;
+        if (CallbackLibrary.canReturnDeltas(callback)) reserve += KernelHookConstants.SETTLEMENT_GAS_RESERVE;
+        return gasLimit + gasLimit / 31 + reserve;
     }
 }

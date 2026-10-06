@@ -7,12 +7,12 @@ import {PoolId} from "v4-core/src/types/PoolId.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 
 /// @notice Funds are isolated by pool, extension and currency. Pool and catalog administrators cannot withdraw them.
 /// @dev Extensions enforce their users' ownership and withdrawal rights. Withdrawal remains available
 /// while an installation is inactive. Tokens that charge transfer fees are rejected on deposits and payments.
-contract KernelHookVault is ReentrancyGuard {
+contract KernelHookVault is ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
     /// @notice The kernel hook authorized to manage this vault.
