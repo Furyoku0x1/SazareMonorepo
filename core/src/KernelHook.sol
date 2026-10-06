@@ -4,7 +4,6 @@ pragma solidity 0.8.37;
 import {IHookCatalog} from "./interfaces/IHookCatalog.sol";
 import {IHookExtension} from "./interfaces/IHookExtension.sol";
 import {IKernelHook} from "./interfaces/IKernelHook.sol";
-import {IKernelCallbackRunner} from "./interfaces/callback/IKernelCallbackRunner.sol";
 import {IKernelExecutorCallback} from "./interfaces/callback/IKernelExecutorCallback.sol";
 import {KernelHookVault} from "./KernelHookVault.sol";
 import {KernelRouteExecutor} from "./KernelRouteExecutor.sol";
@@ -41,7 +40,7 @@ import {Multicall} from "@openzeppelin/contracts/utils/Multicall.sol";
 /// Preparation reserves one exact PoolId for its preparer, who must initialize it directly.
 /// Catalog admission is checked only at installation; the copied entry and code hash of an installation
 /// do not change afterwards.
-contract KernelHook is BaseHook, Multicall, IKernelHook, IKernelCallbackRunner, IKernelExecutorCallback {
+contract KernelHook is BaseHook, Multicall, IKernelHook, IKernelExecutorCallback {
     using TransientStateLibrary for IPoolManager;
 
     uint256 public constant MAX_EXTENSIONS = KernelHookConstants.MAX_EXTENSIONS;
@@ -135,7 +134,7 @@ contract KernelHook is BaseHook, Multicall, IKernelHook, IKernelCallbackRunner, 
     /// @inheritdoc IKernelHook
     /// @dev Each call is a delegatecall to this contract, so it keeps msg.sender and all of its caller checks: a batch
     /// gives no right that the caller does not have alone. Each management call takes the management lock itself.
-    /// The PoolManager callbacks, invokeExtension and the route executor callbacks check msg.sender, so a batch
+    /// The PoolManager callbacks and the route executor callbacks check msg.sender, so a batch
     /// cannot reach them. The function is not payable, so a batch cannot reuse msg.value.
     function multicall(bytes[] calldata data) public override(IKernelHook, Multicall) returns (bytes[] memory results) {
         return super.multicall(data);
@@ -437,22 +436,13 @@ contract KernelHook is BaseHook, Multicall, IKernelHook, IKernelCallbackRunner, 
         return IHooks.afterDonate.selector;
     }
 
-    /// @inheritdoc IKernelCallbackRunner
-    function invokeExtension(
-        address extension,
-        PoolKey calldata key,
-        bytes calldata data,
-        CallbackResult calldata aggregate
-    ) external returns (CallbackResult memory) {
-        KernelHookDispatch.Invocation memory invocation = KernelHookDispatch.Invocation(extension, key, data, aggregate);
-        return KernelHookDispatch.invokeExtension(_state, poolManager, VAULT, invocation);
-    }
-
     function _runCallbacks(PoolKey calldata key, CallbackType callback, bytes memory data)
         private
         returns (CallbackResult memory)
     {
-        return KernelHookDispatch.runCallbacks(_state, key, callback, data);
+        return KernelHookDispatch.runCallbacks(
+            _state, poolManager, VAULT, address(KernelHookDispatch), key, callback, data
+        );
     }
 
     function _beginOperation(

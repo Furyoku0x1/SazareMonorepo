@@ -12,8 +12,10 @@ import {KernelHookVault} from "../../src/KernelHookVault.sol";
 import {CallbackLibrary} from "../../src/libraries/CallbackLibrary.sol";
 import {KernelHookConstants} from "../../src/libraries/KernelHookConstants.sol";
 import {KernelHookState} from "../../src/libraries/KernelHookState.sol";
+import {KernelHookDispatch} from "../../src/libraries/KernelHookDispatch.sol";
 import {
     CALLBACK_COUNT,
+    CallbackResult,
     CallbackType,
     ExecutionContext,
     ExtensionSettings,
@@ -284,7 +286,7 @@ contract DispatchTest is KernelHookFixture {
 
     /// @dev The largest measured use of INVOCATION_GAS_RESERVE: an initialization callback has no settlement reserve,
     /// and it also records the completed callback. With cold storage, KernelHook's own work around the call is about
-    /// 27,500 gas. The extension uses about 9,500 of the smallest gas limit (10,000), so the work after the call gets
+    /// 22,500 gas. The extension uses about 9,500 of the smallest gas limit (10,000), so the work after the call gets
     /// almost no spare gas from it.
     function test_dispatch_reserveCoversColdInitializationCallback() public {
         hook.preparePool(key);
@@ -304,6 +306,25 @@ contract DispatchTest is KernelHookFixture {
         vm.expectEmit(true, true, false, true, address(extension));
         emit CodexDispatchRecorder.CallbackReceived(address(extension), CallbackType.AfterInitialize);
         manager.initialize(key, SQRT_PRICE_1_1);
+    }
+
+    /// @dev The dispatch loop delegatecalls KernelHookDispatch.invokeExtension in KernelHook's context. A direct call
+    /// runs in the library's own context; Solidity's library call protection rejects it with no data, before the
+    /// function's own checks (which would revert with Unauthorized, as the library has no open frame).
+    function test_invokeExtension_rejectsDirectCallToTheLibrary() public {
+        bytes memory input = abi.encodeWithSelector(
+            KernelHookDispatch.invokeExtension.selector,
+            uint256(0),
+            address(manager),
+            address(hook.VAULT()),
+            address(1),
+            key,
+            bytes(""),
+            CallbackResult(0, 0, 0)
+        );
+        (bool success, bytes memory reason) = address(KernelHookDispatch).call(input);
+        assertFalse(success);
+        assertEq(reason.length, 0);
     }
 
     /// @dev The extension spends almost all of its 200,000 gas limit. KernelHook's own work before and after the

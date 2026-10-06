@@ -107,9 +107,9 @@ library KernelHookState {
 
     /// @notice Returns the gas that one extension call takes from a callback's budget: the extension's gas limit,
     /// the gas that the EVM keeps back on the way to the extension, and KernelHook's own reserve.
-    /// @dev The gas passes three calls: the self-call to KernelHook, the delegatecall into the dispatch library, and
-    /// the call to the extension. Each call keeps back 1/64 of the available gas (EIP-150). The dispatch loop's
-    /// admission check adds the headroom of the self-call; this amount covers the other two, as (64/63)^2 < 1 + 1/31.
+    /// @dev The gas passes two calls: the delegatecall into the dispatch library, and the call to the extension.
+    /// Each call keeps back 1/64 of the available gas (EIP-150). The dispatch loop's admission check adds the headroom
+    /// of the delegatecall. The call to the extension needs gasLimit / 63; gasLimit / 31 keeps a margin above that.
     function invocationGas(uint256 gasLimit, CallbackType callback, uint256 configurationWords)
         internal
         pure

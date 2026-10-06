@@ -44,12 +44,12 @@ library KernelHookConstants {
     /// @notice The gas kept for the loop overhead of each extension in a sequence that has not run yet.
     uint256 internal constant ITERATION_GAS_RESERVE = 25_000;
 
-    /// @notice The gas that KernelHook adds to each extension call for its own work: the self-call into the
+    /// @notice The gas that KernelHook adds to each extension call for its own work: the delegatecall into the
     /// dispatch library, the checks, the reentry counter, the context, and the validation of the result.
     /// The extension's gas limit does not pay for it.
-    /// @dev Measured at about 27,500 gas without configuration bytes in the worst case: an initialization callback
-    /// with cold storage, which also records the completed callback. KernelHook copies the callback data several
-    /// times on the way to the extension, so the margin also limits the hookData size that fits.
+    /// @dev Measured at about 22,500 gas without configuration bytes in the worst case: an initialization callback
+    /// with cold storage, which also records the completed callback. KernelHook encodes the callback data twice on
+    /// the way to the extension, so the margin also limits the hookData size that fits.
     uint256 internal constant INVOCATION_GAS_RESERVE = 40_000;
 
     /// @notice The gas that KernelHook also adds to each call of a callback that can return deltas, to settle

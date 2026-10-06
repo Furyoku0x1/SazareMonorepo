@@ -31,6 +31,30 @@ library BoundedCall {
         }
     }
 
+    /// @notice Delegatecalls target, and reports success only if target returns exactly expectedSize bytes.
+    /// @dev The same bounds as tryCall. The target's code runs in the caller's context, and all of its effects
+    /// (storage, transient storage, logs and nested calls) roll back if it reverts, as with a call.
+    /// @return success True if the delegatecall succeeded and returned exactly expectedSize bytes.
+    /// @return output Up to MAX_RETURNDATA_BYTES of the return or revert data.
+    function tryDelegateCall(address target, uint256 gasLimit, bytes memory input, uint256 expectedSize)
+        internal
+        returns (bool success, bytes memory output)
+    {
+        assembly ("memory-safe") {
+            success := delegatecall(gasLimit, target, add(input, 32), mload(input), 0, 0)
+            let size := returndatasize()
+            if gt(size, MAX_RETURNDATA_BYTES) {
+                size := MAX_RETURNDATA_BYTES
+                success := 0
+            }
+            if and(success, iszero(eq(size, expectedSize))) { success := 0 }
+            output := mload(0x40)
+            mstore(output, size)
+            returndatacopy(add(output, 32), 0, size)
+            mstore(0x40, and(add(add(output, 63), size), not(31)))
+        }
+    }
+
     /// @notice Static-calls target, and reports success only if target returns exactly one 32-byte word.
     /// @dev Return or revert data whose size is not 32 bytes is discarded: output is then empty.
     /// @return success True if the call succeeded and returned exactly 32 bytes.

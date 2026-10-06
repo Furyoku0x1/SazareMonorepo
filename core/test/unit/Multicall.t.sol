@@ -5,7 +5,6 @@ import {KernelHookFixture} from "../utils/KernelHookFixture.sol";
 import {MockExtension} from "../mocks/MockExtension.sol";
 import {IHookExtension} from "../../src/interfaces/IHookExtension.sol";
 import {IKernelHook} from "../../src/interfaces/IKernelHook.sol";
-import {IKernelCallbackRunner} from "../../src/interfaces/callback/IKernelCallbackRunner.sol";
 import {CallbackResult, CallbackType} from "../../src/types/KernelHookTypes.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {PoolId} from "v4-core/src/types/PoolId.sol";
@@ -63,22 +62,22 @@ contract MulticallTest is KernelHookFixture {
         hook.multicall(_installBatch());
     }
 
-    /// @dev Each call is a delegatecall, so msg.sender is the batch caller, not KernelHook. The live extension makes
-    /// the attempt from inside its own callback, where its frame is open, so only the caller check can reject it.
-    function test_multicall_cannotReachInvokeExtension() public {
-        bytes[] memory calls = new bytes[](1);
-        calls[0] = abi.encodeCall(
-            IKernelCallbackRunner.invokeExtension, (address(live), poolKey, "", CallbackResult(0, 0, 0))
-        );
-        live.setExternalCall(CallbackType.BeforeSwap, address(hook), abi.encodeCall(IKernelHook.multicall, (calls)));
-        bytes memory failure = abi.encodeWithSelector(
-            IKernelHook.ExtensionFailed.selector,
+    /// @dev KernelHook has no invokeExtension entry point: the dispatch loop delegatecalls the dispatch library
+    /// directly. The old selector reaches no function, alone or in a batch, and KernelHook has no fallback function.
+    function test_multicall_cannotReachAnExtensionCall() public {
+        bytes memory call = abi.encodeWithSignature(
+            "invokeExtension(address,(address,address,uint24,int24,address),bytes,(int128,int128,uint24))",
             address(live),
-            CallbackType.BeforeSwap,
-            abi.encodeWithSelector(IKernelHook.Unauthorized.selector)
+            poolKey,
+            bytes(""),
+            CallbackResult(0, 0, 0)
         );
-        vm.expectRevert(_hookRevert(IHooks.beforeSwap.selector, failure));
-        _swapExactInput(poolKey, true, 1e14);
+        (bool success,) = address(hook).call(call);
+        assertFalse(success);
+        bytes[] memory calls = new bytes[](1);
+        calls[0] = call;
+        vm.expectRevert();
+        hook.multicall(calls);
     }
 
     /// @dev Deactivate the live subscriber, install the new extension, and activate both again.
