@@ -91,8 +91,13 @@ contract MockExtension is IKernelHookExtension {
         _callData[callback] = data;
     }
 
-    /// @notice Deposits tokens that this contract holds into its own vault balance for the pool.
-    function deposit(PoolId poolId, Currency currency, uint256 amount) external {
+    /// @notice Deposits tokens that this contract holds, or the native currency sent with this call, into its own
+    /// vault balance for the pool.
+    function deposit(PoolId poolId, Currency currency, uint256 amount) external payable {
+        if (Currency.unwrap(currency) == address(0)) {
+            VAULT.deposit{value: amount}(poolId, address(this), currency, amount);
+            return;
+        }
         IERC20(Currency.unwrap(currency)).approve(address(VAULT), amount);
         VAULT.deposit(poolId, address(this), currency, amount);
     }
