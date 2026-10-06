@@ -16,8 +16,8 @@ library KernelHookConstants {
 
     /// @notice The gas budget of each callback sequence in a newly prepared pool.
     /// @dev Fits 8 required extensions with a 100,000 gas limit and no configuration each, on a callback that can
-    /// return deltas: 8 * (100,000 + 3,225 + 270,000) + RETURN_GAS_RESERVE + SEQUENCE_GAS_RESERVE
-    /// + 8 * ITERATION_GAS_RESERVE = 3,345,800.
+    /// return deltas: 8 * (100,000 + 3,225 + 250,000) + RETURN_GAS_RESERVE + SEQUENCE_GAS_RESERVE
+    /// + 8 * (ITERATION_GAS_RESERVE + SUBSCRIBER_GAS_RESERVE) = 3,226,800.
     uint32 internal constant DEFAULT_CALLBACK_GAS_BUDGET = 4_000_000;
 
     /// @notice The lower bound of the lifecycle gas limit and of each subscribed callback gas limit.
@@ -29,11 +29,17 @@ library KernelHookConstants {
     /// @notice The gas kept for the work after the last extension of a callback sequence returns.
     uint256 internal constant RETURN_GAS_RESERVE = 80_000;
 
-    /// @notice The gas that a callback sequence uses for its own setup before the first extension: the frame fields
-    /// for the sequence and the sum of the required invocation gas. The callback's budget pays for it.
-    /// @dev Sized for three new storage writes of frame fields (about 66,000 gas). The frames are now in transient
-    /// storage, so this reserve is larger than needed until it is measured again.
-    uint256 internal constant SEQUENCE_GAS_RESERVE = 80_000;
+    /// @notice The gas that a callback sequence uses for its own setup and its first admission check, apart from the
+    /// work for each subscriber. The callback's budget pays for it.
+    /// @dev Measured at about 14,500 gas with cold storage.
+    uint256 internal constant SEQUENCE_GAS_RESERVE = 25_000;
+
+    /// @notice The gas that the setup of a callback sequence uses for each subscriber: it reads the subscriber's
+    /// settings to sum the required invocation gas before the first extension runs. The callback's budget pays for it.
+    /// @dev Measured at about 10,000 gas for a required subscriber with cold storage. The setup reads all subscribers
+    /// before the first admission check, so a reserve for each subscriber is necessary: a fixed reserve does not
+    /// cover a long callback order.
+    uint256 internal constant SUBSCRIBER_GAS_RESERVE = 12_000;
 
     /// @notice The gas kept for the loop overhead of each extension in a sequence that has not run yet.
     uint256 internal constant ITERATION_GAS_RESERVE = 25_000;
@@ -41,9 +47,10 @@ library KernelHookConstants {
     /// @notice The gas that KernelHook adds to each extension call for its own work: the self-call into the
     /// dispatch library, the checks, the reentry counter, the context, and the validation of the result.
     /// The extension's gas limit does not pay for it.
-    /// @dev Measured at about 51,000 gas without configuration bytes, while the reentry counter was in persistent
-    /// storage. The counter is now transient, so this reserve is larger than needed until it is measured again.
-    uint256 internal constant INVOCATION_GAS_RESERVE = 60_000;
+    /// @dev Measured at about 27,500 gas without configuration bytes in the worst case: an initialization callback
+    /// with cold storage, which also records the completed callback. KernelHook copies the callback data several
+    /// times on the way to the extension, so the margin also limits the hookData size that fits.
+    uint256 internal constant INVOCATION_GAS_RESERVE = 40_000;
 
     /// @notice The gas that KernelHook also adds to each call of a callback that can return deltas, to settle
     /// them with the PoolManager and the vault.

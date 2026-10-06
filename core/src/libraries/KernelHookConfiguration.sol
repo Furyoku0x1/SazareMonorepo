@@ -204,7 +204,7 @@ library KernelHookConfiguration {
             // A budget must fit at least one extension call with the smallest gas limit.
             uint256 smallestCall = KernelHookState.invocationGas(KernelHookConstants.MIN_CALL_GAS, CallbackType(i), 0);
             uint256 smallestBudget = KernelHookConstants.RETURN_GAS_RESERVE + KernelHookConstants.SEQUENCE_GAS_RESERVE
-                + KernelHookConstants.ITERATION_GAS_RESERVE + smallestCall;
+                + KernelHookConstants.ITERATION_GAS_RESERVE + KernelHookConstants.SUBSCRIBER_GAS_RESERVE + smallestCall;
             if (callbackGasBudgets[i] < smallestBudget) {
                 revert IKernelHook.InvalidExecutionLimits();
             }
@@ -307,13 +307,15 @@ library KernelHookConfiguration {
     }
 
     function _requireBudgetsCoverMandatoryGas(KernelHookState.State storage state, PoolId poolId) private view {
+        uint256 subscriberGas = KernelHookConstants.ITERATION_GAS_RESERVE + KernelHookConstants.SUBSCRIBER_GAS_RESERVE;
         // i < CALLBACK_COUNT
         for (uint8 i; i < CALLBACK_COUNT; ++i) {
             // The reserves that the dispatch gas check keeps at the start of a callback sequence: the limits
             // of the active required callbacks, the return work, and the loop overhead of each subscriber.
+            // The setup of the sequence, which reads every subscriber, is spent before that check.
             uint256 requiredGas = KernelHookState.mandatoryCallbackGas(state, poolId, CallbackType(i))
                 + KernelHookConstants.RETURN_GAS_RESERVE + KernelHookConstants.SEQUENCE_GAS_RESERVE
-                + state.callbackOrders[poolId][CallbackType(i)].length * KernelHookConstants.ITERATION_GAS_RESERVE;
+                + state.callbackOrders[poolId][CallbackType(i)].length * subscriberGas;
             if (requiredGas > state.pools[poolId].callbackGasBudgets[i]) revert IKernelHook.GasBudgetExceeded();
         }
     }

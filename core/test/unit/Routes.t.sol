@@ -30,14 +30,14 @@ contract RoutesTest is KernelHookFixture {
     using StateLibrary for IPoolManager;
 
     /// @dev A route runs inside the callback gas limit, together with the reserves of the nested operation's own
-    /// extension calls. 2,500,000 + 80,645 + 270,000 + 80,000 (return) + 80,000 (sequence setup) + 25,000 = 3,035,645
-    /// fits the default budget of 4,000,000.
+    /// extension calls. 2,500,000 + 80,645 + 250,000 + 80,000 (return) + 25,000 (sequence setup) + 25,000 + 12,000
+    /// = 2,972,645 fits the default budget of 4,000,000.
     uint32 internal constant ROUTE_GAS_LIMIT = 2_500_000;
     uint256 internal constant VAULT_FUNDS = 1e16;
     uint256 internal constant ROUTE_SWAP_AMOUNT = 1e12;
     uint128 internal constant ROUTE_LIQUIDITY = 1e15;
     /// @dev Two required routers on the same callbacks must fit the budget together:
-    /// 2 * (1,200,000 + 38,709 + 270,000) + 80,000 + 80,000 + 2 * 25,000 = 3,227,418.
+    /// 2 * (1,200,000 + 38,709 + 250,000) + 80,000 + 25,000 + 2 * (25,000 + 12,000) = 3,156,418.
     uint32 internal constant TWO_ROUTERS_GAS_LIMIT = 1_200_000;
     bytes32 internal constant SALT = bytes32(uint256(1));
 

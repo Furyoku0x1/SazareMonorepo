@@ -127,7 +127,7 @@ contract DispatchTest is KernelHookFixture {
     }
 
     function testFuzz_dispatch_skipsOptionalGasAdmissionWithExactReason(uint32 gasLimit) public {
-        // 3,600,000 + 116,129 + 270,000 (invocation reserves) + 80,000 (return) is above the default 4,000,000.
+        // 3,600,000 + 116,129 + 250,000 (invocation reserves) + 80,000 (return) is above the default 4,000,000.
         gasLimit = uint32(bound(gasLimit, 3_600_000, 5_000_000));
         _createPool(key);
         _addLiquidity(key);
@@ -150,9 +150,9 @@ contract DispatchTest is KernelHookFixture {
         _admit(address(required));
         hook.installExtension(key, optional, _settings(SWAP_CALLBACKS, true, false));
         hook.installExtension(key, required, _settings(SWAP_CALLBACKS, false, false));
-        // Each call needs 786,129 gas. Activation needs 786,129 + 80,000 (return) + 80,000 (sequence setup)
-        // + 2 * 25,000 = 996,129. The optional call must also keep the required call's 786,129 in reserve
-        // (about 1,750,000 with the setup and the return reserve), so only the required call fits.
+        // Each call needs 766,129 gas. Activation needs 766,129 + 80,000 (return) + 25,000 (sequence setup)
+        // + 2 * (25,000 + 12,000) = 945,129. The optional call must also keep the required call's 766,129 in reserve
+        // (1,637,258 with the return and iteration reserves), so only the required call fits.
         _setBudgets(1_300_000);
         hook.activateExtension(key, optional);
         hook.activateExtension(key, required);
@@ -183,8 +183,8 @@ contract DispatchTest is KernelHookFixture {
             _admit(extensions[i]);
             hook.installExtension(key, IHookExtension(extensions[i]), _settings(SWAP_CALLBACKS, true, false));
         }
-        // One call needs 786,129 + 80,000 + 2 * 25,000 = 916,129. After two calls of about 350,000 each, the third
-        // call needs about 1,566,000.
+        // One call needs 766,129 + 80,000 + 2 * 25,000 = 896,129. After two calls of about 350,000 each, the third
+        // call needs about 1,546,000.
         _setBudgets(1_400_000);
         for (uint256 i; i < extensions.length; ++i) {
             hook.activateExtension(key, IHookExtension(extensions[i]));
@@ -226,20 +226,39 @@ contract DispatchTest is KernelHookFixture {
         assertEq(hook.VAULT().balanceOf(poolId, address(extension), currency0), 1e10);
     }
 
-    /// @dev The smallest budget that activation accepts for one required extension must also let it run: the
-    /// budget pays for the sequence's own setup (new frame fields) before the extension's admission check.
-    /// 80,000 (return) + 80,000 (sequence setup) + 25,000 (one iteration) + 280,322 (invocation gas) = 465,322.
-    function test_dispatch_requiredExtensionRunsAtActivationBoundary() public {
+    /// @dev The smallest budget that activation accepts must also let all required extensions run. The setup of the
+    /// sequence reads every subscriber (about 10,000 gas each with cold storage) before the first admission check,
+    /// so a fixed setup reserve fails with many subscribers: the activation check must count them.
+    function test_dispatch_requiredExtensionsRunAtActivationBoundary() public {
         _createPool(key);
         _addLiquidity(key);
-        NoopExtension extension = new NoopExtension(address(hook), CallbackType.BeforeSwap, 0, 0);
-        _admit(address(extension));
-        hook.installExtension(key, extension, _settings(SWAP_CALLBACKS, false, false, 10_000));
-        uint256 boundary = KernelHookConstants.RETURN_GAS_RESERVE + KernelHookConstants.SEQUENCE_GAS_RESERVE
-            + KernelHookConstants.ITERATION_GAS_RESERVE
-            + KernelHookState.invocationGas(10_000, CallbackType.BeforeSwap, 0);
+        uint256 count = KernelHookConstants.MAX_EXTENSIONS;
+        NoopExtension[] memory extensions = new NoopExtension[](count);
+        for (uint256 i; i < count; ++i) {
+            extensions[i] = new NoopExtension(address(hook), CallbackType.BeforeSwap, 0, 0);
+            _admit(address(extensions[i]));
+            hook.installExtension(key, extensions[i], _settings(SWAP_CALLBACKS, false, false, 10_000));
+        }
+        uint256 boundary = KernelHookConstants.RETURN_GAS_RESERVE + KernelHookConstants.SEQUENCE_GAS_RESERVE + count
+            * (KernelHookConstants.ITERATION_GAS_RESERVE
+                + KernelHookConstants.SUBSCRIBER_GAS_RESERVE
+                + KernelHookState.invocationGas(10_000, CallbackType.BeforeSwap, 0));
+        // One gas less is refused: the boundary is the smallest budget that activation accepts.
+        _setBudgets(uint32(boundary - 1));
+        for (uint256 i; i < count - 1; ++i) {
+            hook.activateExtension(key, extensions[i]);
+        }
+        vm.expectRevert(IKernelHook.GasBudgetExceeded.selector);
+        hook.activateExtension(key, extensions[count - 1]);
+        for (uint256 i; i < count - 1; ++i) {
+            hook.deactivateExtension(key, extensions[i]);
+        }
         _setBudgets(uint32(boundary));
-        hook.activateExtension(key, extension);
+        for (uint256 i; i < count; ++i) {
+            hook.activateExtension(key, extensions[i]);
+        }
+        // A swap is the first access of the transaction: the setup reads every subscriber from cold storage.
+        vm.cool(address(hook));
 
         _swapExactInput(key, true, 1e14);
     }
@@ -261,6 +280,30 @@ contract DispatchTest is KernelHookFixture {
         _swapExactInput(key, true, 1e14);
 
         assertEq(hook.VAULT().balanceOf(poolId, address(extension), currency0), 1e10);
+    }
+
+    /// @dev The largest measured use of INVOCATION_GAS_RESERVE: an initialization callback has no settlement reserve,
+    /// and it also records the completed callback. With cold storage, KernelHook's own work around the call is about
+    /// 27,500 gas. The extension uses about 9,500 of the smallest gas limit (10,000), so the work after the call gets
+    /// almost no spare gas from it.
+    function test_dispatch_reserveCoversColdInitializationCallback() public {
+        hook.preparePool(key);
+        CodexDispatchRecorder extension = new CodexDispatchRecorder();
+        extension.setGasToBurn(6500);
+        _installAndActivate(
+            key,
+            address(extension),
+            _settings(CallbackLibrary.INITIALIZATION_CALLBACKS_MASK, false, false, KernelHookConstants.MIN_CALL_GAS)
+        );
+        // Initialize is the first access of the transaction to KernelHook's storage and to the extension.
+        vm.cool(address(hook));
+        vm.cool(address(extension));
+
+        vm.expectEmit(true, true, false, true, address(extension));
+        emit CodexDispatchRecorder.CallbackReceived(address(extension), CallbackType.BeforeInitialize);
+        vm.expectEmit(true, true, false, true, address(extension));
+        emit CodexDispatchRecorder.CallbackReceived(address(extension), CallbackType.AfterInitialize);
+        manager.initialize(key, SQRT_PRICE_1_1);
     }
 
     /// @dev The extension spends almost all of its 200,000 gas limit. KernelHook's own work before and after the

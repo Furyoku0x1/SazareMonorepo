@@ -18,7 +18,8 @@ contract KernelHookGasTest is KernelHookFixture {
     string internal constant GROUP = "KernelHook";
     uint256 internal constant SWAP_AMOUNT = 1e14;
 
-    /// @dev Eight required extensions at this limit fit the default budget: 8 * 100,000 + 80,000 + 8 * 25,000.
+    /// @dev Eight required extensions at this limit fit the default budget:
+    /// 8 * (100,000 + 3,225 + 250,000) + 80,000 + 25,000 + 8 * (25,000 + 12,000) = 3,226,800.
     uint32 internal constant NOOP_GAS_LIMIT = 100_000;
 
     uint16 internal constant ADD_LIQUIDITY_CALLBACKS =

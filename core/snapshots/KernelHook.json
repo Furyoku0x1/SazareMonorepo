@@ -1,3 +1,23 @@
 {
-  "swap_8Extensions": "806526"
+  "activateExtension": "113046",
+  "addLiquidity_1Extension": "431969",
+  "addLiquidity_noHook": "298576",
+  "donate_1Extension": "278698",
+  "donate_noHook": "148595",
+  "initialize_0Extensions": "176396",
+  "installExtension": "351125",
+  "preparePool": "172311",
+  "removeExtension": "108188",
+  "removeLiquidity_1Extension": "254603",
+  "removeLiquidity_noHook": "121025",
+  "swap_0Extensions": "200985",
+  "swap_1Extension": "279572",
+  "swap_1ExtensionWithFee": "378203",
+  "swap_1MockExtension": "484829",
+  "swap_1MockExtensionWithRouteOf1Swap": "799180",
+  "swap_2Extensions": "358164",
+  "swap_2OptionalExtensions": "351538",
+  "swap_4Extensions": "515365",
+  "swap_8Extensions": "829827",
+  "swap_noHook": "144092"
 }

@@ -322,7 +322,7 @@ contract KernelHookInvariantTest is StdInvariant, KernelHookFixture {
                 _settings(callbackMasks[j], optionalCallbacks[j], allowNesting[j], gasLimits[j])
             );
         }
-        // The required router and fee taker need 2,850,645 + 786,129 + 80,000 + 80,000 + 3 * 25,000 = 3,871,774,
+        // The required router and fee taker need 2,830,645 + 766,129 + 80,000 + 25,000 + 3 * 37,000 = 3,812,774,
         // which fits the default budget of 4,000,000.
         // extensionIndex < 3
         for (uint256 j; j < 3; ++j) {

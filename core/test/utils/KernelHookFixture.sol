@@ -39,7 +39,8 @@ abstract contract KernelHookFixture is Test {
     int24 internal constant TICK_SPACING = 60;
 
     /// @dev Enough for MockExtension, which writes several storage slots on its first call. With the default
-    /// callback gas budget of a pool (2,000,000), three required extensions fit: 3 * 500,000 + 80,000 + 3 * 25,000.
+    /// callback gas budget of a pool (4,000,000), four required extensions fit on a callback that can return deltas:
+    /// 4 * (500,000 + 16,129 + 250,000) + 80,000 + 25,000 + 4 * (25,000 + 12,000) = 3,317,516.
     /// Tests with more required extensions use _settings with a smaller gas limit.
     uint32 internal constant DEFAULT_CALLBACK_GAS_LIMIT = 500_000;
     uint32 internal constant DEFAULT_LIFECYCLE_GAS_LIMIT = 200_000;

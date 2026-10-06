@@ -656,11 +656,11 @@ contract ExtensionActivationTest is CodexLifecycleFixture {
         assertFalse(active);
     }
 
-    /// @dev The default budget is 4,000,000. One required swap extension needs limit + limit / 31 + 270,000
-    /// (invocation reserves) + 80,000 (return) + 80,000 (sequence setup) + 25,000 (one iteration).
-    /// 3,434,220 + 110,781 + 455,000 = 4,000,001.
+    /// @dev The default budget is 4,000,000. One required swap extension needs limit + limit / 31 + 250,000
+    /// (invocation reserves) + 80,000 (return) + 25,000 (sequence setup) + 25,000 (one iteration) + 12,000 (one
+    /// subscriber). 3,495,251 + 112,750 + 392,000 = 4,000,001.
     function testFuzz_activateExtension_revertsWhenMandatoryGasExceedsBudget(uint32 gasLimit) public {
-        gasLimit = uint32(bound(gasLimit, 3_434_220, 5_000_000));
+        gasLimit = uint32(bound(gasLimit, 3_495_251, 5_000_000));
         hook.installExtension(poolKey, extension, _settings(SWAP_CALLBACKS, false, false, gasLimit));
         vm.expectRevert(abi.encodeWithSelector(IKernelHook.GasBudgetExceeded.selector));
         hook.activateExtension(poolKey, extension);
@@ -668,9 +668,9 @@ contract ExtensionActivationTest is CodexLifecycleFixture {
         assertFalse(active);
     }
 
-    /// @dev 3,434,219 + 110,781 + 455,000 = 4,000,000, exactly the default budget.
+    /// @dev 3,495,250 + 112,750 + 392,000 = 4,000,000, exactly the default budget.
     function test_activateExtension_acceptsMandatoryGasAtBudgetBoundary() public {
-        hook.installExtension(poolKey, extension, _settings(SWAP_CALLBACKS, false, false, 3_434_219));
+        hook.installExtension(poolKey, extension, _settings(SWAP_CALLBACKS, false, false, 3_495_250));
         hook.activateExtension(poolKey, extension);
         (bool active,,) = hook.extensionConfiguration(poolId, address(extension));
         assertTrue(active);
@@ -683,8 +683,9 @@ contract ExtensionActivationTest is CodexLifecycleFixture {
         assertTrue(active);
     }
 
-    /// @dev Each fits the default budget of 4,000,000 alone (the second needs 3,551,774). Together they need
-    /// (500,000 + 16,129 + 270,000) + (3,000,000 + 96,774 + 270,000) + 80,000 + 80,000 + 2 * 25,000 = 4,362,903.
+    /// @dev Each fits the default budget of 4,000,000 alone (the second needs 3,525,774, with both subscribers in the
+    /// order). Together they need (500,000 + 16,129 + 250,000) + (3,000,000 + 96,774 + 250,000) + 80,000 + 25,000
+    /// + 2 * (25,000 + 12,000) = 4,291,903.
     function test_activateExtension_revertsWhenCombinedMandatoryGasExceedsBudget() public {
         _install();
         CodexLifecycleExtension second = _installSecond(SWAP_CALLBACKS);
@@ -1048,11 +1049,12 @@ contract ExtensionOrderAndLimitsTest is CodexLifecycleFixture {
         assertEq(hook.callbackOrder(poolId, CallbackType.BeforeSwap), _order(address(extension)));
     }
 
-    /// @dev 465,322 is the smallest budget of a callback that can return deltas: 80,000 (return) + 80,000 (sequence
-    /// setup) + 25,000 (one iteration) + 10,000 (MIN_CALL_GAS) + 322 + 270,000 (invocation reserves).
+    /// @dev 402,322 is the smallest budget of a callback that can return deltas: 80,000 (return) + 25,000 (sequence
+    /// setup) + 25,000 (one iteration) + 12,000 (one subscriber) + 10,000 (MIN_CALL_GAS) + 322 + 250,000 (invocation
+    /// reserves).
     function testFuzz_setExecutionLimits_storesValidLimits(uint8 depth, uint32 budget) public {
         depth = uint8(bound(depth, 1, 8));
-        budget = uint32(bound(budget, 465_322, type(uint32).max));
+        budget = uint32(bound(budget, 402_322, type(uint32).max));
         uint32[CALLBACK_COUNT] memory budgets = _budgets(budget);
         hook.setExecutionLimits(poolKey, depth, budgets);
         (,, uint8 storedDepth, uint32[CALLBACK_COUNT] memory storedBudgets) = hook.poolState(poolId);
@@ -1081,9 +1083,9 @@ contract ExtensionOrderAndLimitsTest is CodexLifecycleFixture {
     function testFuzz_setExecutionLimits_revertsWhenCallbackBudgetIsTooLow(uint8 callback, uint32 budget) public {
         callback = uint8(bound(callback, 0, CALLBACK_COUNT - 1));
         uint32[CALLBACK_COUNT] memory budgets = _budgets(2_000_000);
-        // The smallest budget is 80,000 + 80,000 + 25,000 + 10,322 + 60,000, plus 210,000 for a callback that can
-        // return deltas.
-        uint32 smallestBudget = CallbackLibrary.canReturnDeltas(CallbackType(callback)) ? 465_322 : 255_322;
+        // The smallest budget is 80,000 + 25,000 + 25,000 + 12,000 + 10,322 + 40,000, plus 210,000 for a callback
+        // that can return deltas.
+        uint32 smallestBudget = CallbackLibrary.canReturnDeltas(CallbackType(callback)) ? 402_322 : 192_322;
         budgets[callback] = uint32(bound(budget, 0, smallestBudget - 1));
         vm.expectRevert(abi.encodeWithSelector(IKernelHook.InvalidExecutionLimits.selector));
         hook.setExecutionLimits(poolKey, 4, budgets);
@@ -1098,7 +1100,7 @@ contract ExtensionOrderAndLimitsTest is CodexLifecycleFixture {
 
     function test_setExecutionLimits_defersMandatoryGasCheckUntilActivation() public {
         _install();
-        hook.setExecutionLimits(poolKey, 4, _budgets(465_322));
+        hook.setExecutionLimits(poolKey, 4, _budgets(402_322));
         vm.expectRevert(abi.encodeWithSelector(IKernelHook.GasBudgetExceeded.selector));
         hook.activateExtension(poolKey, extension);
     }
