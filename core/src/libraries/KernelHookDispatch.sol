@@ -147,10 +147,16 @@ library KernelHookDispatch {
     ) public returns (CallbackResult memory aggregate) {
         OperationFrame frame = KernelHookOperations.currentFrame();
         frame.setCallback(callback);
-        frame.setCallbackStartGas(gasleft());
+        // The budget counts the sequence's gas from here, including the read of the callback order.
+        uint256 startGas = gasleft();
+        address[] storage order = state.callbackOrders[frame.poolId()][callback];
+        // A callback without subscribers runs no extension, so its result is zero. The other sequence fields of the
+        // frame are read only while an extension of this sequence runs, so they stay unread until the next sequence
+        // or the end of the operation.
+        if (order.length == 0) return aggregate;
+        frame.setCallbackStartGas(startGas);
         frame.setCallbackGasBudget(state.pools[frame.poolId()].callbackGasBudgets[uint8(callback)]);
         frame.setRemainingMandatoryGas(KernelHookState.mandatoryCallbackGas(state, frame.poolId(), callback));
-        address[] storage order = state.callbackOrders[frame.poolId()][callback];
         uint256 stateSlot;
         assembly ("memory-safe") {
             stateSlot := state.slot
