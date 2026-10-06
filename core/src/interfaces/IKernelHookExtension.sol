@@ -47,15 +47,14 @@ interface IKernelHookExtension is IHookExtension {
     /// - swap: (params, hookData) / (params, delta, hookData)
     /// - liquidity: (params, hookData) / (params, delta, feesAccrued, hookData)
     /// - donate: (amount0, amount1, hookData)
+    /// KernelHook does not pass the installation's configuration here, so that no callback pays to copy it. The
+    /// extension receives it in onInstall and onConfigure, and IKernelHook.extensionConfiguration returns it. An
+    /// extension that needs it in a callback keeps its own copy, keyed by context.poolId if it serves several pools.
     /// @param context The operation that calls the extension
     /// @param key The pool key
-    /// @param configuration The configuration of the installation
     /// @param callbackData The callback arguments, ABI-encoded
     /// @return The deltas and the optional fee override of the extension
-    function onCallback(
-        ExecutionContext calldata context,
-        PoolKey calldata key,
-        bytes calldata configuration,
-        bytes calldata callbackData
-    ) external returns (CallbackResult memory);
+    function onCallback(ExecutionContext calldata context, PoolKey calldata key, bytes calldata callbackData)
+        external
+        returns (CallbackResult memory);
 }

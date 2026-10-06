@@ -77,7 +77,7 @@ contract CodexLifecycleExtension is IKernelHookExtension {
         return _selectorResponse(msg.sig);
     }
 
-    function onCallback(ExecutionContext calldata, PoolKey calldata, bytes calldata, bytes calldata)
+    function onCallback(ExecutionContext calldata, PoolKey calldata, bytes calldata)
         external
         returns (CallbackResult memory result)
     {

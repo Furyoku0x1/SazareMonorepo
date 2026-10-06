@@ -15,7 +15,7 @@ library KernelHookConstants {
     uint8 internal constant DEFAULT_MAX_OPERATION_DEPTH = 4;
 
     /// @notice The gas budget of each callback sequence in a newly prepared pool.
-    /// @dev Fits 8 required extensions with a 100,000 gas limit and no configuration each, on a callback that can
+    /// @dev Fits 8 required extensions with a 100,000 gas limit each, on a callback that can
     /// return deltas: 8 * (100,000 + 3,225 + 250,000) + RETURN_GAS_RESERVE + SEQUENCE_GAS_RESERVE
     /// + 8 * (ITERATION_GAS_RESERVE + SUBSCRIBER_GAS_RESERVE) = 3,226,800.
     uint32 internal constant DEFAULT_CALLBACK_GAS_BUDGET = 4_000_000;
@@ -47,9 +47,9 @@ library KernelHookConstants {
     /// @notice The gas that KernelHook adds to each extension call for its own work: the delegatecall into the
     /// dispatch library, the checks, the reentry counter, the context, and the validation of the result.
     /// The extension's gas limit does not pay for it.
-    /// @dev Measured at about 22,500 gas without configuration bytes in the worst case: an initialization callback
-    /// with cold storage, which also records the completed callback. KernelHook encodes the callback data twice on
-    /// the way to the extension, so the margin also limits the hookData size that fits.
+    /// @dev Measured at about 19,500 gas in the worst case: an initialization callback with cold storage, which also
+    /// records the completed callback. KernelHook encodes the callback data twice on the way to the extension, so the
+    /// margin also limits the hookData size that fits.
     uint256 internal constant INVOCATION_GAS_RESERVE = 40_000;
 
     /// @notice The gas that KernelHook also adds to each call of a callback that can return deltas, to settle
@@ -57,11 +57,6 @@ library KernelHookConstants {
     /// @dev The first vault credit of a currency costs about 100,000 gas with a standard ERC20 token, and a result
     /// has two currencies. A token with a more expensive transfer can need more: the call then fails.
     uint256 internal constant SETTLEMENT_GAS_RESERVE = 210_000;
-
-    /// @notice The gas that KernelHook adds to each extension call for each 32-byte word of the installation's
-    /// configuration, which it copies from storage into every onCallback call.
-    /// @dev Measured at about 2,180 gas for each word with cold storage.
-    uint256 internal constant CONFIGURATION_WORD_GAS = 2200;
 
     /// @notice The gas that a CALL to a cold account costs before it forwards gas (EIP-2929).
     uint256 internal constant COLD_CALL_GAS = 2600;

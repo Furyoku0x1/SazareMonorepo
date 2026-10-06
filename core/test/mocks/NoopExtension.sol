@@ -53,7 +53,7 @@ contract NoopExtension is IKernelHookExtension {
         return IKernelHookExtension.onUninstall.selector;
     }
 
-    function onCallback(ExecutionContext calldata context, PoolKey calldata, bytes calldata, bytes calldata)
+    function onCallback(ExecutionContext calldata context, PoolKey calldata, bytes calldata)
         external
         view
         onlyKernelHook

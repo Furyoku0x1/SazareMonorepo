@@ -244,7 +244,7 @@ contract DispatchTest is KernelHookFixture {
         uint256 boundary = KernelHookConstants.RETURN_GAS_RESERVE + KernelHookConstants.SEQUENCE_GAS_RESERVE + count
             * (KernelHookConstants.ITERATION_GAS_RESERVE
                 + KernelHookConstants.SUBSCRIBER_GAS_RESERVE
-                + KernelHookState.invocationGas(10_000, CallbackType.BeforeSwap, 0));
+                + KernelHookState.invocationGas(10_000, CallbackType.BeforeSwap));
         // One gas less is refused: the boundary is the smallest budget that activation accepts.
         _setBudgets(uint32(boundary - 1));
         for (uint256 i; i < count - 1; ++i) {
@@ -265,28 +265,35 @@ contract DispatchTest is KernelHookFixture {
         _swapExactInput(key, true, 1e14);
     }
 
-    /// @dev KernelHook copies the configuration from storage into every onCallback call: about 2,180 gas for each
-    /// 32-byte word, so 8 KB costs about 557,000 gas. The reserve grows with the configuration, so an extension with
-    /// the smallest gas limit still runs. configureExtension must update the word count that the reserve uses.
-    function test_dispatch_reserveCoversLargeConfiguration() public {
+    /// @dev KernelHook does not pass the configuration to onCallback, so a callback's gas does not depend on its size.
+    /// Before, KernelHook copied it from storage into every call: an 8 KB configuration added more than 25,000 gas
+    /// to each call, even with warm storage. Both measured swaps run with warm storage, on the same pool.
+    function test_dispatch_callbackGasDoesNotDependOnConfiguration() public {
         _createPool(key);
         _addLiquidity(key);
-        NoopExtension extension = new NoopExtension(address(hook), CallbackType.BeforeSwap, 1e10, 0);
-        _admit(address(extension));
+        NoopExtension extension = new NoopExtension(address(hook), CallbackType.BeforeSwap, 0, 0);
         ExtensionSettings memory settings = _settings(SWAP_CALLBACKS, false, false, 10_000);
-        hook.installExtension(key, extension, settings);
+        _installAndActivate(key, address(extension), settings);
+        _swapExactInput(key, true, 1e14);
+        uint256 start = gasleft();
+        _swapExactInput(key, true, 1e14);
+        uint256 withoutConfiguration = start - gasleft();
+
         settings.configuration = new bytes(8192);
+        hook.deactivateExtension(key, extension);
         hook.configureExtension(key, extension, settings);
         hook.activateExtension(key, extension);
-
         _swapExactInput(key, true, 1e14);
+        start = gasleft();
+        _swapExactInput(key, true, 1e14);
+        uint256 withConfiguration = start - gasleft();
 
-        assertEq(hook.VAULT().balanceOf(poolId, address(extension), currency0), 1e10);
+        assertApproxEqAbs(withConfiguration, withoutConfiguration, 1000);
     }
 
     /// @dev The largest measured use of INVOCATION_GAS_RESERVE: an initialization callback has no settlement reserve,
     /// and it also records the completed callback. With cold storage, KernelHook's own work around the call is about
-    /// 22,500 gas. The extension uses about 9,500 of the smallest gas limit (10,000), so the work after the call gets
+    /// 19,500 gas. The extension uses about 9,500 of the smallest gas limit (10,000), so the work after the call gets
     /// almost no spare gas from it.
     function test_dispatch_reserveCoversColdInitializationCallback() public {
         hook.preparePool(key);

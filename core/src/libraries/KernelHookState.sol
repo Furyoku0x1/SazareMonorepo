@@ -35,9 +35,6 @@ library KernelHookState {
         uint8 extensionIndex;
         /// @dev A callback mask of the initialization callbacks that this installation has completed.
         uint16 completedInitializationCallbacks;
-        /// @dev The size of settings.configuration in 32-byte words. The gas checks of each callback read this copy,
-        /// which shares a slot with active, instead of the configuration's own slot.
-        uint16 configurationWords;
         /// @dev A copy of the catalog entry at installation time.
         IHookCatalog.Entry entry;
         ExtensionSettings settings;
@@ -99,9 +96,7 @@ library KernelHookState {
             Installation storage installation = state.installations[poolId][order[i]];
             if (!installation.active) continue;
             if (installation.settings.optionalCallbacks) continue;
-            gasAmount += invocationGas(
-                installation.settings.callbackGasLimits[uint8(callback)], callback, installation.configurationWords
-            );
+            gasAmount += invocationGas(installation.settings.callbackGasLimits[uint8(callback)], callback);
         }
     }
 
@@ -110,13 +105,8 @@ library KernelHookState {
     /// @dev The gas passes two calls: the delegatecall into the dispatch library, and the call to the extension.
     /// Each call keeps back 1/64 of the available gas (EIP-150). The dispatch loop's admission check adds the headroom
     /// of the delegatecall. The call to the extension needs gasLimit / 63; gasLimit / 31 keeps a margin above that.
-    function invocationGas(uint256 gasLimit, CallbackType callback, uint256 configurationWords)
-        internal
-        pure
-        returns (uint256)
-    {
-        uint256 reserve = KernelHookConstants.INVOCATION_GAS_RESERVE + configurationWords
-            * KernelHookConstants.CONFIGURATION_WORD_GAS;
+    function invocationGas(uint256 gasLimit, CallbackType callback) internal pure returns (uint256) {
+        uint256 reserve = KernelHookConstants.INVOCATION_GAS_RESERVE;
         if (CallbackLibrary.canReturnDeltas(callback)) reserve += KernelHookConstants.SETTLEMENT_GAS_RESERVE;
         return gasLimit + gasLimit / 31 + reserve;
     }

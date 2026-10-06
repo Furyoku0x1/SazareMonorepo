@@ -145,12 +145,11 @@ contract MockExtension is IKernelHookExtension {
         return _lifecycleSelector(IKernelHookExtension.onUninstall.selector);
     }
 
-    function onCallback(
-        ExecutionContext calldata context,
-        PoolKey calldata,
-        bytes calldata,
-        bytes calldata callbackData
-    ) external onlyKernelHook returns (CallbackResult memory) {
+    function onCallback(ExecutionContext calldata context, PoolKey calldata, bytes calldata callbackData)
+        external
+        onlyKernelHook
+        returns (CallbackResult memory)
+    {
         _lastContext = context;
         lastCallbackDataHash = keccak256(callbackData);
         ++callCount[context.callback];

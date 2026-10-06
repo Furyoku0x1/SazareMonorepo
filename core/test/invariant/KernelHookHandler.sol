@@ -356,8 +356,9 @@ contract KernelHookHandler is Test {
         ++successfulCalls["reorder"];
     }
 
-    /// @notice Gives the optional extension a new callback gas limit and a new configuration size, in one multicall.
-    /// The configuration size changes KernelHook's gas reserve for each call of the extension.
+    /// @notice Gives the optional extension a new callback gas limit and a new configuration size, in one multicall
+    /// on a live pool. The callback gas limit changes the invocation gas that KernelHook reserves for each call of
+    /// the extension.
     function reconfigure(uint256 gasLimit, uint256 configurationBytes) external {
         (, ExtensionSettings memory settings,) =
             hook.extensionConfiguration(_keys[0].toId(), address(_extensions[OPTIONAL]));

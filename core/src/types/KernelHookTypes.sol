@@ -57,8 +57,8 @@ struct ExtensionSettings {
     /// @dev The extension's onCallback receives exactly this much gas. KernelHook's own work around the call,
     /// including the settlement of the result's deltas, uses a separate reserve that the pool's budget pays.
     uint32[CALLBACK_COUNT] callbackGasLimits;
-    /// @notice Extension-defined data. KernelHook passes it back in onCallback and onUninstall, and inside
-    /// the settings in onInstall, onConfigure and canActivate.
+    /// @notice Extension-defined data. KernelHook passes it back in onUninstall, and inside the settings in onInstall,
+    /// onConfigure and canActivate. It does not pass it in onCallback.
     bytes configuration;
 }
 

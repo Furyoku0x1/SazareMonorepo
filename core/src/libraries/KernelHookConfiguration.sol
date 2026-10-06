@@ -63,8 +63,6 @@ library KernelHookConfiguration {
         installation.extensionIndex = uint8(pool.extensions.length);
         installation.entry = entry;
         installation.settings = settings;
-        // _validateSettings limits the configuration to MAX_CONFIGURATION_BYTES, which is 256 words.
-        installation.configurationWords = uint16((settings.configuration.length + 31) / 32);
         pool.extensions.push(account);
         _subscribe(state, poolId, account, settings.callbackMask);
         _callLifecycleHook(
@@ -104,8 +102,6 @@ library KernelHookConfiguration {
             IKernelHookExtension.onConfigure.selector
         );
         installation.settings = settings;
-        // _validateSettings limits the configuration to MAX_CONFIGURATION_BYTES, which is 256 words.
-        installation.configurationWords = uint16((settings.configuration.length + 31) / 32);
         emit IKernelHook.ExtensionConfigured(poolId, account);
     }
 
@@ -202,7 +198,7 @@ library KernelHookConfiguration {
         // i < CALLBACK_COUNT
         for (uint256 i; i < CALLBACK_COUNT; ++i) {
             // A budget must fit at least one extension call with the smallest gas limit.
-            uint256 smallestCall = KernelHookState.invocationGas(KernelHookConstants.MIN_CALL_GAS, CallbackType(i), 0);
+            uint256 smallestCall = KernelHookState.invocationGas(KernelHookConstants.MIN_CALL_GAS, CallbackType(i));
             uint256 smallestBudget = KernelHookConstants.RETURN_GAS_RESERVE + KernelHookConstants.SEQUENCE_GAS_RESERVE
                 + KernelHookConstants.ITERATION_GAS_RESERVE + KernelHookConstants.SUBSCRIBER_GAS_RESERVE + smallestCall;
             if (callbackGasBudgets[i] < smallestBudget) {

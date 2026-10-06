@@ -93,8 +93,7 @@ library KernelHookDispatch {
         CallbackType callback
     ) private returns (CallbackResult memory) {
         bytes memory input = abi.encodeCall(
-            IKernelHookExtension.onCallback,
-            (KernelHookOperations.context(), key, installation.settings.configuration, data)
+            IKernelHookExtension.onCallback, (KernelHookOperations.context(), key, data)
         );
         uint256 gasLimit = installation.settings.callbackGasLimits[uint8(callback)];
         // The invocation gas of this delegatecall covers the work before this point and the 1/64 that the EVM keeps
@@ -186,9 +185,8 @@ library KernelHookDispatch {
         if (!_passesReentrancyRule(frame, installation, extension, bit, optional)) return;
 
         CallbackType callback = frame.callback();
-        uint256 invocationGas = KernelHookState.invocationGas(
-            installation.settings.callbackGasLimits[uint8(callback)], callback, installation.configurationWords
-        );
+        uint256 invocationGas =
+            KernelHookState.invocationGas(installation.settings.callbackGasLimits[uint8(callback)], callback);
         bytes memory input = _invocationInput(sequence, extension);
         if (!_admitCallbackGas(frame, extension, bit, invocationGas, optional, remainingCount)) return;
 
