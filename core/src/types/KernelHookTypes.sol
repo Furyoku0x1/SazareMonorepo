@@ -80,6 +80,17 @@ struct ExecutionContext {
     CallbackType callback;
     /// @notice The number of operations on the stack, including the synthetic frame of unwindPositions.
     uint8 depth;
+    /// @notice For a nested operation, the pool of the operation whose extension started the route. Zero for a root
+    /// operation. KernelHook takes it from the parent operation, so a caller cannot forge it.
+    PoolId originPoolId;
+    /// @notice For a nested operation, the extension that started the route. The route executor settles the route
+    /// against that installation's vault balance. For an action of unwindPositions, the unwinding extension.
+    /// address(0) for a root operation.
+    address originExtension;
+    /// @notice The sum of the results of the extensions that ran earlier in the current callback, or zero when no
+    /// extension runs now. In beforeSwap, BeforeSwapLibrary.remainingAmountSpecified gives the specified amount
+    /// that these results leave.
+    CallbackResult prior;
 }
 
 /// @notice The answer of an extension to one callback.

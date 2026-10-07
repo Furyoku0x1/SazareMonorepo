@@ -2,7 +2,7 @@
 pragma solidity 0.8.37;
 
 import {IKernelHook} from "../interfaces/IKernelHook.sol";
-import {CallbackType, ExecutionContext} from "../types/KernelHookTypes.sol";
+import {CallbackResult, CallbackType, ExecutionContext} from "../types/KernelHookTypes.sol";
 import {CallbackLibrary} from "./CallbackLibrary.sol";
 import {KernelHookConstants} from "./KernelHookConstants.sol";
 import {Panic} from "@openzeppelin/contracts/utils/Panic.sol";
@@ -10,6 +10,7 @@ import {SlotDerivation} from "@openzeppelin/contracts/utils/SlotDerivation.sol";
 import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
 import {PoolId} from "v4-core/src/types/PoolId.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
+import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {ModifyLiquidityParams} from "v4-core/src/types/PoolOperation.sol";
 
 /// @notice The base transient slot of one operation in progress.
@@ -135,6 +136,26 @@ library OperationFrameLibrary {
         _store(frame, 12, bytes32(uint256(value ? 1 : 0)));
     }
 
+    /// @dev The sum of the deltas that earlier extensions of the current callback returned. invokeExtension writes it
+    /// before each extension call, inside the call's rollback scope.
+    function priorDeltas(OperationFrame frame) internal view returns (BalanceDelta) {
+        return BalanceDelta.wrap(int256(uint256(_load(frame, 13))));
+    }
+
+    function setPriorDeltas(OperationFrame frame, BalanceDelta value) internal {
+        _store(frame, 13, bytes32(uint256(BalanceDelta.unwrap(value))));
+    }
+
+    /// @dev The fee override that an earlier extension of the current callback returned, or zero. Written with
+    /// priorDeltas.
+    function priorFeeOverride(OperationFrame frame) internal view returns (uint24) {
+        return uint24(uint256(_load(frame, 14)));
+    }
+
+    function setPriorFeeOverride(OperationFrame frame, uint24 value) internal {
+        _store(frame, 14, bytes32(uint256(value)));
+    }
+
     function _load(OperationFrame frame, uint256 field) private view returns (bytes32 value) {
         assembly ("memory-safe") {
             value := tload(add(frame, field))
@@ -211,7 +232,7 @@ library KernelHookOperations {
     bytes32 internal constant FRAMES_SLOT = bytes32(uint256(keccak256("KernelHook.frames")) - 1);
     /// @notice Holds the ticket count; ticket i starts at TICKETS_SLOT + 1 + i * TICKET_FIELD_COUNT.
     bytes32 internal constant TICKETS_SLOT = bytes32(uint256(keccak256("KernelHook.tickets")) - 1);
-    uint256 internal constant FRAME_FIELD_COUNT = 13;
+    uint256 internal constant FRAME_FIELD_COUNT = 15;
     uint256 internal constant TICKET_FIELD_COUNT = 3;
     /// @dev Includes the synthetic exit frame. Sequential route actions need at most one ticket per nesting level.
     uint256 internal constant MAX_FRAMES = uint256(KernelHookConstants.MAX_OPERATION_DEPTH) + 1;
@@ -273,6 +294,8 @@ library KernelHookOperations {
         frame.setSkippedExtensions(0);
         frame.setBeforeSwapUnspecifiedDelta(0);
         frame.setIsExitContext(false);
+        frame.setPriorDeltas(BalanceDelta.wrap(0));
+        frame.setPriorFeeOverride(0);
     }
 
     /// @notice Opens the synthetic root frame of unwindPositions.
@@ -295,6 +318,8 @@ library KernelHookOperations {
         frame.setSkippedExtensions(0);
         frame.setBeforeSwapUnspecifiedDelta(0);
         frame.setIsExitContext(true);
+        frame.setPriorDeltas(BalanceDelta.wrap(0));
+        frame.setPriorFeeOverride(0);
     }
 
     function _pushFrame() private returns (OperationFrame frame) {
@@ -425,18 +450,29 @@ library KernelHookOperations {
 
     /// @notice Returns the context of the innermost operation, or an empty context if no operation is in progress.
     function context() internal view returns (ExecutionContext memory result) {
-        if (frameCount() == 0) return result;
-        OperationFrame root = frameAt(0);
-        OperationFrame frame = currentFrame();
-        return ExecutionContext(
-            root.operationId(),
-            root.poolId(),
-            frame.poolId(),
-            frame.sender(),
-            frame.extension(),
-            frame.callback(),
-            uint8(frameCount())
-        );
+        uint256 count = frameCount();
+        if (count == 0) return result;
+        OperationFrame root = _frameAt(0);
+        OperationFrame frame = _frameAt(count - 1);
+        result.rootOperationId = root.operationId();
+        result.rootPoolId = root.poolId();
+        result.poolId = frame.poolId();
+        result.sender = frame.sender();
+        result.extension = frame.extension();
+        result.callback = frame.callback();
+        result.depth = uint8(count);
+        if (count > 1) {
+            // The parent operation's extension started this nested operation: executeRoute accepts only the
+            // extension of the current frame, and unwindPositions records its caller as its exit frame's extension.
+            OperationFrame parent = _frameAt(count - 2);
+            result.originPoolId = parent.poolId();
+            result.originExtension = parent.extension();
+        }
+        // The prior result belongs to the extension call in progress. The exit frame of unwindPositions has an
+        // extension but no callback; its prior fields stay zero from the push.
+        if (result.extension == address(0)) return result;
+        BalanceDelta deltas = frame.priorDeltas();
+        result.prior = CallbackResult(deltas.amount0(), deltas.amount1(), frame.priorFeeOverride());
     }
 
     /// @notice Returns the hash that binds a before callback to its after callback and to its ticket.

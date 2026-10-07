@@ -196,6 +196,21 @@ contract KernelHook is BaseHook, Multicall, IKernelHook, IKernelExecutorCallback
     }
 
     /// @inheritdoc IKernelHook
+    function installationFlags(PoolId poolId, address extension)
+        external
+        view
+        returns (bool installed, bool active, bool optional, uint16 callbackMask)
+    {
+        KernelHookState.Installation storage installation = _state.installations[poolId][extension];
+        return (
+            installation.installed,
+            installation.active,
+            installation.settings.optionalCallbacks,
+            installation.settings.callbackMask
+        );
+    }
+
+    /// @inheritdoc IKernelHook
     function extensionConfiguration(PoolId poolId, address extension)
         external
         view

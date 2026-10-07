@@ -5,6 +5,7 @@ import {IKernelHook} from "../interfaces/IKernelHook.sol";
 import {IKernelHookExtension} from "../interfaces/IKernelHookExtension.sol";
 import {KernelHookVault} from "../KernelHookVault.sol";
 import {CallbackResult, CallbackType} from "../types/KernelHookTypes.sol";
+import {BeforeSwapLibrary} from "./BeforeSwapLibrary.sol";
 import {BoundedCall} from "./BoundedCall.sol";
 import {CallbackLibrary} from "./CallbackLibrary.sol";
 import {KernelHookConstants} from "./KernelHookConstants.sol";
@@ -16,7 +17,7 @@ import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolId} from "v4-core/src/types/PoolId.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
 import {SwapParams} from "v4-core/src/types/PoolOperation.sol";
-import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
+import {BalanceDelta, toBalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 
 /// @notice Runs the extensions of a callback in order, each in its own rollback scope.
 /// @dev An external library: KernelHook delegatecalls it, which keeps KernelHook below the contract size limit.
@@ -74,6 +75,10 @@ library KernelHookDispatch {
         KernelHookState.Installation storage installation = state.installations[poolId][extension];
         if (extension.codehash != installation.entry.codeHash) revert IKernelHook.ExtensionCodeMismatch();
         KernelHookOperations.enterInvocation(poolId, extension);
+        // The extension reads the results of the earlier extensions in its context (ExecutionContext.prior), and
+        // currentContext() reads the same value from the frame.
+        frame.setPriorDeltas(toBalanceDelta(aggregate.delta0, aggregate.delta1));
+        frame.setPriorFeeOverride(aggregate.feeOverride);
         CallbackResult memory result = _callExtension(installation, extension, key, data, callback);
         next = _accumulate(aggregate, result);
         _validateResult(frame, callback, key, data, result, next);
@@ -312,9 +317,7 @@ library KernelHookDispatch {
         CallbackResult memory aggregate
     ) private pure {
         (SwapParams memory swapParameters,) = abi.decode(data, (SwapParams, bytes));
-        bool specifiedIsCurrency0 = (swapParameters.amountSpecified < 0) == swapParameters.zeroForOne;
-        int128 specified = specifiedIsCurrency0 ? aggregate.delta0 : aggregate.delta1;
-        int256 amount = swapParameters.amountSpecified + specified;
+        int256 amount = BeforeSwapLibrary.remainingAmountSpecified(swapParameters, aggregate);
         if (swapParameters.amountSpecified < 0 ? amount > 0 : amount < 0) revert IKernelHook.DeltaExceedsSwapAmount();
         if (result.feeOverride == 0) return;
         if (!key.fee.isDynamicFee()) revert IKernelHook.InvalidFeeOverride();
@@ -329,7 +332,7 @@ library KernelHookDispatch {
         CallbackResult memory aggregate
     ) private view {
         (SwapParams memory swapParameters,,) = abi.decode(data, (SwapParams, BalanceDelta, bytes));
-        bool specifiedIsCurrency0 = (swapParameters.amountSpecified < 0) == swapParameters.zeroForOne;
+        bool specifiedIsCurrency0 = BeforeSwapLibrary.isSpecifiedCurrency0(swapParameters);
         int128 specified = specifiedIsCurrency0 ? aggregate.delta0 : aggregate.delta1;
         int128 unspecified = specifiedIsCurrency0 ? aggregate.delta1 : aggregate.delta0;
         if (specified != 0) revert IKernelHook.InvalidDelta();

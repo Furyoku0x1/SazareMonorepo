@@ -11,6 +11,7 @@ import {KernelHookConstants} from "../../src/libraries/KernelHookConstants.sol";
 import {
     CALLBACK_COUNT,
     CallbackType,
+    ExecutionContext,
     ExtensionSettings,
     Operation,
     RouteAction
@@ -185,11 +186,13 @@ contract KernelHookHandler is Test {
     /// v4 rejects exact output at the maximum LP fee, so this action uses exact input only.
     function swapDynamic(bool zeroForOne, uint256 amount) external {
         amount = bound(amount, 1e6, 1e14);
+        uint256[2] memory overriderCalls = _overriderCalls();
         vm.recordLogs();
         swapRouter.swap{value: zeroForOne ? amount : 0}(
             _keys[NATIVE_POOL], _exactInput(zeroForOne, amount), PoolSwapTest.TestSettings(false, false), ""
         );
         _checkDynamicFee(vm.getRecordedLogs());
+        _checkOverriderContexts(overriderCalls, PoolId.wrap(0), address(0));
         ++successfulCalls["swapDynamic"];
     }
 
@@ -227,16 +230,7 @@ contract KernelHookHandler is Test {
     function deposit(uint256 installationSeed, uint256 currencySeed, uint256 amount) external {
         uint256 index = installationSeed % MODELED_INSTALLATIONS;
         uint256 currencyIndex = currencySeed % CURRENCY_COUNT;
-        amount = bound(amount, 1, 1e16);
-        MockExtension installation = _installation(index);
-        Currency currency = _currencies[currencyIndex];
-        if (currencyIndex == NATIVE) {
-            installation.deposit{value: amount}(_installationPool(index), currency, amount);
-        } else {
-            IERC20(Currency.unwrap(currency)).transfer(address(installation), amount);
-            installation.deposit(_installationPool(index), currency, amount);
-        }
-        ghostBalance[index][currencyIndex] += int256(amount);
+        _deposit(index, currencyIndex, bound(amount, 1, 1e16));
         ++successfulCalls["deposit"];
     }
 
@@ -252,33 +246,41 @@ contract KernelHookHandler is Test {
     // ---------------------------------------------------------------- routes
 
     /// @notice In afterSwap of the main pool, the router swaps on the route pool.
-    function routeSwap(bool zeroForOne, uint256 amount) external {
+    function routeSwap(bool zeroForOne, uint256 amount, bool prepare) external {
         amount = bound(amount, 1e6, 1e12);
+        _prepare(prepare, ROUTER);
         _swapWithRoute(_swapAction(_keys[1], zeroForOne, amount));
         ++successfulCalls["routeSwap"];
     }
 
     /// @notice In afterSwap of the main pool, the router changes its liquidity in the route pool.
-    function routeLiquidity(int256 liquidityDelta) external {
+    function routeLiquidity(int256 liquidityDelta, bool prepare) external {
         liquidityDelta = bound(liquidityDelta, -int256(ghostRouteLiquidity), 1e15);
+        _prepare(prepare, ROUTER);
         _swapWithRoute(_routeLiquidityAction(liquidityDelta));
         ghostRouteLiquidity = uint256(int256(ghostRouteLiquidity) + liquidityDelta);
         ++successfulCalls["routeLiquidity"];
     }
 
     /// @notice In afterSwap of the main pool, the router swaps on the native pool with its native and token balances.
-    function routeNativeSwap(bool zeroForOne, uint256 amount) external {
+    function routeNativeSwap(bool zeroForOne, uint256 amount, bool prepare) external {
         amount = bound(amount, 1e6, 1e12);
+        _prepare(prepare, ROUTER);
+        uint256[2] memory overriderCalls = _overriderCalls();
         vm.recordLogs();
         _swapWithRoute(_swapAction(_keys[NATIVE_POOL], zeroForOne, amount));
         _checkDynamicFee(vm.getRecordedLogs());
+        _checkOverriderContexts(overriderCalls, _keys[0].toId(), address(_extensions[ROUTER]));
         ++successfulCalls["routeNativeSwap"];
     }
 
     /// @notice Three levels of operations: in afterSwap of pool 0, the router swaps on pool 1, and in that nested
     /// afterSwap the relay swaps on the native pool. Each route settles from its own installation's balances.
-    function routeRecursive(bool zeroForOne, uint256 amount) external {
+    function routeRecursive(bool zeroForOne, uint256 amount, bool prepare) external {
         amount = bound(amount, 1e6, 1e10);
+        _prepare(prepare, ROUTER);
+        _prepare(prepare, RELAY);
+        uint256[2] memory overriderCalls = _overriderCalls();
         uint256 relayCalls = relay.callCount(CallbackType.AfterSwap);
         relay.addRouteAction(CallbackType.AfterSwap, _swapAction(_keys[NATIVE_POOL], zeroForOne, amount));
         vm.recordLogs();
@@ -291,6 +293,7 @@ contract KernelHookHandler is Test {
         if (ghostMaxOperationDepth < 3) _violation("a third-level route ran above the root pool's depth limit");
         _addResults(RELAY, _keys[NATIVE_POOL], relay.lastRouteResults());
         _checkDynamicFee(logs);
+        _checkOverriderContexts(overriderCalls, _keys[1].toId(), address(relay));
         ++successfulCalls["routeRecursive"];
     }
 
@@ -298,8 +301,9 @@ contract KernelHookHandler is Test {
     /// KernelHook allows it only from an after callback in which every required extension has already run, so that
     /// no required extension sees the pool change under it. A route that ran while an active required extension came
     /// later in the afterSwap order is a violation. (The required router can never do this: it is still running.)
-    function routeSamePoolDonate(uint256 amount) external {
+    function routeSamePoolDonate(uint256 amount, bool prepare) external {
         amount = bound(amount, 1, 1e9);
+        _prepare(prepare, OPTIONAL);
         MockExtension optional = _extensions[OPTIONAL];
         bool requiredStillToRun = _requiredRunsAfter(OPTIONAL);
         uint256 calls = optional.callCount(CallbackType.AfterSwap);
@@ -577,11 +581,69 @@ contract KernelHookHandler is Test {
     function _expectedDynamicFee() private view returns (uint24) {
         // overrider < 2
         for (uint256 i; i < 2; ++i) {
-            if (_overrides[i] & LPFeeLibrary.OVERRIDE_FEE_FLAG == 0) continue;
-            uint24 fee = _overrides[i] & LPFeeLibrary.REMOVE_OVERRIDE_MASK;
-            if (fee <= LPFeeLibrary.MAX_LP_FEE) return fee;
+            if (_isValidOverride(_overrides[i])) return _overrides[i] & LPFeeLibrary.REMOVE_OVERRIDE_MASK;
         }
         return 0;
+    }
+
+    function _isValidOverride(uint24 value) private pure returns (bool) {
+        if (value & LPFeeLibrary.OVERRIDE_FEE_FLAG == 0) return false;
+        return value & LPFeeLibrary.REMOVE_OVERRIDE_MASK <= LPFeeLibrary.MAX_LP_FEE;
+    }
+
+    function _overriderCalls() private view returns (uint256[2] memory calls) {
+        // overrider < 2
+        for (uint256 k; k < 2; ++k) {
+            calls[k] = _overriders[k].callCount(CallbackType.BeforeSwap);
+        }
+    }
+
+    /// @dev Each overrider that ran (its call count grew; a skipped attempt rolls back) must see the origin that
+    /// KernelHook takes from the parent operation. The second one must see the first one's fee override as its prior
+    /// result, or zero if KernelHook skipped the first one's invalid override.
+    function _checkOverriderContexts(uint256[2] memory callsBefore, PoolId originPoolId, address originExtension)
+        private
+    {
+        // overrider < 2
+        for (uint256 k; k < 2; ++k) {
+            if (_overriders[k].callCount(CallbackType.BeforeSwap) == callsBefore[k]) continue;
+            ExecutionContext memory context = _overriders[k].lastContext();
+            if (context.originExtension != originExtension) _violation("an extension saw the wrong origin extension");
+            if (PoolId.unwrap(context.originPoolId) != PoolId.unwrap(originPoolId)) {
+                _violation("an extension saw the wrong origin pool");
+            }
+            uint24 expectedPrior = k == 1 && _isValidOverride(_overrides[0]) ? _overrides[0] : 0;
+            if (context.prior.feeOverride != expectedPrior) _violation("an extension saw the wrong prior result");
+        }
+    }
+
+    function _deposit(uint256 index, uint256 currencyIndex, uint256 amount) private {
+        MockExtension installation = _installation(index);
+        Currency currency = _currencies[currencyIndex];
+        if (currencyIndex == NATIVE) {
+            installation.deposit{value: amount}(_installationPool(index), currency, amount);
+        } else {
+            IERC20(Currency.unwrap(currency)).transfer(address(installation), amount);
+            installation.deposit(_installationPool(index), currency, amount);
+        }
+        ghostBalance[index][currencyIndex] += int256(amount);
+    }
+
+    /// @dev With prepare, a route action first removes the common reasons that its route cannot run: an inactive
+    /// routing extension, a low vault balance, an optional extension set to fail in afterSwap, and a fee rebate that
+    /// the fee taker cannot pay. Long runs then reach routes more often. Without it, the action tries the route in the
+    /// state that the earlier actions left. The model counts these deposits like the deposit action's.
+    function _prepare(bool prepare, uint256 index) private {
+        if (!prepare) return;
+        if (index != RELAY && !_isActive(index)) hook.activateExtension(_keys[0], _extension(index));
+        if (index == OPTIONAL) {
+            _extensions[OPTIONAL].setBehavior(CallbackType.AfterSwap, MockExtension.Behavior(0, 0, 0, false, 0));
+        }
+        // currencyIndex < CURRENCY_COUNT
+        for (uint256 c; c < CURRENCY_COUNT; ++c) {
+            if (ghostBalance[index][c] < 1e15) _deposit(index, c, 1e16);
+        }
+        if (_fee < 0 && ghostBalance[FEE_TAKER][0] < -int256(_fee)) _deposit(FEE_TAKER, 0, 1e16);
     }
 
     /// @dev A route result is the PoolManager delta that the vault settles for the routing installation, in the

@@ -12,6 +12,7 @@ import {KernelHookVault} from "../../src/KernelHookVault.sol";
 import {CallbackLibrary} from "../../src/libraries/CallbackLibrary.sol";
 import {KernelHookConstants} from "../../src/libraries/KernelHookConstants.sol";
 import {KernelHookState} from "../../src/libraries/KernelHookState.sol";
+import {BeforeSwapLibrary} from "../../src/libraries/BeforeSwapLibrary.sol";
 import {KernelHookDispatch} from "../../src/libraries/KernelHookDispatch.sol";
 import {
     CALLBACK_COUNT,
@@ -293,7 +294,7 @@ contract DispatchTest is KernelHookFixture {
 
     /// @dev The largest measured use of INVOCATION_GAS_RESERVE: an initialization callback has no settlement reserve,
     /// and it also records the completed callback. With cold storage, KernelHook's own work around the call is about
-    /// 19,500 gas. The extension uses about 9,500 of the smallest gas limit (10,000), so the work after the call gets
+    /// 20,500 gas. The extension uses about 9,500 of the smallest gas limit (10,000), so the work after the call gets
     /// almost no spare gas from it.
     function test_dispatch_reserveCoversColdInitializationCallback() public {
         hook.preparePool(key);
@@ -332,6 +333,68 @@ contract DispatchTest is KernelHookFixture {
         (bool success, bytes memory reason) = address(KernelHookDispatch).call(input);
         assertFalse(success);
         assertEq(reason.length, 0);
+    }
+
+    /// @dev installationFlags reports an installation without copying its settings, and reports nothing for an
+    /// extension that is not installed (also after its removal).
+    function test_installationFlags_followInstallActivateAndRemove() public {
+        _createPool(key);
+        MockExtension extension = new MockExtension(address(hook));
+        _assertFlags(address(extension), false, false, false, 0);
+        _admit(address(extension));
+        hook.installExtension(key, extension, _settings(SWAP_CALLBACKS, true, false));
+        _assertFlags(address(extension), true, false, true, SWAP_CALLBACKS);
+        hook.activateExtension(key, extension);
+        _assertFlags(address(extension), true, true, true, SWAP_CALLBACKS);
+        hook.deactivateExtension(key, extension);
+        hook.removeExtension(key, extension);
+        _assertFlags(address(extension), false, false, false, 0);
+    }
+
+    /// @dev The second beforeSwap extension sees the first one's result as its prior result, both in its onCallback
+    /// context and in currentContext. The first one sees zero. The remaining specified amount follows from it.
+    function test_dispatch_contextCarriesTheResultsOfEarlierExtensions() public {
+        _createPool(key);
+        _addLiquidity(key);
+        MockExtension first = new MockExtension(address(hook));
+        MockExtension second = new MockExtension(address(hook));
+        _admit(address(first));
+        _admit(address(second));
+        hook.installExtension(key, first, _settings(CallbackType.BeforeSwap.mask(), false, false));
+        hook.installExtension(key, second, _settings(CallbackType.BeforeSwap.mask(), false, false));
+        hook.activateExtension(key, first);
+        hook.activateExtension(key, second);
+        first.setBehavior(CallbackType.BeforeSwap, MockExtension.Behavior(1e10, 0, 0, false, 0));
+        second.setExternalCall(CallbackType.BeforeSwap, address(this), abi.encodeCall(this.recordContext, ()));
+
+        _swapExactInput(key, true, 1e14);
+
+        assertEq(abi.encode(first.lastContext().prior), abi.encode(CallbackResult(0, 0, 0)));
+        ExecutionContext memory context = second.lastContext();
+        assertEq(abi.encode(context.prior), abi.encode(CallbackResult(1e10, 0, 0)));
+        assertEq(abi.encode(_recordedContext), abi.encode(context));
+        SwapParams memory params = SwapParams(true, -1e14, MIN_PRICE_LIMIT);
+        assertEq(BeforeSwapLibrary.remainingAmountSpecified(params, context.prior), -1e14 + 1e10);
+        assertEq(context.originExtension, address(0));
+        assertEq(PoolId.unwrap(context.originPoolId), bytes32(0));
+    }
+
+    ExecutionContext internal _recordedContext;
+
+    /// @notice An extension calls this from inside its callback.
+    function recordContext() external {
+        _recordedContext = hook.currentContext();
+    }
+
+    function _assertFlags(address extension, bool installed, bool active, bool optional, uint16 callbackMask)
+        private
+        view
+    {
+        (bool isInstalled, bool isActive, bool isOptional, uint16 mask) = hook.installationFlags(poolId, extension);
+        assertEq(isInstalled, installed, "installed");
+        assertEq(isActive, active, "active");
+        assertEq(isOptional, optional, "optional");
+        assertEq(mask, callbackMask, "callback mask");
     }
 
     /// @dev The extension spends almost all of its 200,000 gas limit. KernelHook's own work before and after the

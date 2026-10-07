@@ -538,9 +538,9 @@ contract RoutesTest is KernelHookFixture {
         _addLiquidity(secondKey);
         MockExtension failing = new MockExtension(address(hook));
         failing.setBehavior(CallbackType.BeforeSwap, MockExtension.Behavior(0, 0, 0, true, 0));
-        _installAndActivate(routeKey, address(failing), _settings(SWAP_CALLBACKS, true, false, 200_000));
+        _installAndActivate(routeKey, address(failing), _settings(SWAP_CALLBACKS, true, false));
         MockExtension healthy = new MockExtension(address(hook));
-        _installAndActivate(secondKey, address(healthy), _settings(SWAP_CALLBACKS, true, false, 200_000));
+        _installAndActivate(secondKey, address(healthy), _settings(SWAP_CALLBACKS, true, false));
         _installRouter(false, true);
         router.addRouteAction(CallbackType.AfterSwap, _swapAction(routeKey));
         router.addRouteAction(CallbackType.AfterSwap, _swapAction(secondKey));
@@ -551,6 +551,51 @@ contract RoutesTest is KernelHookFixture {
         assertEq(failing.callCount(CallbackType.AfterSwap), 0);
         assertEq(healthy.callCount(CallbackType.BeforeSwap), 1);
         assertEq(healthy.callCount(CallbackType.AfterSwap), 1);
+    }
+
+    // ---------------------------------------------------------------- origin of nested operations
+
+    /// @dev A nested operation's context names the pool and the extension that started the route. A root operation's
+    /// context names none.
+    function test_context_originNamesTheExtensionThatStartedTheRoute() public {
+        MockExtension observer = new MockExtension(address(hook));
+        _installAndActivate(routeKey, address(observer), _settings(SWAP_CALLBACKS, true, false));
+        _installRouter(false, true);
+        router.addRouteAction(CallbackType.AfterSwap, _swapAction(routeKey));
+
+        _swapExactInput(poolKey, true, 1e14);
+
+        ExecutionContext memory nested = observer.lastContext();
+        assertEq(nested.depth, 2);
+        assertEq(PoolId.unwrap(nested.originPoolId), PoolId.unwrap(poolId));
+        assertEq(nested.originExtension, address(router));
+
+        router.clearRoute(CallbackType.AfterSwap);
+        _swapExactInput(routeKey, true, 1e12);
+
+        ExecutionContext memory root = observer.lastContext();
+        assertEq(root.depth, 1);
+        assertEq(PoolId.unwrap(root.originPoolId), bytes32(0));
+        assertEq(root.originExtension, address(0));
+    }
+
+    /// @dev The actions of unwindPositions run under the synthetic exit frame, whose extension is the unwinding one.
+    function test_context_originOfAnUnwindActionIsTheUnwindingExtension() public {
+        _openRoutePosition();
+        MockExtension observer = new MockExtension(address(hook));
+        uint16 removalCallbacks = uint16(1) << uint8(CallbackType.BeforeRemoveLiquidity) | uint16(1)
+            << uint8(CallbackType.AfterRemoveLiquidity);
+        _installAndActivate(routeKey, address(observer), _settings(removalCallbacks, true, false));
+        hook.deactivateExtension(poolKey, IHookExtension(address(router)));
+        RouteAction[] memory actions = new RouteAction[](1);
+        actions[0] = _liquidityAction(routeKey, -int256(uint256(ROUTE_LIQUIDITY)));
+
+        router.unwindPositions(poolKey, actions);
+
+        ExecutionContext memory context = observer.lastContext();
+        assertEq(context.depth, 2);
+        assertEq(PoolId.unwrap(context.originPoolId), PoolId.unwrap(poolId));
+        assertEq(context.originExtension, address(router));
     }
 
     // ---------------------------------------------------------------- context after operations

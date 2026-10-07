@@ -368,6 +368,18 @@ interface IKernelHook {
     /// @notice Returns true if the extension is installed in the pool.
     function isInstalled(PoolId poolId, address extension) external view returns (bool);
 
+    /// @notice Returns the flags of an installation, without copying its settings. All are false or zero if the
+    /// extension is not installed in the pool.
+    /// @dev Extensions read this at callback time to check their co-subscribers cheaply: two storage reads.
+    /// @return installed True if the extension is installed in the pool
+    /// @return active True if the installation is active
+    /// @return optional True if KernelHook skips the installation's failed callbacks instead of reverting
+    /// @return callbackMask The callbacks that the installation subscribes to, as a CallbackLibrary mask
+    function installationFlags(PoolId poolId, address extension)
+        external
+        view
+        returns (bool installed, bool active, bool optional, uint16 callbackMask);
+
     /// @notice Returns an installation. Reverts if the extension is not installed in the pool.
     /// @return active True if the installation is active
     /// @return settings The installation settings

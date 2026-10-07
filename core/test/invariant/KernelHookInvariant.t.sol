@@ -135,7 +135,7 @@ contract KernelHookInvariantTest is StdInvariant, KernelHookFixture {
             }
         }
         // Start with a route position, so that unwinds and removals are possible from the first call.
-        handler.routeLiquidity(1e15);
+        handler.routeLiquidity(1e15, false);
         targetContract(address(handler));
         targetSelector(FuzzSelector({addr: address(handler), selectors: _handlerSelectors()}));
     }
@@ -349,7 +349,7 @@ contract KernelHookInvariantTest is StdInvariant, KernelHookFixture {
         assertEq(_recordedTickets, 0);
         assertEq(hook.currentContext().depth, 0);
 
-        handler.routeSwap(true, 1e9);
+        handler.routeSwap(true, 1e9, false);
 
         assertEq(_recordedDepth, 2);
         assertEq(_recordedTickets, 1);
@@ -376,7 +376,7 @@ contract KernelHookInvariantTest is StdInvariant, KernelHookFixture {
         assertEq(managerLiquidity, seeded);
 
         (uint160 priceBefore,,,) = manager.getSlot0(poolIds[1]);
-        handler.routeSwap(true, 1e9);
+        handler.routeSwap(true, 1e9, false);
         (uint160 priceAfter,,,) = manager.getSlot0(poolIds[1]);
         assertLt(priceAfter, priceBefore);
 
@@ -388,7 +388,7 @@ contract KernelHookInvariantTest is StdInvariant, KernelHookFixture {
 
         handler.toggleActive(0);
         vm.expectRevert(bytes("route did not run"));
-        handler.routeSwap(true, 1e9);
+        handler.routeSwap(true, 1e9, false);
     }
 
     /// @dev reorder and reconfigure run through multicall on a live pool. After both, all three swap subscribers
@@ -481,8 +481,8 @@ contract KernelHookInvariantTest is StdInvariant, KernelHookFixture {
         assertEq(_swapFeeOfNativePool(true), 3000, "first override");
         handler.swapDynamic(true, 1e10);
         handler.swapDynamic(false, 1e10);
-        handler.routeNativeSwap(true, 1e9);
-        handler.routeNativeSwap(false, 1e9);
+        handler.routeNativeSwap(true, 1e9, false);
+        handler.routeNativeSwap(false, 1e9, false);
 
         // An override above the maximum LP fee is skipped, so the second overrider's fee applies.
         handler.setFeeOverride(false, 2);
@@ -507,20 +507,20 @@ contract KernelHookInvariantTest is StdInvariant, KernelHookFixture {
     function test_handler_recursiveRouteFollowsTheDepthLimit() public {
         overriders[0].setExternalCall(CallbackType.BeforeSwap, address(this), abi.encodeCall(this.recordRuntime, ()));
         uint256 relayCalls = relay.callCount(CallbackType.AfterSwap);
-        handler.routeRecursive(true, 1e8);
+        handler.routeRecursive(true, 1e8, false);
         assertEq(relay.callCount(CallbackType.AfterSwap), relayCalls + 1);
         assertEq(_recordedDepth, 3);
         assertEq(_recordedTickets, 2);
-        handler.routeRecursive(false, 1e8);
+        handler.routeRecursive(false, 1e8, false);
         overriders[0].setExternalCall(CallbackType.BeforeSwap, address(0), "");
 
         handler.setDepthLimit(2);
         vm.expectRevert(bytes("relay route did not run"));
-        handler.routeRecursive(true, 1e8);
-        handler.routeSwap(true, 1e9);
+        handler.routeRecursive(true, 1e8, false);
+        handler.routeSwap(true, 1e9, false);
 
         handler.setDepthLimit(1);
-        try handler.routeSwap(true, 1e9) {
+        try handler.routeSwap(true, 1e9, false) {
             fail("a route ran at depth limit 1");
         } catch (bytes memory reason) {
             assertTrue(_contains(reason, IKernelHook.DepthLimitReached.selector), "not DepthLimitReached");
@@ -536,15 +536,31 @@ contract KernelHookInvariantTest is StdInvariant, KernelHookFixture {
     function test_handler_routesADonationToItsOwnPoolAfterTheRequiredExtensions() public {
         handler.reorder(1);
         uint256 balance = vault.balanceOf(poolIds[0], address(extensions[1]), currency0);
-        handler.routeSamePoolDonate(1e6);
+        handler.routeSamePoolDonate(1e6, false);
         assertEq(vault.balanceOf(poolIds[0], address(extensions[1]), currency0), balance - 1e6);
 
         handler.reorder(0);
         vm.expectRevert(bytes("same-pool route did not run"));
-        handler.routeSamePoolDonate(1e6);
+        handler.routeSamePoolDonate(1e6, false);
 
         assertEq(handler.violations(), 0, handler.lastViolation());
         assertEq(handler.successfulCalls("routeSamePoolDonate"), 1);
+    }
+
+    /// @dev With prepare, a route action activates the router and funds it first. After the router was switched off
+    /// and emptied (removeAndReinstall withdraws everything, then fails on the open route position), the route does
+    /// not run without prepare, and runs with it.
+    function test_handler_prepareMakesARouteRunnable() public {
+        handler.toggleActive(0);
+        handler.removeAndReinstall(0, true);
+        assertEq(vault.fundedCurrencyCount(poolIds[0], address(extensions[0])), 0);
+
+        vm.expectRevert(bytes("route did not run"));
+        handler.routeSwap(true, 1e9, false);
+        handler.routeSwap(true, 1e9, true);
+
+        assertEq(handler.violations(), 0, handler.lastViolation());
+        assertEq(handler.successfulCalls("routeSwap"), 1);
     }
 
     /// @dev A pool on the operation stack can be entered again only from its after callback, after all required
