@@ -7,13 +7,7 @@ import {MockExtension} from "../mocks/MockExtension.sol";
 import {CodexRouteCaller} from "../mocks/CodexRouteCaller.sol";
 import {KernelRouteExecutor} from "../../src/KernelRouteExecutor.sol";
 import {IKernelHook} from "../../src/interfaces/IKernelHook.sol";
-import {
-    CALLBACK_COUNT,
-    CallbackType,
-    ExtensionSettings,
-    Operation,
-    RouteAction
-} from "../../src/types/KernelHookTypes.sol";
+import {CallbackType, ExtensionSettings, Operation, RouteAction} from "../../src/types/KernelHookTypes.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
@@ -207,15 +201,10 @@ contract RouteActionsTest is KernelHookFixture {
         }
         bytes32 expectedPoolState = _poolStateHash(routeId);
         assertTrue(vm.revertToStateAndDelete(snapshot));
-        // Sixteen actions need a larger allowance; this tests the action limit rather than the default gas budget.
-        uint32[CALLBACK_COUNT] memory budgets;
-        for (uint256 i; i < CALLBACK_COUNT; ++i) {
-            budgets[i] = 4_000_000;
-        }
-        budgets[uint8(CallbackType.AfterSwap)] = 7_000_000;
-        hook.setExecutionLimits(poolKey, 4, budgets);
+        // These sixteen actions (4 swaps and 12 donations on a pool without extensions) need between 1,300,000 and
+        // 1,350,000 gas of the router's limit with cold storage. 2,000,000 keeps a margin and fits the default budget.
         ExtensionSettings memory maxSettings = _settings(SWAP_CALLBACKS, false, true, ROUTE_GAS_LIMIT);
-        maxSettings.callbackGasLimits[uint8(CallbackType.AfterSwap)] = 5_000_000;
+        maxSettings.callbackGasLimits[uint8(CallbackType.AfterSwap)] = 2_000_000;
         _installAndActivate(poolKey, address(router), maxSettings);
         _fund(router, poolId, VAULT_FUNDS);
         // Build and verify inside the callback without the mock's stored-action and stored-result copies.
