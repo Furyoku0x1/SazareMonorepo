@@ -171,12 +171,12 @@ abstract contract KernelExtension {
         return abi.decode(configuration, (uint64));
     }
 
-    function _authenticate(ExecutionContext memory context, PoolKey memory key) internal view {
+    function _authenticate(ExecutionContext calldata context, PoolKey memory key) internal view {
         if (_entered || _vaultTransferInProgress()) revert ExecutionInProgress();
         _authenticateContext(context, key);
     }
 
-    function _authenticateContext(ExecutionContext memory context, PoolKey memory key) internal view {
+    function _authenticateContext(ExecutionContext calldata context, PoolKey memory key) internal view {
         if (
             context.extension != address(this) || context.depth == 0
                 || PoolId.unwrap(key.toId()) != PoolId.unwrap(context.poolId)

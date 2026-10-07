@@ -357,7 +357,7 @@ contract LimitOrder is KernelExtension, IKernelHookExtension {
         return this.onUninstall.selector;
     }
 
-    function onCallback(ExecutionContext memory context, PoolKey memory key, bytes calldata data)
+    function onCallback(ExecutionContext calldata context, PoolKey memory key, bytes calldata data)
         external
         onlyKernel
         returns (CallbackResult memory result)
@@ -463,7 +463,7 @@ contract LimitOrder is KernelExtension, IKernelHookExtension {
         );
     }
 
-    function _applyPlan(ExecutionContext memory context, MatchPlan memory plan) private {
+    function _applyPlan(ExecutionContext calldata context, MatchPlan memory plan) private {
         PoolId pool = context.poolId;
         for (uint256 i; i < plan.entryCount; ++i) {
             PlannedFill memory fill = plan.entries[i];
