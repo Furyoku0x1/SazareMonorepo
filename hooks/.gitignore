@@ -12,7 +12,11 @@ out/
 /broadcast/**/dry-run/
 
 # Docs
-docs/
+docs/*
+!docs/limit-orders-spec.md
+!docs/range-limit-orders.md
+!docs/limit-order-implementation.md
+!docs/limit-order-validation.json
 
 # Dotenv file
 .env

@@ -7,16 +7,23 @@ allow_paths = ["../core"]
 auto_detect_remappings = false
 # Uniswap v4 uses transient storage (EIP-1153).
 evm_version = "cancun"
+via_ir = false
+optimizer = true
+# Favor compact deployment bytecode for the single-contract extensions.
+optimizer_runs = 1
 remappings = [
     "core/=../core/",
     "forge-std/=../lib/forge-std/src/",
     "oz/contracts/=../lib/openzeppelin-contracts/contracts/",
+    "@openzeppelin/contracts/=../lib/openzeppelin-contracts/contracts/",
     "v4-core/=../lib/v4-core/",
+    "@uniswap/v4-core/=../lib/v4-core/",
     "v4-periphery/=../lib/v4-periphery/",
     "v4-hooks/=../lib/v4-hooks-public/",
+    "uniswap-hooks/=../lib/uniswap-hooks/",
     "permit2/=../lib/permit2/",
     "solmate/=../lib/solmate/",
 ]
-solc = "0.8.37"
+auto_detect_solc = true
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

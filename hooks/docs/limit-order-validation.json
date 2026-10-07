@@ -1,0 +1,45 @@
+{
+  "scope": "LimitOrder-only candidate tree over committed Kernel; excludes uncommitted Arbitrage and core changes",
+  "kernel_base_commit": "95313a2acc099bf745d121d6c2869b2f2ea68b19",
+  "compiler": {
+    "extension_solc": "0.8.37",
+    "pool_manager_test_solc": "0.8.26",
+    "evm_version": "cancun",
+    "optimizer": true,
+    "optimizer_runs": 1,
+    "via_ir": false
+  },
+  "tests": {
+    "passed": 32,
+    "failed": 0,
+    "skipped": 0,
+    "suites": {
+      "LimitOrderTest": 14,
+      "RangeLimitOrderTest": 10,
+      "RangeOrderMathTest": 8
+    },
+    "fuzz_runs_per_test": 256
+  },
+  "build": {
+    "passed": true,
+    "runtime_bytes": 24487,
+    "runtime_limit_bytes": 24576,
+    "initcode_bytes": 25346,
+    "runtime_link_references": {},
+    "initcode_link_references": {},
+    "lint": "Build emits Foundry advisory lint warnings; not a security audit"
+  },
+  "source_sha256": {
+    "hooks/src/LimitOrder.sol": "47b13bd77bccad63bef73f063851e97b702d984b5c85bd8f19346076682cd8c3",
+    "hooks/src/base/KernelExtension.sol": "32df41da258b5175990c51ada9abee40d76d9c5e4bfff3f698fe5aec30201385",
+    "hooks/src/libraries/ExtensionRead.sol": "89bf3a2211a4d8293c6c758ba9b2268e3dd691a3bdca6e4afc65a45d84e91731",
+    "hooks/src/libraries/OrderMath.sol": "28e70e33c99f0a3b918e9c0bfe274437f10f294f308ff989d4bf295f19d9642c",
+    "hooks/src/libraries/RangeOrderMath.sol": "002c3c181c61a2a7f40be46572d039f3294e6445b293095edbb6ac7a61b50f6a",
+    "hooks/test/LimitOrder.t.sol": "5e6f6a37fea98b448a26ac5495ff0bb763a1a11d7241346193727d873af29dfe",
+    "hooks/test/RangeLimitOrder.t.sol": "8ec443ad8eb0487303445b1ea77e3de4b91892acd9b3079cdbad44445ad0f615",
+    "hooks/test/RangeOrderMath.t.sol": "8da6b38c22010744d24c3d1d25ed48b6b241eb0abd067b22078f5dcaf80be531",
+    "hooks/test/utils/ExtensionFixture.sol": "0b6061fc0ee610bd148ff29b0a246aa9f1ff7cbee5a9cfd94fac2dcb42ccec08",
+    "hooks/test/utils/PoolManagerArtifact.sol": "56bd1a4bf209f985aa9d76da0f50b0b00e2e8ff71f640e2204d01ff5b209a439",
+    "hooks/foundry.toml": "01ee25ad683f7f108775d01ac5cf446d410a48d3c5df01c3e2d0ba46a40dc305"
+  }
+}
