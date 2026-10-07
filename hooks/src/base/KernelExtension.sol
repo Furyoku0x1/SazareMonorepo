@@ -98,12 +98,12 @@ abstract contract KernelExtension {
     }
 
     /// @dev Read only the context fields used by public-entry and preview guards.
-    /// The immutable Kernel returns seven static ABI words; avoid decoding and
-    /// allocating the unused root ID, sender and callback fields.
+    /// The immutable Kernel returns twelve static ABI words; avoid decoding and
+    /// allocating the unused root ID, sender, callback, origin and prior fields.
     function _contextState() internal view returns (PoolId pool, address extension, uint8 depth) {
         (bool success, bytes memory data) =
-            address(KERNEL).read(50_000, 224, abi.encodeCall(IKernelHook.currentContext, ()));
-        if (!success || data.length != 224) revert InvalidConfiguration();
+            address(KERNEL).read(50_000, 384, abi.encodeCall(IKernelHook.currentContext, ()));
+        if (!success || data.length != 384) revert InvalidConfiguration();
         uint256 extensionWord = _word(data, 128);
         uint256 depthWord = _word(data, 192);
         if (extensionWord > type(uint160).max || depthWord > type(uint8).max) revert InvalidConfiguration();
