@@ -672,6 +672,61 @@ contract BookWalkTest is Test {
         assertEq(f.specified, 0, "the level is never filled");
     }
 
+    /// @dev Sol's review: range amounts inside a segment whose far point the walk never loaded skipped the amount
+    /// bound. Near the top price, one unit of an ask range costs about 3.3e38 input, beyond the hook's int128 deltas.
+    /// The book now ends at the range and the empty AMM takes the swap.
+    function test_regression_rangeAmountBoundAtTopPrice() public {
+        _poolAt(0, 887_000);
+        _range(true, 887_000, 887_100, 1 << 96);
+        _swapChecked(false, 1, TickMath.getSqrtPriceAtTick(887_001));
+        _checkEndedAt(887_000);
+    }
+
+    function test_regression_rangeAmountBoundAtBottomPrice() public {
+        _poolAt(0, -887_000);
+        _range(false, -887_100, -887_000, 1 << 96);
+        _swapChecked(true, 1, TickMath.getSqrtPriceAtTick(-887_001));
+        _checkEndedAt(-887_000);
+    }
+
+    /// @dev A range up to the limit whose input, about 1.3 * 2^126, would fit int128 but not the book's bound.
+    function test_regression_rangeAmountBoundBelowInt128() public {
+        _rangeToLimit(480_000, 481_000);
+        _checkEndedAt(480_000);
+    }
+
+    /// @dev The same over a stretch wider than one search: the book fills up to a searched word edge, within its bound.
+    function test_rangeAmountBoundEndsAtAPoint() public {
+        _rangeToLimit(430_000, 440_000);
+        (BookWalk.Fill memory f,) = hook.last();
+        assertEq(f.stop, BookWalk.CAP);
+        assertGt(f.specified, 0);
+        assertLe(f.other, BookWalk.MAX_BOOK_AMOUNT);
+    }
+
+    /// @dev An ask range of the largest liquidity from `lower`, and an exact output past what it holds up to `upper`,
+    /// with the limit there.
+    function _rangeToLimit(int24 lower, int24 upper) private {
+        _poolAt(0, lower);
+        uint128 liquidity = RangeBook.MAX_RANGE_LIQUIDITY;
+        _range(true, lower, upper + 1000, liquidity);
+        uint160 low = TickMath.getSqrtPriceAtTick(lower);
+        uint160 limit = TickMath.getSqrtPriceAtTick(upper);
+        uint256 cost = SqrtPriceMath.getAmount1Delta(low, limit, liquidity, true);
+        assertGt(cost, BookWalk.MAX_BOOK_AMOUNT);
+        assertLt(cost, uint128(type(int128).max));
+        token1.mint(address(this), 1 << 128);
+        _swapChecked(false, int256(SqrtPriceMath.getAmount0Delta(low, limit, liquidity, false) + 1000), limit);
+    }
+
+    function _checkEndedAt(int24 tick) private view {
+        (BookWalk.Fill memory f,) = hook.last();
+        assertEq(f.stop, BookWalk.CAP);
+        assertEq(f.specified, 0);
+        assertEq(f.other, 0);
+        assertEq(f.frontier, TickMath.getSqrtPriceAtTick(tick), "the book ends at the range");
+    }
+
     // ---------------------------------------------------------------- brute force
 
     function test_bruteForce_exactInput() public {
@@ -856,7 +911,8 @@ contract BookWalkTest is Test {
             RangeModel memory o = rangeOrders[i];
             uint160 start = hook.start(o.sell0);
             uint160 frontier = hook.rangeFrontier(o.id);
-            if (start == 0 || frontier == TickMath.getSqrtPriceAtTick(o.sell0 ? o.upper : o.lower)) continue;
+            if (start == 0 || hook.rangeOrder(o.id).frozen != 0) continue; // cancelled: nothing left to sell
+            if (frontier == TickMath.getSqrtPriceAtTick(o.sell0 ? o.upper : o.lower)) continue;
             assertTrue(o.sell0 ? frontier >= start : frontier <= start, "an unsold range lies before the start");
         }
     }
@@ -926,6 +982,15 @@ contract BookWalkTest is Test {
         claimed[1] = manager.balanceOf(HOOK, key.currency1.toId());
     }
 
+    /// @dev A pool at `tick` with no AMM liquidity.
+    function _poolAt(uint24 fee, int24 tick) private {
+        key = PoolKey(Currency.wrap(address(token0)), Currency.wrap(address(token1)), fee, 10, IHooks(HOOK));
+        id = key.toId();
+        manager.initialize(key, TickMath.getSqrtPriceAtTick(tick));
+        claimed[0] = manager.balanceOf(HOOK, key.currency0.toId());
+        claimed[1] = manager.balanceOf(HOOK, key.currency1.toId());
+    }
+
     function _twin() private {
         twin = PoolKey(key.currency0, key.currency1, key.fee, 10, IHooks(address(0)));
         manager.initialize(twin, PRICE_1);
@@ -973,7 +1038,7 @@ contract BookWalkTest is Test {
         }
     }
 
-    /// @dev More orders where the post-only rule allows, and a cancellation, between swaps.
+    /// @dev More orders where the post-only rule allows, and cancellations, between swaps.
     function _placeMore(uint256 r, bool thin) private {
         (, int24 tick,,) = manager.getSlot0(id);
         if (tick < -880_000 || tick > 880_000) return; // the price ran to a limit
@@ -984,6 +1049,8 @@ contract BookWalkTest is Test {
             FixedModel memory o = fixedOrders[(r >> 30) % fixedOrders.length];
             hook.cancelFixed(o.id);
         }
+        RangeModel memory range = rangeOrders[(r >> 40) % rangeOrders.length];
+        if (hook.rangeOrder(range.id).frozen == 0) hook.cancelRange(range.id);
     }
 
     function _books(uint128 liquidity, uint128 fixedAmount) private {

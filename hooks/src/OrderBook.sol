@@ -377,6 +377,8 @@ contract OrderBook is KernelExtension, IKernelHookExtension {
         returns (CallbackResult memory result)
     {
         PoolId pool = context.poolId;
+        // A record whose afterSwap did not run (skipped, or out of gas) must not reach this swap's.
+        _setSwapFrontier(pool, context.depth, 0);
         Policy storage policy = _policies[pool];
         if (context.depth > 1 && !policy.nestedFills) return result;
         // SwapParams is the static prefix of the Kernel's (params, hookData) encoding.
@@ -444,7 +446,11 @@ contract OrderBook is KernelExtension, IKernelHookExtension {
         } else if (frontier != 0) {
             (,,, uint24 lpFee) = MANAGER.getSlot0(pool);
             uint160 target = BookEngine.syncTarget(MANAGER, pool, key.tickSpacing, lpFee, frontier);
-            if (target != 0) _moveTo(pool, key, target);
+            if (target != 0) {
+                try this.route(key, 0, 0, target) {
+                    emit PriceMoved(pool, target);
+                } catch {}
+            }
         }
     }
 
@@ -456,22 +462,18 @@ contract OrderBook is KernelExtension, IKernelHookExtension {
         uint256 cap = uint256(uint128(type(int128).max));
         if (amount0 > cap) amount0 = cap;
         if (amount1 > cap) amount1 = cap;
-        RouteAction[] memory actions = new RouteAction[](1);
-        actions[0] = RouteAction(key, Operation.Donate, abi.encode(amount0, amount1), "");
-        try KERNEL.executeRoute(actions) {
+        try this.route(key, amount0, amount1, 0) {
             ledger.lpFees[0] -= amount0;
             ledger.lpFees[1] -= amount1;
             emit LpFeesDonated(pool, amount0, amount1);
         } catch {}
     }
 
-    function _moveTo(PoolId pool, PoolKey calldata key, uint160 target) private {
-        (uint160 price,,,) = MANAGER.getSlot0(pool);
-        RouteAction[] memory actions = new RouteAction[](1);
-        actions[0] = RouteAction(key, Operation.Swap, abi.encode(SwapParams(target < price, -1, target)), "");
-        try KERNEL.executeRoute(actions) {
-            emit PriceMoved(pool, target);
-        } catch {}
+    /// @notice The book's same-pool routes from afterSwap (see `BookEngine.route`), in a call to itself so that a
+    /// route that left the vault apart from the ledger rolls back. Only the book calls it.
+    function route(PoolKey calldata key, uint256 amount0, uint256 amount1, uint160 target) external {
+        if (msg.sender != address(this)) revert Unauthorized();
+        BookEngine.route(KERNEL, VAULT, MANAGER, key, amount0, amount1, target);
     }
 
     function _request(

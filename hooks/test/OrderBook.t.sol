@@ -9,6 +9,7 @@ import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {SqrtPriceMath} from "v4-core/src/libraries/SqrtPriceMath.sol";
 import {FullMath} from "v4-core/src/libraries/FullMath.sol";
 import {HookCatalog} from "core/src/HookCatalog.sol";
+import {KernelHookVault} from "core/src/KernelHookVault.sol";
 import {KernelHook} from "core/src/KernelHook.sol";
 import {IKernelHook} from "core/src/interfaces/IKernelHook.sol";
 import {IHookExtension} from "core/src/interfaces/IHookExtension.sol";
@@ -30,7 +31,7 @@ import {IKernelHookExtension} from "core/src/interfaces/IKernelHookExtension.sol
 import {CallbackResult, ExecutionContext} from "core/src/types/KernelHookTypes.sol";
 import {OrderBook, IWETH} from "../src/OrderBook.sol";
 import {BookWalk} from "../src/libraries/BookWalk.sol";
-import {BookOrders} from "../src/libraries/BookOrders.sol";
+import {BookOrders, IDepositVault} from "../src/libraries/BookOrders.sol";
 import {FixedBook} from "../src/libraries/FixedBook.sol";
 import {RangeBook} from "../src/libraries/RangeBook.sol";
 
@@ -68,10 +69,82 @@ contract FeeOverrider is IKernelHookExtension {
 
     function onCallback(ExecutionContext calldata, PoolKey calldata, bytes calldata)
         external
-        view
+        virtual
         returns (CallbackResult memory)
     {
         return CallbackResult(0, 0, FEE | LPFeeLibrary.OVERRIDE_FEE_FLAG);
+    }
+}
+
+/// @dev An extension that, inside a nested route, pays the route executor one unit of a currency straight through the
+/// PoolManager, with no callback delta.
+contract ExecutorGift is FeeOverrider {
+    IPoolManager public immutable MANAGER;
+    bool public immutable PAY1;
+
+    constructor(IPoolManager manager, bool pay1) FeeOverrider(0) {
+        MANAGER = manager;
+        PAY1 = pay1;
+    }
+
+    function onCallback(ExecutionContext calldata context, PoolKey calldata key, bytes calldata)
+        external
+        override
+        returns (CallbackResult memory)
+    {
+        if (context.depth > 1) {
+            Currency currency = PAY1 ? key.currency1 : key.currency0;
+            MANAGER.sync(currency);
+            MockERC20(Currency.unwrap(currency)).transfer(address(MANAGER), 1);
+            MANAGER.settleFor(context.sender);
+        }
+        return CallbackResult(0, 0, 0);
+    }
+}
+
+/// @dev An extension that charges (positive) or credits (negative) the caller of an exact-input swap of one unit, as
+/// the book's empty-pool price move is: a charge in the input currency, a credit in the output currency.
+contract UnitSwapTax is FeeOverrider {
+    int128 public immutable AMOUNT;
+
+    constructor(int128 amount) FeeOverrider(0) {
+        AMOUNT = amount;
+    }
+
+    function fund(address vault, PoolId pool, Currency currency, uint256 amount) external {
+        MockERC20(Currency.unwrap(currency)).approve(vault, amount);
+        IDepositVault(vault).deposit(pool, address(this), currency, amount);
+    }
+
+    function onCallback(ExecutionContext calldata, PoolKey calldata, bytes calldata data)
+        external
+        view
+        override
+        returns (CallbackResult memory)
+    {
+        SwapParams memory params = abi.decode(data, (SwapParams));
+        if (params.amountSpecified != -1) return CallbackResult(0, 0, 0);
+        bool charge0 = params.zeroForOne == AMOUNT > 0;
+        return charge0 ? CallbackResult(AMOUNT, 0, 0) : CallbackResult(0, AMOUNT, 0);
+    }
+}
+
+/// @dev Two swaps in one transaction (Foundry clears transient storage between a test's own calls), the first with a
+/// gas allowance of its own.
+contract TwoSwaps {
+    PoolSwapTest internal immutable ROUTER;
+
+    constructor(PoolSwapTest router, Currency currency0, Currency currency1) {
+        ROUTER = router;
+        MockERC20(Currency.unwrap(currency0)).approve(address(router), type(uint256).max);
+        MockERC20(Currency.unwrap(currency1)).approve(address(router), type(uint256).max);
+    }
+
+    function run(PoolKey calldata key, SwapParams calldata first, uint256 firstGas, SwapParams calldata second)
+        external
+    {
+        ROUTER.swap{gas: firstGas}(key, first, PoolSwapTest.TestSettings(false, false), "");
+        ROUTER.swap(key, second, PoolSwapTest.TestSettings(false, false), "");
     }
 }
 
@@ -354,19 +427,179 @@ contract OrderBookTest is Test {
         _checkBacking();
     }
 
-    /// @dev The book's callback runs out of gas: it is skipped, the swap goes to the AMM, and the book is unchanged.
-    function test_bookOutOfGasLeavesTheSwapToTheAmm() public {
+    /// @dev The book's callback has too little gas for its walk: the gas guard stops it cleanly with no fill, so the
+    /// Kernel does not skip it, and the swap goes to the AMM.
+    function test_gasGuardLeavesTheSwapToTheAmm() public {
         _lp(-6000, 6000, 1e18);
         ExtensionSettings memory settings = _settings();
-        settings.callbackGasLimits[uint8(CallbackType.BeforeSwap)] = 120_000;
+        settings.callbackGasLimits[uint8(CallbackType.BeforeSwap)] = 120_000; // below the policy's 300,000 reserve
         _installWith(settings, _policy());
         uint256 id = _placeFixed(true, 100, 1e11);
-        OrderBook.Policy memory p = _policy();
+        vm.recordLogs();
         BalanceDelta delta = _swap(SwapParams(false, -2e17, MAX_LIMIT));
+        assertFalse(_skipped(), "a clean stop, not a skip");
         assertEq(uint256(int256(-delta.amount1())), 2e17, "the swap went through");
         (, uint64 filled) = book.fixedOrder(pool, id);
-        assertEq(filled, 0, "the book was skipped");
-        p; // policy unchanged
+        assertEq(filled, 0, "no fill");
+        _checkBacking();
+    }
+
+    /// @dev Sol's review: a failure after the book's commit, here in the Kernel's settlement of its output, skips the
+    /// book and rolls back all of its writes; the swap goes to the AMM, and the next swap fills the order.
+    function test_bookFailureRollsBack() public {
+        _lp(-6000, 6000, 1e18);
+        _install(_policy());
+        uint256 id = _placeFixed(true, 100, 1e11);
+        (uint160[2] memory start,) = book.bookBounds(pool);
+        OrderBook.Ledger memory before = book.ledger(pool);
+        address vault = address(hook.VAULT());
+        vm.mockCallRevert(vault, abi.encodeWithSelector(KernelHookVault.settleDebtFor.selector, pool, address(book)), "");
+        vm.recordLogs();
+        BalanceDelta delta = _swap(SwapParams(false, -2e17, MAX_LIMIT));
+        assertTrue(_skipped(), "the book was skipped");
+        assertEq(uint256(int256(-delta.amount1())), 2e17, "the swap went through");
+        (, uint64 filled) = book.fixedOrder(pool, id);
+        assertEq(filled, 0, "fills rolled back");
+        (uint160[2] memory startAfter,) = book.bookBounds(pool);
+        assertEq(startAfter[0], start[0], "start rolled back");
+        assertEq(keccak256(abi.encode(book.ledger(pool))), keccak256(abi.encode(before)), "ledger rolled back");
+        _checkBacking();
+        vm.clearMockedCalls();
+        _swap(SwapParams(false, -2e17, MAX_LIMIT));
+        (, filled) = book.fixedOrder(pool, id);
+        assertGt(filled, 0, "the next swap fills the order");
+        _checkBacking();
+    }
+
+    /// @dev Sol's review: an earlier extension that charges the book's empty-pool price move took it from the book's
+    /// vault without the ledger. A move that trades anything now rolls back.
+    function test_priceMoveThatIsChargedRollsBack() public {
+        _taxedPriceMove(1);
+    }
+
+    /// @dev The same with a credit, which would leave the vault above the ledger.
+    function test_priceMoveThatIsCreditedRollsBack() public {
+        _taxedPriceMove(-1);
+    }
+
+    function _taxedPriceMove(int128 amount) private {
+        UnitSwapTax tax = new UnitSwapTax(amount);
+        uint16 beforeSwap = uint16(1) << uint8(CallbackType.BeforeSwap);
+        catalog.admit(address(tax), IHookCatalog.Entry(address(tax).codehash, beforeSwap, true, false, false, true, true));
+        ExtensionSettings memory settings;
+        settings.callbackMask = beforeSwap;
+        settings.optionalCallbacks = true;
+        settings.lifecycleGasLimit = 500_000;
+        settings.callbackGasLimits[uint8(CallbackType.BeforeSwap)] = 200_000;
+        hook.installExtension(key, IHookExtension(address(tax)), settings);
+        MockERC20(Currency.unwrap(currency0)).mint(address(tax), 1e6);
+        tax.fund(address(hook.VAULT()), pool, currency0, 1e6);
+        _installInactive(_settings(), _policy());
+        hook.activateExtension(key, IHookExtension(address(tax)));
+        hook.activateExtension(key, IHookExtension(address(book)));
+        _placeFixed(true, 200, 1e11);
+        vm.recordLogs();
+        _swap(SwapParams(false, -5e16, MAX_LIMIT));
+        assertFalse(_emitted(OrderBook.PriceMoved.selector), "no price move");
+        (uint160 price,,,) = manager.getSlot0(pool);
+        assertEq(price, PRICE_1, "the price stays");
+        _checkBacking();
+    }
+
+    /// @dev Sol's review: an extension could pay the route executor directly during the price move, which credited
+    /// the book's vault although the swap's own delta was zero. The book now checks its vault balances: the move rolls
+    /// back with the payment, the fill stays, and the next move succeeds once the extension is gone.
+    function test_priceMoveWithAPaymentToTheExecutorRollsBack() public {
+        ExecutorGift gift = _gift(CallbackType.BeforeSwap, false);
+        _installInactive(_settings(), _policy());
+        hook.activateExtension(key, IHookExtension(address(gift)));
+        hook.activateExtension(key, IHookExtension(address(book)));
+        uint256 id = _placeFixed(true, 200, 1e11);
+        _expectGift();
+        vm.recordLogs();
+        _swap(SwapParams(false, -5e16, MAX_LIMIT));
+        // The recorded logs keep the book's own skip inside the reverted move (ReentrancyDenied), so the fill and the
+        // expected payment show that the book ran and reached the move.
+        assertFalse(_emitted(OrderBook.PriceMoved.selector), "no price move");
+        (, uint64 filled) = book.fixedOrder(pool, id);
+        assertGt(filled, 0, "the fill stays");
+        (uint160 price,,,) = manager.getSlot0(pool);
+        assertEq(price, PRICE_1, "the price stays");
+        assertEq(MockERC20(Currency.unwrap(currency0)).balanceOf(address(gift)), 1e6, "the payment rolled back");
+        _checkBacking();
+        hook.deactivateExtension(key, IHookExtension(address(gift)));
+        _swap(SwapParams(false, -1e16, MAX_LIMIT));
+        (price,,,) = manager.getSlot0(pool);
+        assertEq(price, TickMath.getSqrtPriceAtTick(200), "the next move succeeds");
+        _checkBacking();
+    }
+
+    /// @dev The same during the LP donation, with the payment in the donated currency, which would have cost the book
+    /// less than it booked.
+    function test_donationWithAPaymentToTheExecutorRollsBack() public {
+        _lp(-6000, 6000, 1e18);
+        ExecutorGift gift = _gift(CallbackType.BeforeDonate, true);
+        hook.activateExtension(key, IHookExtension(address(gift)));
+        _install(_policy());
+        _placeFixed(true, 100, 1e11);
+        _expectGift();
+        vm.recordLogs();
+        _swap(SwapParams(false, -2e17, MAX_LIMIT));
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertFalse(_skippedIn(logs), "the book ran");
+        assertTrue(_emittedIn(logs, OrderBook.BookFilled.selector), "the book filled");
+        assertFalse(_emittedIn(logs, OrderBook.LpFeesDonated.selector), "no donation");
+        uint256 pending = book.ledger(pool).lpFees[1];
+        assertGt(pending, 0, "the LPs' share kept for later");
+        assertEq(MockERC20(Currency.unwrap(currency1)).balanceOf(address(gift)), 1e6, "the payment rolled back");
+        _checkBacking();
+        hook.deactivateExtension(key, IHookExtension(address(gift)));
+        vm.recordLogs();
+        _swap(SwapParams(true, -1e15, MIN_LIMIT));
+        assertTrue(_emitted(OrderBook.LpFeesDonated.selector), "the retry donates");
+        assertEq(book.ledger(pool).lpFees[1], 0, "the kept share donated");
+        _checkBacking();
+    }
+
+    function _gift(CallbackType callback, bool pay1) private returns (ExecutorGift gift) {
+        gift = new ExecutorGift(manager, pay1);
+        uint16 mask = uint16(1) << uint8(callback);
+        catalog.admit(address(gift), IHookCatalog.Entry(address(gift).codehash, mask, true, false, false, true, true));
+        ExtensionSettings memory settings;
+        settings.callbackMask = mask;
+        settings.optionalCallbacks = true;
+        settings.lifecycleGasLimit = 500_000;
+        settings.callbackGasLimits[uint8(callback)] = 200_000;
+        hook.installExtension(key, IHookExtension(address(gift)), settings);
+        MockERC20(Currency.unwrap(pay1 ? currency1 : currency0)).mint(address(gift), 1e6);
+    }
+
+    /// @dev The extension's payment reaches the PoolManager, for the route executor.
+    function _expectGift() private {
+        vm.expectCall(address(manager), abi.encodeCall(IPoolManager.settleFor, (address(hook.ROUTE_EXECUTOR()))));
+    }
+
+    /// @dev Sol's review: a frontier recorded by a swap whose afterSwap was skipped reached a later swap's afterSwap in
+    /// the same transaction, which moved the empty pool's price to it. Each beforeSwap now clears the record.
+    function test_skippedAfterSwapLeavesNoFrontier() public {
+        ExtensionSettings memory settings = _settings();
+        settings.callbackGasLimits[uint8(CallbackType.BeforeSwap)] = 1_000_000;
+        settings.callbackGasLimits[uint8(CallbackType.AfterSwap)] = 3_000_000;
+        _installWith(settings, _policy());
+        uint256 id = _placeFixed(true, 200, 1e11);
+        TwoSwaps swaps = new TwoSwaps(swapRouter, currency0, currency1);
+        MockERC20(Currency.unwrap(currency0)).mint(address(swaps), 1e18);
+        MockERC20(Currency.unwrap(currency1)).mint(address(swaps), 1e18);
+        uint160 limit = TickMath.getSqrtPriceAtTick(-100);
+        vm.recordLogs();
+        // The first swap fills the book with too little gas left for the book's afterSwap. The second, which the book
+        // does not fill, moves the empty AMM to its limit.
+        swaps.run(key, SwapParams(false, -5e16, MAX_LIMIT), 2_500_000, SwapParams(true, -1e6, limit));
+        assertTrue(_skipped(), "the first afterSwap skipped");
+        (, uint64 filled) = book.fixedOrder(pool, id);
+        assertGt(filled, 0, "the first swap filled the book");
+        (uint160 price,,,) = manager.getSlot0(pool);
+        assertEq(price, limit, "no move to the first swap's frontier");
         _checkBacking();
     }
 
@@ -532,8 +765,26 @@ contract OrderBookTest is Test {
         }
     }
 
+    /// @dev Whether the Kernel skipped the book in the recorded logs.
+    function _skipped() private returns (bool) {
+        return _skippedIn(vm.getRecordedLogs());
+    }
+
+    function _skippedIn(Vm.Log[] memory logs) private view returns (bool) {
+        for (uint256 i; i < logs.length; ++i) {
+            if (
+                logs[i].emitter == address(hook) && logs[i].topics[0] == IKernelHook.ExtensionSkipped.selector
+                    && logs[i].topics[2] == bytes32(uint256(uint160(address(book))))
+            ) return true;
+        }
+        return false;
+    }
+
     function _emitted(bytes32 topic) private returns (bool) {
-        Vm.Log[] memory logs = vm.getRecordedLogs();
+        return _emittedIn(vm.getRecordedLogs(), topic);
+    }
+
+    function _emittedIn(Vm.Log[] memory logs, bytes32 topic) private view returns (bool) {
         for (uint256 i; i < logs.length; ++i) {
             if (logs[i].emitter == address(book) && logs[i].topics[0] == topic) return true;
         }
@@ -567,12 +818,17 @@ contract OrderBookTest is Test {
     }
 
     function _installWith(ExtensionSettings memory settings, OrderBook.Policy memory p) internal {
+        _installInactive(settings, p);
+        hook.activateExtension(key, IHookExtension(address(book)));
+    }
+
+    /// @dev Installs, sets the policy and configures the book, leaving `settings` at its version.
+    function _installInactive(ExtensionSettings memory settings, OrderBook.Policy memory p) internal {
         settings.configuration = abi.encode(uint64(0));
         hook.installExtension(key, IHookExtension(address(book)), settings);
         book.setPolicy(key, 0, p);
         settings.configuration = abi.encode(uint64(1));
         hook.configureExtension(key, IHookExtension(address(book)), settings);
-        hook.activateExtension(key, IHookExtension(address(book)));
     }
 
     function _placeFixed(bool sell0, int24 tick, uint64 lots) internal returns (uint256 id) {

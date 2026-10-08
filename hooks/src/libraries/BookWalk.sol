@@ -128,6 +128,7 @@ library BookWalk {
         uint160 end; // the book cannot fill beyond this price; 0 while open
         uint160 bound; // searches stop here: the nearer of the limit and the side's extent
         uint160 reach; // the book's spending crosses empty space no further: the AMM's next reachable price
+        Amounts ahead; // the book from the walk's start through the last segment, up to the next point
     }
 
     // ---------------------------------------------------------------- entry points
@@ -576,6 +577,7 @@ library BookWalk {
         p.count = 1;
         (p.rangePoint, p.rangeFound) = RangeBook.next(b.ranges.sides[p.side], p.rc, p.bound, r.limits.words);
         _searchFixed(p, b, r);
+        _ahead(p, r);
     }
 
     /// @dev An array of n segment pointers, each assigned when its segment is made: segments are allocated only
@@ -601,21 +603,15 @@ library BookWalk {
         if (p.end != 0) return false;
         Seg memory prev = p.segs[p.count - 1];
         uint160 x = _nextPoint(p);
-        // The book cannot load more points than its limit, or exceed its amounts.
+        // The book cannot load more points than its limit; `_ahead` kept its amounts within theirs.
         if (p.count == p.segs.length) {
-            p.end = prev.price;
-            return false;
-        }
-        Amounts memory before = _sum(prev.before, prev.level);
-        if (prev.liquidity != 0) _addTo(before, _rangeAll(r, prev.price, x, prev));
-        if (before.principal + before.fee > MAX_BOOK_AMOUNT || before.out > MAX_BOOK_AMOUNT) {
             p.end = prev.price;
             return false;
         }
         Seg memory s;
         p.segs[p.count] = s;
         s.price = x;
-        s.before = before;
+        s.before = p.ahead;
         s.complete = true;
         if (x == p.rangePoint) {
             RangeBook.Side storage rs = b.ranges.sides[p.side];
@@ -635,7 +631,21 @@ library BookWalk {
         }
         _snapshot(p, s);
         ++p.count;
+        _ahead(p, r);
         return true;
+    }
+
+    /// @dev The book's amounts through the last segment's range liquidity up to the next point, beyond which the walk
+    /// computes none before loading that point. The book ends at the segment if they would exceed the amount bound.
+    /// ponytail: it ends at the segment's start, not inside it; filling up to the bound would let such a stretch fill
+    /// over several swaps.
+    function _ahead(Plan memory p, Request memory r) private pure {
+        if (p.end != 0) return;
+        Seg memory s = p.segs[p.count - 1];
+        Amounts memory a = _sum(s.before, s.level);
+        if (s.liquidity != 0) _addTo(a, _rangeAll(r, s.price, _nextPoint(p), s));
+        p.ahead = a;
+        if (a.principal + a.fee > MAX_BOOK_AMOUNT || a.out > MAX_BOOK_AMOUNT) p.end = s.price;
     }
 
     /// @dev Records the range cursor in a new segment. The book ends at a segment it cannot pass: a level it cannot
