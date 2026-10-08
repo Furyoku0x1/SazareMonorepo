@@ -1,0 +1,22 @@
+{
+  "range_cancel_touched_gross": "91636",
+  "range_cancel_touched_net": "73309",
+  "range_cancel_untouched_gross": "88044",
+  "range_cancel_untouched_net": "70436",
+  "range_claim_gross": "59537",
+  "range_claim_net": "59537",
+  "range_place_first_gross": "231879",
+  "range_place_first_net": "231879",
+  "range_place_shared_word_and_tick_gross": "148544",
+  "range_place_shared_word_and_tick_net": "148544",
+  "range_walk_10_ranges_gross": "333828",
+  "range_walk_10_ranges_net": "333828",
+  "range_walk_1_range_first_stop_gross": "148672",
+  "range_walk_1_range_first_stop_net": "148672",
+  "range_walk_dead_boundary_and_stop_gross": "164034",
+  "range_walk_dead_boundary_and_stop_net": "131228",
+  "range_walk_empty_gross": "43910",
+  "range_walk_empty_net": "43910",
+  "range_walk_resume_from_stop_gross": "79255",
+  "range_walk_resume_from_stop_net": "69655"
+}

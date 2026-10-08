@@ -1,0 +1,8 @@
+{
+  "fixed_65536_cancel_deep_first_gross": "98593",
+  "fixed_65536_cancel_deep_first_net": "98593",
+  "fixed_65536_cancel_deep_second_gross": "84067",
+  "fixed_65536_cancel_deep_second_net": "84067",
+  "fixed_65536_take_all_256_chunks_gross": "1764678",
+  "fixed_65536_take_all_256_chunks_net": "1759878"
+}

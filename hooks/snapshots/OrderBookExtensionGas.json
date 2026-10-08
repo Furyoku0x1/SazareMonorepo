@@ -1,0 +1,10 @@
+{
+  "cancel_range": "79578",
+  "claim_fixed": "185172",
+  "place_fixed_first": "491982",
+  "place_fixed_join": "270632",
+  "place_range": "441684",
+  "swap_book_and_amm": "894486",
+  "swap_empty_side": "361964",
+  "swap_through_level_and_range": "706032"
+}
