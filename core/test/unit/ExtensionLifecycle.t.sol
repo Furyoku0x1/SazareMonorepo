@@ -434,6 +434,14 @@ contract ExtensionConfigurationTest is CodexLifecycleFixture {
         assertTrue(stored.optionalCallbacks);
     }
 
+    function test_configureExtension_revertsWhenMadeRequiredWhileAnotherSubscriberIsActive() public {
+        hook.configureExtension(poolKey, extension, _settings(SWAP_CALLBACKS, true, false));
+        CodexLifecycleExtension second = _installSecond(SWAP_CALLBACKS);
+        hook.activateExtension(poolKey, second);
+        vm.expectRevert(abi.encodeWithSelector(IKernelHook.SubscribersActive.selector));
+        hook.configureExtension(poolKey, extension, _settings(SWAP_CALLBACKS, false, false));
+    }
+
     function test_configureExtension_revertsWhenOldSubscriberIsActive() public {
         CodexLifecycleExtension second = _installSecond(SWAP_CALLBACKS);
         hook.activateExtension(poolKey, second);

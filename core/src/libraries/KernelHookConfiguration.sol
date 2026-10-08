@@ -94,6 +94,11 @@ library KernelHookConfiguration {
             _unsubscribe(state, poolId, account, installation.settings.callbackMask);
             _subscribe(state, poolId, account, settings.callbackMask);
         }
+        // A pending required callback denies same-pool routes into the pool, so active subscribers may rely on later
+        // ones being optional. Making callbacks required waits for them, as a new subscription does.
+        if (installation.settings.optionalCallbacks && !settings.optionalCallbacks) {
+            _requireCallbacksInactive(state, poolId, settings.callbackMask);
+        }
         // The extension validates that new settings preserve outstanding users' rights.
         _callLifecycleHook(
             account,

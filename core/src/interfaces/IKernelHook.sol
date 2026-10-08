@@ -250,7 +250,8 @@ interface IKernelHook {
         external;
 
     /// @notice Replaces the settings of an inactive installation.
-    /// @dev Only a configurer or pool admin can call this. The extension's onConfigure must accept the change.
+    /// @dev Only a configurer or pool admin can call this. The extension's onConfigure must accept the change. A new
+    /// callback mask, or optional callbacks made required, needs every subscriber of the callbacks involved inactive.
     /// @param key The pool key
     /// @param extension The installed extension
     /// @param settings The new settings
