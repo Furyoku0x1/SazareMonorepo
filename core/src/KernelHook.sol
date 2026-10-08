@@ -65,7 +65,7 @@ contract KernelHook is BaseHook, Multicall, IKernelHook, IKernelExecutorCallback
         if (catalog.code.length == 0) revert InvalidConfiguration();
         CATALOG = IHookCatalog(catalog);
         VAULT = new KernelHookVault(manager);
-        ROUTE_EXECUTOR = new KernelRouteExecutor(manager, VAULT);
+        ROUTE_EXECUTOR = new KernelRouteExecutor(manager, VAULT, CATALOG);
         VAULT.setRouteExecutor(address(ROUTE_EXECUTOR));
     }
 
@@ -273,6 +273,13 @@ contract KernelHook is BaseHook, Multicall, IKernelHook, IKernelExecutorCallback
         if (KernelHookOperations.frameCount() == 0) revert Unauthorized();
         OperationFrame parent = KernelHookOperations.currentFrame();
         _requireNestingAllowed(parent, action);
+        // Hookless pools and external venues call no KernelHook callback: no Kernel operation, frame or ticket to
+        // check or record. The executor checks an external swap's adapter, currencies and amounts.
+        if (action.operation == Operation.ExternalSwap) return;
+        if (action.operation == Operation.ForeignSwap) {
+            if (address(action.key.hooks) != address(0)) revert InvalidPool();
+            return;
+        }
         PoolId targetPoolId = action.key.toId();
         KernelHookState.validatePoolKey(action.key);
         bool isInitialLiquiditySeed = _isInitialLiquiditySeed(parent, targetPoolId, action);

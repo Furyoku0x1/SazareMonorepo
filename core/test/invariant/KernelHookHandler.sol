@@ -13,6 +13,7 @@ import {
     CallbackType,
     ExecutionContext,
     ExtensionSettings,
+    ExternalSwapParameters,
     Operation,
     RouteAction
 } from "../../src/types/KernelHookTypes.sol";
@@ -49,6 +50,11 @@ contract KernelHookHandler is Test {
         PoolModifyLiquidityTestNoChecks liquidityRouter;
         PoolDonateTest donateRouter;
         PoolKey[3] keys;
+        /// @dev A hookless pool with the currencies of pool 0, for ForeignSwap routes.
+        PoolKey foreignKey;
+        /// @dev An admitted v2 adapter and its v2 pair with the currencies of pool 0, for ExternalSwap routes.
+        address externalAdapter;
+        address externalPair;
         MockExtension[3] extensions;
         MockExtension observer;
         MockExtension relay;
@@ -90,6 +96,9 @@ contract KernelHookHandler is Test {
     MockExtension public immutable relay;
 
     PoolKey[3] internal _keys;
+    PoolKey internal _foreignKey;
+    address internal _externalAdapter;
+    address internal _externalPair;
     Currency[CURRENCY_COUNT] internal _currencies;
     MockExtension[3] internal _extensions;
     /// @dev Two optional extensions of the native pool that return the fee overrides in `_overrides`.
@@ -130,6 +139,9 @@ contract KernelHookHandler is Test {
         _currencies = [setup.keys[0].currency0, setup.keys[0].currency1, Currency.wrap(address(0))];
         _roleAccounts = [address(0xA11CE), address(0xB0B), address(0xCA401)];
         // The legacy compiler cannot copy a memory array of structs to storage at once.
+        _foreignKey = setup.foreignKey;
+        _externalAdapter = setup.externalAdapter;
+        _externalPair = setup.externalPair;
         // poolIndex < 3
         for (uint256 i; i < 3; ++i) {
             _keys[i] = setup.keys[i];
@@ -251,6 +263,37 @@ contract KernelHookHandler is Test {
         _prepare(prepare, ROUTER);
         _swapWithRoute(_swapAction(_keys[1], zeroForOne, amount));
         ++successfulCalls["routeSwap"];
+    }
+
+    /// @notice In afterSwap of the main pool, the router swaps in the hookless pool. The swap opens no Kernel
+    /// operation, so the route also runs when the root pool allows no nesting.
+    function routeForeignSwap(bool zeroForOne, uint256 amount, bool prepare) external {
+        amount = bound(amount, 1e6, 1e12);
+        _prepare(prepare, ROUTER);
+        RouteAction memory action = _swapAction(_foreignKey, zeroForOne, amount);
+        action.operation = Operation.ForeignSwap;
+        _swapWithRoute(action);
+        ++successfulCalls["routeForeignSwap"];
+    }
+
+    /// @notice In afterSwap of the main pool, the router swaps on the v2 pair through the admitted adapter. Like a
+    /// ForeignSwap, it opens no Kernel operation.
+    function routeExternalSwap(bool zeroForOne, bool exactInput, uint256 amount, bool prepare) external {
+        amount = bound(amount, 1e6, 1e12);
+        _prepare(prepare, ROUTER);
+        int256 specified = exactInput ? -int256(amount) : int256(amount);
+        // No minimum output for an exact input; no maximum input for an exact output.
+        uint256 limit = exactInput ? 0 : type(uint256).max;
+        RouteAction memory action = RouteAction({
+            key: PoolKey(_keys[0].currency0, _keys[0].currency1, 0, 0, IHooks(address(0))),
+            operation: Operation.ExternalSwap,
+            parameters: abi.encode(
+                ExternalSwapParameters(_externalAdapter, _externalPair, zeroForOne, specified, limit)
+            ),
+            hookData: ""
+        });
+        _swapWithRoute(action);
+        ++successfulCalls["routeExternalSwap"];
     }
 
     /// @notice In afterSwap of the main pool, the router changes its liquidity in the route pool.
@@ -545,8 +588,13 @@ contract KernelHookHandler is Test {
         router.clearRoute(CallbackType.AfterSwap);
         // KernelHook skips an inactive router, so the swap succeeds without the route. That call must not count.
         require(router.callCount(CallbackType.AfterSwap) > calls, "route did not run");
-        // A route from pool 0 is the second operation: the root pool must allow depth 2.
-        if (ghostMaxOperationDepth < 2) _violation("a route ran above the root pool's depth limit");
+        // A Kernel route from pool 0 is the second operation: the root pool must allow depth 2. A ForeignSwap or an
+        // ExternalSwap opens no Kernel operation, so it runs at any depth limit.
+        bool opensKernelOperation =
+            action.operation != Operation.ForeignSwap && action.operation != Operation.ExternalSwap;
+        if (opensKernelOperation && ghostMaxOperationDepth < 2) {
+            _violation("a route ran above the root pool's depth limit");
+        }
         _addResults(ROUTER, action.key, router.lastRouteResults());
     }
 

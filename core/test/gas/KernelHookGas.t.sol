@@ -5,10 +5,19 @@ import {KernelHookFixture} from "../utils/KernelHookFixture.sol";
 import {MockExtension} from "../mocks/MockExtension.sol";
 import {NoopExtension} from "../mocks/NoopExtension.sol";
 import {IHookExtension} from "../../src/interfaces/IHookExtension.sol";
-import {CallbackType, ExtensionSettings, Operation, RouteAction} from "../../src/types/KernelHookTypes.sol";
+import {TestUniswapV2Factory, TestUniswapV2Pair} from "../mocks/TestUniswapV2.sol";
+import {UniswapV2Adapter, IUniswapV2FactoryMinimal} from "../../src/adapters/UniswapV2Adapter.sol";
+import {
+    CallbackType,
+    ExtensionSettings,
+    ExternalSwapParameters,
+    Operation,
+    RouteAction
+} from "../../src/types/KernelHookTypes.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
+import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 
 /// @notice Gas baseline for KernelHook. Each test builds its scenario, then measures exactly one call.
 /// @dev Run with `forge test --isolate --match-path test/gas/*` for numbers close to a chain: in isolate mode each
@@ -131,6 +140,24 @@ contract KernelHookGasTest is KernelHookFixture {
         vm.snapshotGasLastFrame(GROUP, "swap_1MockExtension");
     }
 
+    /// @dev The extension takes part of the input in beforeSwap; the Kernel credits it to the vault as claims.
+    function test_gas_swap_1MockExtensionCredit() public {
+        MockExtension extension = _deltaExtension();
+        extension.setBehavior(CallbackType.BeforeSwap, MockExtension.Behavior(int128(1e10), 0, 0, false, 0));
+        _swapExactInput(_poolKey(), true, SWAP_AMOUNT);
+        vm.snapshotGasLastFrame(GROUP, "swap_1MockExtensionCredit");
+    }
+
+    /// @dev After that credit, the extension pays part of the next input from it: a debt paid from claims.
+    function test_gas_swap_1MockExtensionDebtFromCredit() public {
+        MockExtension extension = _deltaExtension();
+        extension.setBehavior(CallbackType.BeforeSwap, MockExtension.Behavior(int128(1e10), 0, 0, false, 0));
+        _swapExactInput(_poolKey(), true, SWAP_AMOUNT);
+        extension.setBehavior(CallbackType.BeforeSwap, MockExtension.Behavior(-int128(1e10), 0, 0, false, 0));
+        _swapExactInput(_poolKey(), true, SWAP_AMOUNT);
+        vm.snapshotGasLastFrame(GROUP, "swap_1MockExtensionDebtFromCredit");
+    }
+
     /// @dev In afterSwap, the extension swaps on a second KernelHook pool. It pays from its vault balance.
     function test_gas_swap_1MockExtensionWithRouteOf1Swap() public {
         PoolKey memory key = _readyPool();
@@ -154,6 +181,46 @@ contract KernelHookGasTest is KernelHookFixture {
 
         _swapExactInput(key, true, SWAP_AMOUNT);
         vm.snapshotGasLastFrame(GROUP, "swap_1MockExtensionWithRouteOf1Swap");
+    }
+
+    /// @dev The same route, with its swap on a Uniswap v2 pair through the admitted adapter (ExternalSwap): exact
+    /// input.
+    function test_gas_swap_1MockExtensionWithRouteOf1ExternalSwapExactInput() public {
+        _externalSwapRoute(-1e12);
+        _swapExactInput(_poolKey(), true, SWAP_AMOUNT);
+        vm.snapshotGasLastFrame(GROUP, "swap_1MockExtensionWithRouteOf1ExternalSwapExactInput");
+    }
+
+    /// @dev Exact output: the executor first reads the adapter's quote.
+    function test_gas_swap_1MockExtensionWithRouteOf1ExternalSwapExactOutput() public {
+        _externalSwapRoute(1e12);
+        _swapExactInput(_poolKey(), true, SWAP_AMOUNT);
+        vm.snapshotGasLastFrame(GROUP, "swap_1MockExtensionWithRouteOf1ExternalSwapExactOutput");
+    }
+
+    /// @dev The same route, with its swap in a hookless pool (ForeignSwap): no nested Kernel operation.
+    function test_gas_swap_1MockExtensionWithRouteOf1ForeignSwap() public {
+        PoolKey memory key = _readyPool();
+        PoolKey memory foreignKey = _plainPoolKey();
+        manager.initialize(foreignKey, SQRT_PRICE_1_1);
+        _addLiquidity(foreignKey);
+
+        MockExtension extension = new MockExtension(address(hook));
+        _installAndActivate(key, address(extension), _settings(SWAP_CALLBACKS, false, true, 1_000_000));
+        IERC20(Currency.unwrap(currency0)).transfer(address(extension), 1e15);
+        extension.deposit(key.toId(), currency0, 1e15);
+        extension.addRouteAction(
+            CallbackType.AfterSwap,
+            RouteAction({
+                key: foreignKey,
+                operation: Operation.ForeignSwap,
+                parameters: abi.encode(_exactInputParameters(true, 1e12)),
+                hookData: ""
+            })
+        );
+
+        _swapExactInput(key, true, SWAP_AMOUNT);
+        vm.snapshotGasLastFrame(GROUP, "swap_1MockExtensionWithRouteOf1ForeignSwap");
     }
 
     // ---------------------------------------------------------------- management
@@ -214,6 +281,43 @@ contract KernelHookGasTest is KernelHookFixture {
     }
 
     /// @notice Creates the default KernelHook pool and adds liquidity to it.
+    /// @dev A pool with a MockExtension whose AfterSwap route is one ExternalSwap on a fresh v2 pair (1e18 / 1e18).
+    function _externalSwapRoute(int256 amountSpecified) private {
+        PoolKey memory key = _readyPool();
+        TestUniswapV2Factory factory = new TestUniswapV2Factory();
+        address pair = factory.createPair(Currency.unwrap(currency0), Currency.unwrap(currency1));
+        IERC20(Currency.unwrap(currency0)).transfer(pair, 1e18);
+        IERC20(Currency.unwrap(currency1)).transfer(pair, 1e18);
+        TestUniswapV2Pair(pair).sync();
+        UniswapV2Adapter adapter =
+            new UniswapV2Adapter(address(hook.ROUTE_EXECUTOR()), IUniswapV2FactoryMinimal(address(factory)), 30);
+        catalog.admitAdapter(address(adapter), address(adapter).codehash);
+        MockExtension extension = new MockExtension(address(hook));
+        _installAndActivate(key, address(extension), _settings(SWAP_CALLBACKS, false, true, 1_000_000));
+        IERC20(Currency.unwrap(currency0)).transfer(address(extension), 1e15);
+        extension.deposit(key.toId(), currency0, 1e15);
+        extension.addRouteAction(
+            CallbackType.AfterSwap,
+            RouteAction({
+                key: PoolKey(currency0, currency1, 0, 0, IHooks(address(0))),
+                operation: Operation.ExternalSwap,
+                parameters: abi.encode(
+                    // No minimum output for an exact input; no maximum input for an exact output.
+                    ExternalSwapParameters(
+                        address(adapter), pair, true, amountSpecified, amountSpecified < 0 ? 0 : type(uint256).max
+                    )
+                ),
+                hookData: ""
+            })
+        );
+    }
+
+    function _deltaExtension() private returns (MockExtension extension) {
+        PoolKey memory key = _readyPool();
+        extension = new MockExtension(address(hook));
+        _installAndActivate(key, address(extension), _settings(SWAP_CALLBACKS, false, false, 1_000_000));
+    }
+
     function _readyPool() private returns (PoolKey memory key) {
         key = _poolKey();
         _createPool(key);

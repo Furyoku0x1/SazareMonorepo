@@ -6,7 +6,9 @@ import {RouteAction} from "../../types/KernelHookTypes.sol";
 /// @notice The handshake between the route executor and KernelHook around each nested route action.
 interface IKernelExecutorCallback {
     /// @notice Checks that a nested action is allowed, and records a ticket for its before callback.
-    /// @dev Only the route executor can call this, immediately before it calls the PoolManager.
+    /// @dev Only the route executor can call this, immediately before it calls the PoolManager. A ForeignSwap needs
+    /// only the nesting check and a hookless key, and an ExternalSwap only the nesting check: neither records a
+    /// ticket, and the executor does not call finishAction for them.
     /// @param action The action that the executor will run next
     function authorizeAction(RouteAction calldata action) external;
 

@@ -43,6 +43,7 @@ library CallbackLibrary {
     /// @notice Returns the before callback of operation.
     /// @dev For ModifyLiquidity, BeforeAddLiquidity is a placeholder: the PoolManager calls BeforeRemoveLiquidity
     /// when liquidityDelta <= 0, and KernelHookOperations.actionHash replaces the placeholder accordingly.
+    /// Never called with ForeignSwap: a hookless pool has no before callback, and authorizeAction returns first.
     function beforeCallbackOf(Operation operation) internal pure returns (CallbackType) {
         if (operation == Operation.Swap) return CallbackType.BeforeSwap;
         if (operation == Operation.ModifyLiquidity) return CallbackType.BeforeAddLiquidity;

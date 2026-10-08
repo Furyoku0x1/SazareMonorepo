@@ -36,10 +36,32 @@ enum PoolStatus {
 }
 
 /// @notice The PoolManager call that a route action makes.
+/// @dev Append new members only; extensions encode the ordinal.
 enum Operation {
     Swap,
     ModifyLiquidity,
-    Donate
+    Donate,
+    /// @dev A swap in a hookless pool (key.hooks == address(0)) on the same PoolManager. It runs no KernelHook
+    /// callback, so it opens no Kernel operation and needs no ticket; the route settles it with the other actions.
+    ForeignSwap,
+    /// @dev A swap on a venue outside the PoolManager, through a Catalog-admitted adapter. The executor takes the input
+    /// from the PoolManager and settles the output back into it, so the route nets it with the other actions.
+    ExternalSwap
+}
+
+/// @notice The parameters of an ExternalSwap route action, as abi.encode(ExternalSwapParameters).
+/// @dev The action's key holds only the two currencies, sorted and not native; fee, tickSpacing and hooks are zero.
+struct ExternalSwapParameters {
+    /// @notice A Catalog-admitted IExternalVenueAdapter.
+    address adapter;
+    /// @notice The venue, for example a Uniswap v2 pair. The adapter authenticates it.
+    address venue;
+    /// @notice True to sell currency0 for currency1.
+    bool zeroForOne;
+    /// @notice Negative for an exact input of -amountSpecified, positive for an exact output of amountSpecified.
+    int256 amountSpecified;
+    /// @notice The minimum output of an exact input, or the maximum input of an exact output.
+    uint256 limit;
 }
 
 /// @notice The settings of one extension installation in one pool.
@@ -108,8 +130,11 @@ struct CallbackResult {
 struct RouteAction {
     PoolKey key;
     Operation operation;
-    /// @notice abi.encode(SwapParams), abi.encode(ModifyLiquidityParams), or abi.encode(uint256 amount0, uint256 amount1),
-    /// according to operation.
+    /// @notice abi.encode(SwapParams) for Swap and ForeignSwap, abi.encode(ModifyLiquidityParams),
+    /// abi.encode(uint256 amount0, uint256 amount1) for Donate, or abi.encode(ExternalSwapParameters), according to
+    /// operation.
     bytes parameters;
+    /// @notice Passed to the pool's hook, or to the adapter of an ExternalSwap. A ForeignSwap pool has no hook, so
+    /// nothing reads it.
     bytes hookData;
 }

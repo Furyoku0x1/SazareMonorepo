@@ -24,8 +24,23 @@ interface IHookCatalog {
         bool admitted;
     }
 
+    /// @notice What the catalog records about one external venue adapter.
+    /// @dev Separate from Entry: an adapter has no callbacks or installation capabilities.
+    struct AdapterEntry {
+        /// @notice The runtime code hash of the adapter. The route executor compares it on every use.
+        bytes32 codeHash;
+        /// @notice True while routes may use the adapter. Unlike extension admission, this applies at once.
+        bool admitted;
+    }
+
     /// @notice Thrown when the extension has no code, its code hash differs from the entry, or the entry is not admitted.
     error InvalidExtension();
+
+    /// @notice Thrown when the adapter has no code or its code hash differs from the given hash.
+    error InvalidAdapter();
+
+    /// @notice Thrown when the adapter has no entry.
+    error UnknownAdapter();
 
     /// @notice Thrown when the entry's callback mask is empty or includes bits beyond the ten callbacks.
     error InvalidCallbackMask();
@@ -41,6 +56,16 @@ interface IHookCatalog {
     /// @param codeHash The runtime code hash recorded for the extension
     /// @param callbackMask The callbacks that the extension implements
     event ExtensionAdmitted(address indexed extension, bytes32 indexed codeHash, uint16 callbackMask);
+
+    /// @notice Emitted when the owner adds an external venue adapter to the catalog.
+    /// @param adapter The adapter address
+    /// @param codeHash The runtime code hash recorded for the adapter
+    event AdapterAdmitted(address indexed adapter, bytes32 indexed codeHash);
+
+    /// @notice Emitted when the owner allows or stops routes through an adapter.
+    /// @param adapter The adapter address
+    /// @param admitted True if routes may use the adapter
+    event AdapterAdmissionChanged(address indexed adapter, bool admitted);
 
     /// @notice Emitted when the owner allows or stops new installations of an extension.
     /// @param extension The extension address
@@ -63,4 +88,21 @@ interface IHookCatalog {
     /// @param extension The extension address
     /// @return The recorded entry
     function getEntry(address extension) external view returns (Entry memory);
+
+    /// @notice Adds an external venue adapter to the catalog. Only the owner can call this.
+    /// @dev Entries cannot be rewritten. Admit only immutable adapters: a proxy's code hash does not pin its logic.
+    /// @param adapter The deployed adapter
+    /// @param codeHash The adapter's runtime code hash, which must match its code
+    function admitAdapter(address adapter, bytes32 codeHash) external;
+
+    /// @notice Allows or stops routes through a catalogued adapter. Only the owner can call this.
+    /// @dev The route executor reads the entry on every use, so a stop applies to the next route.
+    /// @param adapter The catalogued adapter
+    /// @param admitted True to allow routes through it
+    function setAdapterAdmission(address adapter, bool admitted) external;
+
+    /// @notice Returns the entry of an adapter, or an empty entry if the adapter is not catalogued.
+    /// @param adapter The adapter address
+    /// @return The recorded entry
+    function getAdapterEntry(address adapter) external view returns (AdapterEntry memory);
 }

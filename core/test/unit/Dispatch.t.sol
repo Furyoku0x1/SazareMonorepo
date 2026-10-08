@@ -117,6 +117,25 @@ contract DispatchTest is KernelHookFixture {
         assertEq(hook.VAULT().balanceOf(poolId, address(extension), currency0), 100);
     }
 
+    /// @dev The credit's claims are minted first; the debt in the other currency then fails. The skip rolls back
+    /// the minted claims with the rest of the callback.
+    function test_dispatch_optionalFailedDebtRollsBackMintedClaims() public {
+        MockExtension extension = _swapExtension(true);
+        _fundExtension(extension, currency1, 10);
+        _behavior(extension, CallbackType.BeforeSwap, 100, -11, 0, false);
+        _expectSkip(
+            extension, CallbackType.BeforeSwap, abi.encodeWithSelector(KernelHookVault.InsufficientBalance.selector)
+        );
+
+        _swapExactInput(key, true, 1e14);
+
+        KernelHookVault vault = hook.VAULT();
+        assertEq(manager.balanceOf(address(vault), currency0.toId()), 0, "claims rolled back");
+        assertEq(vault.balanceOf(poolId, address(extension), currency0), 0);
+        assertEq(vault.accountedBalance(currency0), 0);
+        assertEq(vault.balanceOf(poolId, address(extension), currency1), 10);
+    }
+
     function test_dispatch_optionalInvalidResultRollsBackCallback() public {
         MockExtension extension = _swapExtension(true);
         _behavior(extension, CallbackType.AfterSwap, 1, 0, 0, false);
@@ -641,6 +660,33 @@ contract DispatchTest is KernelHookFixture {
         assertEq(hook.VAULT().balanceOf(poolId, address(extension), currency0), amount);
         assertEq(hook.VAULT().accountedBalance(currency0), amount);
         assertEq(hook.VAULT().fundedCurrencyCount(poolId, address(extension)), 1);
+    }
+
+    /// @dev A required extension fills a whole exact-input swap in a pool with no liquidity, while the PoolManager
+    /// holds none of the input currency: the credit arrives as claims, so it needs no PoolManager float. Its
+    /// payout comes from its deposit; a later withdrawal redeems the claims for the router's payment.
+    function testFuzz_beforeSwap_creditNeedsNoPoolManagerFloat(uint128 amountIn, uint128 amountOut) public {
+        amountIn = uint128(bound(amountIn, 1, 1e30));
+        amountOut = uint128(bound(amountOut, 1, 1e30));
+        _createPool(key);
+        MockExtension extension = new MockExtension(address(hook));
+        _installAndActivate(key, address(extension), _settings(SWAP_CALLBACKS, false, false));
+        _fundExtension(extension, currency1, amountOut);
+        _behavior(extension, CallbackType.BeforeSwap, int128(amountIn), -int128(amountOut), 0, false);
+        MockERC20 token0 = MockERC20(Currency.unwrap(currency0));
+        assertEq(token0.balanceOf(address(manager)), 0, "no float");
+
+        BalanceDelta delta = _swapExactInput(key, true, amountIn);
+
+        assertEq(delta.amount0(), -int128(amountIn));
+        assertEq(delta.amount1(), int128(amountOut));
+        KernelHookVault vault = hook.VAULT();
+        assertEq(vault.balanceOf(poolId, address(extension), currency0), amountIn);
+        assertEq(manager.balanceOf(address(vault), currency0.toId()), amountIn, "credit held as claims");
+        vm.prank(address(extension));
+        vault.withdraw(poolId, currency0, amountIn, address(0xBEEF));
+        assertEq(token0.balanceOf(address(0xBEEF)), amountIn);
+        assertEq(token0.balanceOf(address(manager)), 0);
     }
 
     function testFuzz_beforeSwap_mapsSpecifiedCurrencyForSwapDirection(bool zeroForOne, bool exactInput, uint128 amount)

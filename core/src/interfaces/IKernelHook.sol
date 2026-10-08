@@ -24,13 +24,16 @@ import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 ///   The before callback of the operation pushes an OperationFrame; the matching after callback pops it.
 /// - In each callback, KernelHook calls the active extensions that subscribe to it, in the pool's callback order.
 /// - An extension with allowNesting can start a nested route from its callback with executeRoute. Before each
-///   nested action, the route executor gets an ActionTicket from authorizeAction. The ticket binds the next
-///   before callback to that exact action. finishAction removes the ticket when the action is complete.
+///   nested action on a KernelHook pool, the route executor gets an ActionTicket from authorizeAction. The ticket
+///   binds the next before callback to that exact action. finishAction removes the ticket when the action is
+///   complete. A ForeignSwap (hookless pool) or ExternalSwap (outside venue) calls no KernelHook callback, so it
+///   gets no ticket and the executor does not call finishAction for it.
 interface IKernelHook {
     /// @notice Thrown when the caller does not have the role or identity that the function requires.
     error Unauthorized();
 
     /// @notice Thrown when a pool key is not valid for this hook: wrong hook address, currency order or tick spacing.
+    /// Also thrown when the key of a ForeignSwap route action has a hook.
     /// @dev A static fee above the maximum reverts with LPFeeLibrary.LPFeeTooLarge instead.
     error InvalidPool();
 
@@ -212,7 +215,7 @@ interface IKernelHook {
     /// @notice Emitted when a pool gets new execution limits.
     /// @param poolId The pool
     /// @param maxOperationDepth The maximum operation depth: the root operation plus nested operations,
-    /// without the synthetic frame of unwindPositions. 1 allows no nesting.
+    /// without the synthetic frame of unwindPositions. 1 allows no nested Kernel operation (a ForeignSwap adds none).
     /// @param callbackGasBudgets The gas budget of each callback sequence, indexed by CallbackType
     event ExecutionLimitsChanged(
         PoolId indexed poolId, uint8 maxOperationDepth, uint32[CALLBACK_COUNT] callbackGasBudgets
@@ -285,7 +288,8 @@ interface IKernelHook {
     /// @notice Sets the maximum operation depth and the callback gas budgets of a pool.
     /// @dev Only a configurer or pool admin can call this, and only while all installations are inactive.
     /// @param key The pool key
-    /// @param maxOperationDepth From 1 (no nesting) to MAX_OPERATION_DEPTH. The root operation counts as 1.
+    /// @param maxOperationDepth From 1 (no nested Kernel operation) to MAX_OPERATION_DEPTH. The root operation counts
+    /// as 1. A ForeignSwap in a hookless pool adds no Kernel operation, so it does not count.
     /// @param callbackGasBudgets The gas budget of each callback sequence, indexed by CallbackType
     function setExecutionLimits(
         PoolKey calldata key,
@@ -320,7 +324,10 @@ interface IKernelHook {
     /// @notice Runs a nested route of PoolManager actions for the extension whose callback runs now.
     /// @dev Only that extension can call this, and only if its installation allows nesting. All nested work
     /// uses the gas limit of the current callback, including KernelHook's reserves for the extension calls of each
-    /// nested operation. Net debts are paid from the extension's own vault balance.
+    /// nested operation. Net debts are paid from the extension's own vault balance. A ForeignSwap action swaps in
+    /// a hookless pool on the same PoolManager, and an ExternalSwap action swaps on an outside venue through a
+    /// Catalog-admitted adapter. Neither opens a Kernel operation, and the route settles both net with the other
+    /// actions. The target pool of every other action must use this KernelHook.
     /// @param actions The actions, in order
     /// @return The balance delta of each action
     function executeRoute(RouteAction[] calldata actions) external returns (BalanceDelta[] memory);

@@ -12,6 +12,7 @@ import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 /// implementation needs a new extension address.
 contract HookCatalog is IHookCatalog, Ownable2Step {
     mapping(address => Entry) private _entries;
+    mapping(address => AdapterEntry) private _adapters;
 
     constructor() Ownable(msg.sender) {}
 
@@ -37,5 +38,26 @@ contract HookCatalog is IHookCatalog, Ownable2Step {
     /// @inheritdoc IHookCatalog
     function getEntry(address extension) external view returns (Entry memory) {
         return _entries[extension];
+    }
+
+    /// @inheritdoc IHookCatalog
+    function admitAdapter(address adapter, bytes32 codeHash) external onlyOwner {
+        if (adapter.code.length == 0) revert InvalidAdapter();
+        if (codeHash != adapter.codehash) revert InvalidAdapter();
+        if (_adapters[adapter].codeHash != bytes32(0)) revert AlreadyCatalogued();
+        _adapters[adapter] = AdapterEntry(codeHash, true);
+        emit AdapterAdmitted(adapter, codeHash);
+    }
+
+    /// @inheritdoc IHookCatalog
+    function setAdapterAdmission(address adapter, bool admitted) external onlyOwner {
+        if (_adapters[adapter].codeHash == bytes32(0)) revert UnknownAdapter();
+        _adapters[adapter].admitted = admitted;
+        emit AdapterAdmissionChanged(adapter, admitted);
+    }
+
+    /// @inheritdoc IHookCatalog
+    function getAdapterEntry(address adapter) external view returns (AdapterEntry memory) {
+        return _adapters[adapter];
     }
 }

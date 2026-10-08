@@ -23,6 +23,19 @@ contract VaultTest is KernelHookFixture, IUnlockCallback {
     address internal constant RECIPIENT = address(0xA11CE);
     Currency internal constant NATIVE = Currency.wrap(address(0));
 
+    /// @dev What unlockCallback does: the original debt settlement, minting claims to the vault, a debt that
+    /// burns claims as KernelHook or the route executor would, or a withdrawal while the PoolManager is unlocked.
+    enum Mode {
+        Settle,
+        MintClaims,
+        ClaimDebt,
+        WithdrawUnlocked
+    }
+
+    Mode internal mode;
+    uint256 internal fromClaims;
+    Currency internal syncCurrency; // what WithdrawUnlocked leaves synced, when asked to
+
     function setUp() public override {
         super.setUp();
         vault = hook.VAULT();
@@ -534,12 +547,231 @@ contract VaultTest is KernelHookFixture, IUnlockCallback {
         require(msg.sender == address(manager));
         (Currency currency, uint256 amount, address authority, bool leaveTokenSync) =
             abi.decode(data, (Currency, uint256, address, bool));
+        if (mode == Mode.MintClaims) {
+            // Pay the PoolManager, then mint the claims to the vault, as a taker's payment and a credit would.
+            if (currency.isAddressZero()) {
+                manager.settle{value: amount}();
+            } else {
+                manager.sync(currency);
+                MockERC20(Currency.unwrap(currency)).transfer(address(manager), amount);
+                manager.settle();
+            }
+            manager.mint(address(vault), currency.toId(), amount);
+            return "";
+        }
+        if (mode == Mode.ClaimDebt) {
+            // The authority owes the PoolManager; the vault pays from claims first and the authority burns them.
+            vm.prank(authority);
+            manager.take(currency, address(this), amount);
+            vm.prank(authority);
+            fromClaims = vault.settleDebtFor(poolId, address(extension), currency, amount, authority);
+            if (fromClaims != 0) {
+                vm.prank(authority);
+                manager.burn(address(vault), currency.toId(), fromClaims);
+            }
+            return "";
+        }
+        if (mode == Mode.WithdrawUnlocked) {
+            if (leaveTokenSync) manager.sync(syncCurrency);
+            vm.prank(address(extension));
+            vault.withdraw(poolId, currency, amount, RECIPIENT);
+            return "";
+        }
         // Taking funds establishes the debt that this installation pays for the unlock caller.
         manager.take(currency, address(this), amount);
         if (leaveTokenSync) manager.sync(currency0);
         vm.prank(authority);
         vault.settleDebtFor(poolId, address(extension), currency, amount, address(this));
         return "";
+    }
+
+    // ---------------------------------------------------------------- claim tokens
+
+    function testFuzz_claims_backCredits(uint128 amount) public {
+        amount = uint128(bound(amount, 1, 1e30));
+        _creditClaims(currency0, amount);
+        assertEq(vault.balanceOf(poolId, address(extension), currency0), amount);
+        assertEq(manager.balanceOf(address(vault), currency0.toId()), amount);
+        assertEq(MockERC20(Currency.unwrap(currency0)).balanceOf(address(vault)), 0);
+        vm.prank(address(hook));
+        vm.expectRevert(abi.encodeWithSelector(KernelHookVault.InvalidPayment.selector));
+        vault.credit(poolId, address(extension), currency0, 1);
+    }
+
+    function test_claims_realTokensAndClaimsBothBackCredits() public {
+        _deposit(currency0, 40);
+        _creditClaims(currency0, 60);
+        assertEq(vault.accountedBalance(currency0), 100);
+    }
+
+    function test_settleDebtFor_paysFromClaimsOnly() public {
+        _creditClaims(currency0, 100);
+        _claimDebt(currency0, 70, address(hook));
+        assertEq(fromClaims, 70);
+        assertEq(manager.balanceOf(address(vault), currency0.toId()), 30);
+        assertEq(vault.balanceOf(poolId, address(extension), currency0), 30);
+    }
+
+    function test_settleDebtFor_paysClaimsFirstThenTokens() public {
+        _deposit(currency0, 40);
+        _creditClaims(currency0, 60);
+        MockERC20(Currency.unwrap(currency0)).mint(address(manager), 20); // custody for the debt's physical part
+        _claimDebt(currency0, 80, vault.routeExecutor());
+        assertEq(fromClaims, 60);
+        assertEq(manager.balanceOf(address(vault), currency0.toId()), 0);
+        assertEq(MockERC20(Currency.unwrap(currency0)).balanceOf(address(vault)), 20);
+        assertEq(vault.balanceOf(poolId, address(extension), currency0), 20);
+    }
+
+    function test_settleDebtFor_paysNativeFromClaims() public {
+        _creditClaims(NATIVE, 100);
+        _deposit(NATIVE, 50);
+        vm.deal(address(manager), address(manager).balance + 20); // custody for the debt's physical part
+        _claimDebt(NATIVE, 120, address(hook));
+        assertEq(fromClaims, 100);
+        assertEq(address(vault).balance, 30);
+        assertEq(vault.accountedBalance(NATIVE), 30);
+    }
+
+    function test_withdraw_redeemsClaimsWhilePoolManagerIsLocked() public {
+        _creditClaims(currency0, 100);
+        vm.prank(address(extension));
+        vault.withdraw(poolId, currency0, 70, RECIPIENT);
+        assertEq(MockERC20(Currency.unwrap(currency0)).balanceOf(RECIPIENT), 70);
+        assertEq(manager.balanceOf(address(vault), currency0.toId()), 30);
+        assertEq(MockERC20(Currency.unwrap(currency0)).balanceOf(address(vault)), 0);
+        assertEq(vault.accountedBalance(currency0), 30);
+    }
+
+    /// @dev Real 5 and claims 5 support a withdrawal of 8: the real tokens first, then 3 redeemed.
+    function test_withdraw_paysRealTokensFirstThenRedeems() public {
+        _deposit(currency0, 5);
+        _creditClaims(currency0, 5);
+        vm.prank(address(extension));
+        vault.withdraw(poolId, currency0, 8, RECIPIENT);
+        assertEq(MockERC20(Currency.unwrap(currency0)).balanceOf(RECIPIENT), 8);
+        assertEq(manager.balanceOf(address(vault), currency0.toId()), 2);
+        assertEq(MockERC20(Currency.unwrap(currency0)).balanceOf(address(vault)), 0);
+    }
+
+    function test_withdraw_redeemsNativeClaims() public {
+        _creditClaims(NATIVE, 100);
+        vm.prank(address(extension));
+        vault.withdraw(poolId, NATIVE, 100, RECIPIENT);
+        assertEq(RECIPIENT.balance, 100);
+        assertEq(manager.balanceOf(address(vault), NATIVE.toId()), 0);
+    }
+
+    function test_withdraw_redeemsWhilePoolManagerIsUnlocked() public {
+        _creditClaims(currency0, 100);
+        mode = Mode.WithdrawUnlocked;
+        manager.unlock(abi.encode(currency0, 60, address(0), false));
+        assertEq(MockERC20(Currency.unwrap(currency0)).balanceOf(RECIPIENT), 60);
+        assertEq(manager.balanceOf(address(vault), currency0.toId()), 40);
+    }
+
+    function test_withdraw_revertsRedemptionDuringPendingSync() public {
+        _creditClaims(currency0, 100);
+        mode = Mode.WithdrawUnlocked;
+        syncCurrency = currency0;
+        vm.expectRevert(abi.encodeWithSelector(KernelHookVault.RedemptionUnavailable.selector));
+        manager.unlock(abi.encode(currency0, 60, address(0), true));
+    }
+
+    function test_withdraw_revertsRedemptionDuringOtherCurrencySync() public {
+        _creditClaims(currency0, 100);
+        mode = Mode.WithdrawUnlocked;
+        syncCurrency = currency1;
+        vm.expectRevert(abi.encodeWithSelector(KernelHookVault.RedemptionUnavailable.selector));
+        manager.unlock(abi.encode(currency0, 60, address(0), true));
+    }
+
+    function test_withdraw_redeemsNativeWhilePoolManagerIsUnlocked() public {
+        _creditClaims(NATIVE, 100);
+        mode = Mode.WithdrawUnlocked;
+        manager.unlock(abi.encode(NATIVE, 60, address(0), false));
+        assertEq(RECIPIENT.balance, 60);
+        assertEq(manager.balanceOf(address(vault), NATIVE.toId()), 40);
+    }
+
+    function test_settleDebtFor_routeExecutorPaysFromClaimsOnly() public {
+        _creditClaims(currency1, 100);
+        _claimDebt(currency1, 100, vault.routeExecutor());
+        assertEq(fromClaims, 100);
+        assertEq(manager.balanceOf(address(vault), currency1.toId()), 0);
+        assertEq(vault.fundedCurrencyCount(poolId, address(extension)), 0);
+    }
+
+    function test_settleDebtFor_kernelHookPaysClaimsFirstThenTokens() public {
+        _deposit(currency1, 30);
+        _creditClaims(currency1, 50);
+        MockERC20(Currency.unwrap(currency1)).mint(address(manager), 30); // custody for the debt's physical part
+        _claimDebt(currency1, 70, address(hook));
+        assertEq(fromClaims, 50);
+        assertEq(MockERC20(Currency.unwrap(currency1)).balanceOf(address(vault)), 10);
+    }
+
+    /// @dev A token taxing transfers out of the PoolManager is credited at its nominal amount, as claims; its
+    /// redemption then fails the exact-receipt check and changes nothing.
+    function test_withdraw_rejectsRedemptionOfTaxedToken() public {
+        CodexVaultToken token = new CodexVaultToken();
+        Currency currency = Currency.wrap(address(token));
+        token.mint(address(this), 1000);
+        _creditClaims(currency, 1000);
+        token.setFeeBasisPoints(100);
+        vm.prank(address(extension));
+        vm.expectRevert(abi.encodeWithSelector(KernelHookVault.InvalidPayment.selector));
+        vault.withdraw(poolId, currency, 1000, RECIPIENT);
+        assertEq(manager.balanceOf(address(vault), currency.toId()), 1000);
+        assertEq(vault.balanceOf(poolId, address(extension), currency), 1000);
+        assertEq(token.balanceOf(address(manager)), 1000);
+    }
+
+    function test_withdraw_realTokensNeedNoRedemptionDuringPendingSync() public {
+        _deposit(currency0, 100);
+        mode = Mode.WithdrawUnlocked;
+        syncCurrency = currency0;
+        manager.unlock(abi.encode(currency0, 60, address(0), true));
+        assertEq(MockERC20(Currency.unwrap(currency0)).balanceOf(RECIPIENT), 60);
+    }
+
+    function test_withdraw_rejectedNativeRedemptionRollsBack() public {
+        _creditClaims(NATIVE, 100);
+        CodexVaultRejectNative rejecter = new CodexVaultRejectNative();
+        vm.prank(address(extension));
+        vm.expectRevert(abi.encodeWithSelector(KernelHookVault.InvalidPayment.selector));
+        vault.withdraw(poolId, NATIVE, 100, address(rejecter));
+        assertEq(manager.balanceOf(address(vault), NATIVE.toId()), 100);
+        assertEq(vault.balanceOf(poolId, address(extension), NATIVE), 100);
+    }
+
+    function test_unlockCallback_rejectsOtherCallers() public {
+        vm.expectRevert(abi.encodeWithSelector(IKernelHook.Unauthorized.selector));
+        vault.unlockCallback(abi.encode(currency0, 1));
+        vm.prank(address(manager));
+        vm.expectRevert(abi.encodeWithSelector(IKernelHook.Unauthorized.selector));
+        vault.unlockCallback(abi.encode(currency0, 1));
+    }
+
+    function test_operators_areKernelHookAndRouteExecutor() public view {
+        assertTrue(manager.isOperator(address(vault), address(hook)));
+        assertTrue(manager.isOperator(address(vault), vault.routeExecutor()));
+    }
+
+    /// @dev Mints claims to the vault and credits them to the extension, as a swap credit does.
+    function _creditClaims(Currency currency, uint256 amount) internal {
+        if (currency.isAddressZero()) vm.deal(address(this), amount);
+        mode = Mode.MintClaims;
+        manager.unlock(abi.encode(currency, amount, address(0), false));
+        mode = Mode.Settle;
+        vm.prank(address(hook));
+        vault.credit(poolId, address(extension), currency, amount);
+    }
+
+    function _claimDebt(Currency currency, uint256 amount, address authority) internal {
+        mode = Mode.ClaimDebt;
+        manager.unlock(abi.encode(currency, amount, authority, false));
+        mode = Mode.Settle;
     }
 
     function _installExtension() internal returns (NoopExtension installed) {

@@ -7,6 +7,8 @@ import {console} from "forge-std/console.sol";
 import {KernelHookFixture} from "../utils/KernelHookFixture.sol";
 import {MockExtension} from "../mocks/MockExtension.sol";
 import {KernelHookHandler, POOL_0_BUDGET} from "./KernelHookHandler.sol";
+import {TestUniswapV2Factory, TestUniswapV2Pair} from "../mocks/TestUniswapV2.sol";
+import {UniswapV2Adapter, IUniswapV2FactoryMinimal} from "../../src/adapters/UniswapV2Adapter.sol";
 import {KernelHookVault} from "../../src/KernelHookVault.sol";
 import {KernelRouteExecutor} from "../../src/KernelRouteExecutor.sol";
 import {IHookExtension} from "../../src/interfaces/IHookExtension.sol";
@@ -91,6 +93,10 @@ contract KernelHookInvariantTest is StdInvariant, KernelHookFixture {
         }
         _addLiquidity(keys[0]);
         _addLiquidity(keys[1]);
+        // KernelHook never prepares a hookless pool: it is initialized directly.
+        manager.initialize(_plainPoolKey(), SQRT_PRICE_1_1);
+        _addLiquidity(_plainPoolKey());
+        (address externalAdapter, address externalPair) = _externalVenue();
         modifyLiquidityRouter.modifyLiquidity{value: 1e18}(keys[2], _liquidityParameters(1e18), "");
         _installExtensions();
         // Installation needs inactive subscribers on the same callbacks: install all extensions of a pool first.
@@ -116,6 +122,9 @@ contract KernelHookInvariantTest is StdInvariant, KernelHookFixture {
                 liquidityRouter: new PoolModifyLiquidityTestNoChecks(manager),
                 donateRouter: donateRouter,
                 keys: keys,
+                foreignKey: _plainPoolKey(),
+                externalAdapter: externalAdapter,
+                externalPair: externalPair,
                 extensions: extensions,
                 observer: observer,
                 relay: relay,
@@ -164,8 +173,10 @@ contract KernelHookInvariantTest is StdInvariant, KernelHookFixture {
                 sum += vault.balanceOf(pools[k], accounts[k], currencies[c]);
             }
             assertEq(vault.accountedBalance(currencies[c]), sum, "accounted balance differs from the sum of balances");
+            // Real tokens and PoolManager claims are both backing.
             uint256 held =
                 c == 2 ? address(vault).balance : IERC20(Currency.unwrap(currencies[c])).balanceOf(address(vault));
+            held += manager.balanceOf(address(vault), currencies[c].toId());
             assertLe(sum, held, "vault holds too little");
         }
     }
@@ -233,6 +244,13 @@ contract KernelHookInvariantTest is StdInvariant, KernelHookFixture {
         }
         assertEq(address(hook).balance, 0, "KernelHook holds native currency");
         assertEq(address(executor).balance, 0, "route executor holds native currency");
+        // Nor claims: credits are minted to the vault, and debts burn the vault's claims.
+        // currencyIndex < 3
+        for (uint256 c; c < 3; ++c) {
+            uint256 id = _currencies()[c].toId();
+            assertEq(manager.balanceOf(address(hook), id), 0, "KernelHook holds claims");
+            assertEq(manager.balanceOf(address(executor), id), 0, "route executor holds claims");
+        }
     }
 
     /// forge-config: default.invariant.runs = 32
@@ -305,7 +323,7 @@ contract KernelHookInvariantTest is StdInvariant, KernelHookFixture {
     /// setters (setFee, setOptionalFailure, setFeeOverride) are not counted. The test_handler_* tests make sure that
     /// each action works; this log shows how often a run reached it.
     function afterInvariant() public view {
-        string[22] memory names = [
+        string[24] memory names = [
             "swap",
             "addLiquidity",
             "removeLiquidity",
@@ -327,10 +345,12 @@ contract KernelHookInvariantTest is StdInvariant, KernelHookFixture {
             "changeRole",
             "probeAuthority",
             "preparePool",
-            "initializePrepared"
+            "initializePrepared",
+            "routeForeignSwap",
+            "routeExternalSwap"
         ];
-        // i < 22
-        for (uint256 i; i < 22; ++i) {
+        // i < 24
+        for (uint256 i; i < 24; ++i) {
             console.log(names[i], handler.successfulCalls(names[i]));
         }
     }
@@ -563,6 +583,31 @@ contract KernelHookInvariantTest is StdInvariant, KernelHookFixture {
         assertEq(handler.successfulCalls("routeSwap"), 1);
     }
 
+    /// @dev An ExternalSwap route, exact input and exact output, runs at depth limit 1 and keeps the vault model.
+    function test_handler_externalRouteRunsAtDepthLimitOne() public {
+        handler.setDepthLimit(1);
+        handler.routeExternalSwap(true, true, 1e9, true);
+        handler.routeExternalSwap(false, false, 1e9, true);
+
+        assertEq(handler.violations(), 0, handler.lastViolation());
+        assertEq(handler.successfulCalls("routeExternalSwap"), 2);
+        invariant_installationBalancesMatchModel();
+        invariant_vaultAccountingMatchesBalances();
+    }
+
+    /// @dev A ForeignSwap route runs at depth limit 1, where a Kernel route is refused, and the vault model still
+    /// holds.
+    function test_handler_foreignRouteRunsAtDepthLimitOne() public {
+        handler.setDepthLimit(1);
+        handler.routeForeignSwap(true, 1e9, true);
+        handler.routeForeignSwap(false, 1e9, true);
+
+        assertEq(handler.violations(), 0, handler.lastViolation());
+        assertEq(handler.successfulCalls("routeForeignSwap"), 2);
+        invariant_installationBalancesMatchModel();
+        invariant_vaultAccountingMatchesBalances();
+    }
+
     /// @dev A pool on the operation stack can be entered again only from its after callback, after all required
     /// extensions of that sequence have run. The required router is still running, so its route into its own pool is
     /// refused with ReentrancyDenied, and the outer swap reverts.
@@ -691,8 +736,21 @@ contract KernelHookInvariantTest is StdInvariant, KernelHookFixture {
         }
     }
 
+    /// @dev A v2 pair with 1e18 of each currency of pool 0, and the admitted adapter for its factory.
+    function _externalVenue() private returns (address adapter, address pair) {
+        TestUniswapV2Factory factory = new TestUniswapV2Factory();
+        pair = factory.createPair(Currency.unwrap(currency0), Currency.unwrap(currency1));
+        IERC20(Currency.unwrap(currency0)).transfer(pair, 1e18);
+        IERC20(Currency.unwrap(currency1)).transfer(pair, 1e18);
+        TestUniswapV2Pair(pair).sync();
+        adapter = address(
+            new UniswapV2Adapter(address(hook.ROUTE_EXECUTOR()), IUniswapV2FactoryMinimal(address(factory)), 30)
+        );
+        catalog.admitAdapter(adapter, adapter.codehash);
+    }
+
     function _handlerSelectors() private pure returns (bytes4[] memory selectors) {
-        selectors = new bytes4[](25);
+        selectors = new bytes4[](27);
         selectors[0] = KernelHookHandler.swap.selector;
         selectors[1] = KernelHookHandler.addLiquidity.selector;
         selectors[2] = KernelHookHandler.removeLiquidity.selector;
@@ -718,5 +776,7 @@ contract KernelHookInvariantTest is StdInvariant, KernelHookFixture {
         selectors[22] = KernelHookHandler.probeAuthority.selector;
         selectors[23] = KernelHookHandler.preparePool.selector;
         selectors[24] = KernelHookHandler.initializePrepared.selector;
+        selectors[25] = KernelHookHandler.routeForeignSwap.selector;
+        selectors[26] = KernelHookHandler.routeExternalSwap.selector;
     }
 }

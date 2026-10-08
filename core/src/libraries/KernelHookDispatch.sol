@@ -365,10 +365,12 @@ library KernelHookDispatch {
         int128 delta
     ) private {
         if (delta > 0) {
-            manager.take(currency, address(vault), uint256(int256(delta)));
+            // Claims, not tokens: a credit never needs the PoolManager to hold the currency now.
+            manager.mint(address(vault), currency.toId(), uint256(int256(delta)));
             vault.credit(poolId, extension, currency, uint256(int256(delta)));
         } else if (delta < 0) {
-            vault.settleDebtFor(poolId, extension, currency, uint256(-int256(delta)), address(this));
+            uint256 fromClaims = vault.settleDebtFor(poolId, extension, currency, uint256(-int256(delta)), address(this));
+            if (fromClaims != 0) manager.burn(address(vault), currency.toId(), fromClaims);
         }
     }
 
