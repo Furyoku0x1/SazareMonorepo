@@ -136,6 +136,16 @@ contract BookHook is IHooks {
         return _book.start[sell0 ? 0 : 1];
     }
 
+    /// @notice The AMM's output from the pool price to `limit` alone, crossing ticks as a swap would.
+    function ammOutputTo(PoolKey calldata key, bool zeroForOne, uint160 limit) external view returns (uint256) {
+        PoolId id = key.toId();
+        (,,, uint24 lpFee) = MANAGER.getSlot0(id);
+        AmmReplay.Pool memory pool = AmmReplay.Pool(
+            MANAGER, id, key.tickSpacing, zeroForOne, limit, AmmReplay.swapFee(MANAGER, id, zeroForOne, lpFee)
+        );
+        return AmmReplay.swap(pool, -int256(uint256(uint128(type(int128).max))), REPLAY_CAP).other;
+    }
+
     function last() external view returns (BookWalk.Fill memory, AmmReplay.Result memory) {
         return (_fill, _expected);
     }
@@ -467,7 +477,7 @@ contract BookWalkTest is Test {
     }
 
     /// @dev Exact output of 3.5 lots against a level of 10 lots: the book fills 3, the AMM the half lot, passing the
-    /// level by that much; the next swap fills the level first.
+    /// level by that much; the next swap fills the level first, four whole lots, and the AMM takes the rest.
     function test_exactOutputBelowOneLotGoesToTheAmm() public {
         _lp(-6000, 6000, 1e14); // up to tick 100 the AMM delivers about half a lot
         hook.setLotSizes(1e12, 1e12);
@@ -479,9 +489,10 @@ contract BookWalkTest is Test {
         assertEq(hook.live(true, 100), 7);
         (uint160 price,,,) = manager.getSlot0(id);
         assertGt(price, f.frontier, "the AMM delivered the rest, past the level");
-        _swapChecked(false, -1e12, MAX_LIMIT);
+        _swapChecked(false, -5e12, MAX_LIMIT);
         (f,) = hook.last();
-        assertEq(f.ammShare, 0, "the level, behind the pool price, fills first");
+        assertEq(hook.live(true, 100), 3, "the level, behind the pool price, fills first");
+        assertLt(f.ammShare, 2e12, "the AMM takes what is short of a lot's cost");
     }
 
     // ---------------------------------------------------------------- edge cases
@@ -704,6 +715,248 @@ contract BookWalkTest is Test {
         assertLe(f.other, BookWalk.MAX_BOOK_AMOUNT);
     }
 
+    /// @dev Sol's review: the output side of the bound under exact input, with AMM liquidity. Near the bottom price an
+    /// ask range's output across a stretch dwarfs the input: the book ends at the range and the AMM takes the swap.
+    function test_rangeOutputBoundWithAmmLiquidity() public {
+        _poolAt(500, -880_000);
+        _lp(-880_000, -870_000, 1e15);
+        _range(true, -880_000, -879_000, RangeBook.MAX_RANGE_LIQUIDITY);
+        uint160 low = TickMath.getSqrtPriceAtTick(-880_000);
+        uint160 limit = TickMath.getSqrtPriceAtTick(-879_500);
+        assertGt(SqrtPriceMath.getAmount0Delta(low, limit, RangeBook.MAX_RANGE_LIQUIDITY, false), BookWalk.MAX_BOOK_AMOUNT);
+        _swapChecked(false, -1e10, limit);
+        (BookWalk.Fill memory f, AmmReplay.Result memory e) = hook.last();
+        assertEq(f.stop, BookWalk.CAP);
+        assertEq(f.specified, 0);
+        assertGt(e.specified, 0, "the AMM took the swap");
+    }
+
+    /// @dev Sol's review: a stretch whose principal fits the bound but not with the taker fee (50%).
+    function test_rangeAmountBoundWithTheFee() public {
+        _poolAt(500_000, 480_000);
+        uint128 liquidity = RangeBook.MAX_RANGE_LIQUIDITY;
+        _range(true, 480_000, 481_500, liquidity);
+        uint160 low = TickMath.getSqrtPriceAtTick(480_000);
+        uint160 limit = TickMath.getSqrtPriceAtTick(480_500);
+        uint256 principal = SqrtPriceMath.getAmount1Delta(low, limit, liquidity, true);
+        assertLt(principal, BookWalk.MAX_BOOK_AMOUNT);
+        assertGt(2 * principal, BookWalk.MAX_BOOK_AMOUNT);
+        token1.mint(address(this), 1 << 128);
+        _swapChecked(false, int256(SqrtPriceMath.getAmount0Delta(low, limit, liquidity, false) + 1000), limit);
+        _checkEndedAt(480_000);
+    }
+
+    /// @dev Sol's review: a level fills, then an oversized range stretch from the same price ends the book there. The
+    /// fill stands; the range stays unsold and blocks its side (conservatively) until it is cancelled.
+    function test_levelFillsBeforeAnOversizedRangeAtTheSamePrice() public {
+        _poolAt(0, 480_000);
+        uint256 level = _fixed(true, 480_010, 1000);
+        uint256 range = _range(true, 480_010, 482_000, RangeBook.MAX_RANGE_LIQUIDITY);
+        uint160 at = TickMath.getSqrtPriceAtTick(480_010);
+        uint160 limit = TickMath.getSqrtPriceAtTick(481_000);
+        token1.mint(address(this), 1 << 128);
+        _swapChecked(false, 5000, limit);
+        (BookWalk.Fill memory f,) = hook.last();
+        assertEq(f.stop, BookWalk.CAP);
+        assertEq(f.specified, 1000, "the level filled");
+        assertEq(f.frontier, at, "the book ended at the range");
+        assertEq(hook.filledLots(fixedOrders[level].id), 1000);
+        assertEq(hook.rangeFrontier(rangeOrders[range].id), at, "the range unsold");
+        _checkSolvency();
+        hook.cancelRange(rangeOrders[range].id);
+        _fixed(true, 480_100, 1000);
+        _swapChecked(false, 1000, limit);
+        (f,) = hook.last();
+        assertEq(f.specified, 1000, "after the cancel the side fills again");
+    }
+
+    /// @dev Sol's review: exact output whose last part is below one lot, where the AMM runs out of liquidity before
+    /// delivering it: the AMM passes the level up to the limit. Later exact input there fills whole lots of the level
+    /// first; with no AMM liquidity where the pool price stands, what is short of a lot's cost stays with the book as
+    /// dust (handing it to the AMM would trade none of it and only run the price to the limit).
+    function test_exactOutputShortfallPastTheAmmsLiquidity() public {
+        _lp(-6000, 200, 1e13); // about 1e11 of output up to tick 200, none beyond
+        hook.setLotSizes(1e12, 1e12);
+        _fixed(true, 100, 10);
+        _swapChecked(false, 36e11, TickMath.getSqrtPriceAtTick(1000));
+        (BookWalk.Fill memory f,) = hook.last();
+        assertEq(f.specified, 3e12, "three whole lots");
+        assertEq(hook.live(true, 100), 7);
+        (uint160 price,,,) = manager.getSlot0(id);
+        assertEq(price, TickMath.getSqrtPriceAtTick(1000), "the AMM ran out and went to the limit");
+        BalanceDelta delta = _swapChecked(false, -5e12, TickMath.getSqrtPriceAtTick(3000));
+        (f,) = hook.last();
+        assertEq(hook.live(true, 100), 3, "four lots");
+        assertEq(uint256(int256(delta.amount0())), 4e12);
+        assertGt(f.dust, 0, "the rest is dust");
+        assertLt(f.dust, _proceeds(true, TickMath.getSqrtPriceAtTick(100), 1e12) * 2, "below a lot's cost");
+        (price,,,) = manager.getSlot0(id);
+        assertEq(price, TickMath.getSqrtPriceAtTick(1000), "the price stays");
+        _checkSolvency();
+    }
+
+    /// @dev Sol's review: no AMM liquidity at the pool price, but some across a gap before the limit. Exact input
+    /// short of a lot's cost goes to the AMM, which crosses the gap and trades; it is not kept as dust.
+    function test_regression_subLotExactInputCrossesAGap_asks() public {
+        _gapCase(false);
+    }
+
+    function test_regression_subLotExactInputCrossesAGap_bids() public {
+        _gapCase(true);
+    }
+
+    function _gapCase(bool zeroForOne) private {
+        hook.setLotSizes(1e12, 1e12);
+        if (zeroForOne) {
+            _fixed(false, -100, 10);
+            _lp(-3000, -1000, 1e18);
+        } else {
+            _fixed(true, 100, 10);
+            _lp(1000, 3000, 1e18);
+        }
+        BalanceDelta delta =
+            _swapChecked(zeroForOne, -5e11, TickMath.getSqrtPriceAtTick(zeroForOne ? int24(-3000) : int24(3000)));
+        (BookWalk.Fill memory f,) = hook.last();
+        assertEq(f.dust, 0, "not kept");
+        assertGt(zeroForOne ? delta.amount1() : delta.amount0(), 0, "the AMM traded across the gap");
+        assertEq(hook.live(!zeroForOne, zeroForOne ? int24(-100) : int24(100)), 10, "no lot filled");
+    }
+
+    /// @dev The same in catch-up: the level is behind the pool price, which sits in a gap before more liquidity.
+    function test_regression_subLotExactInputCrossesAGapInCatchUp() public {
+        _gapInCatchUp(false);
+    }
+
+    function test_regression_subLotExactInputCrossesAGapInCatchUp_bids() public {
+        _gapInCatchUp(true);
+    }
+
+    function _gapInCatchUp(bool zeroForOne) private {
+        int24 sign = zeroForOne ? int24(-1) : int24(1);
+        if (zeroForOne) _lp(-200, 6000, 1e13);
+        else _lp(-6000, 200, 1e13);
+        _lp(sign > 0 ? int24(1500) : int24(-3000), sign > 0 ? int24(3000) : int24(-1500), 1e18);
+        hook.setLotSizes(1e12, 1e12);
+        _fixed(!zeroForOne, 100 * sign, 10);
+        // Exact output short of a lot: the AMM runs out and stops at the limit, in the gap.
+        _swapChecked(zeroForOne, 36e11, TickMath.getSqrtPriceAtTick(1000 * sign));
+        (uint160 price,,,) = manager.getSlot0(id);
+        assertEq(price, TickMath.getSqrtPriceAtTick(1000 * sign));
+        BalanceDelta delta = _swapChecked(zeroForOne, -5e11, TickMath.getSqrtPriceAtTick(3000 * sign));
+        (BookWalk.Fill memory f,) = hook.last();
+        assertEq(f.dust, 0, "not kept");
+        assertGt(zeroForOne ? delta.amount1() : delta.amount0(), 0, "the AMM traded across the gap");
+        assertEq(hook.live(!zeroForOne, 100 * sign), 7, "the level still behind");
+    }
+
+    /// @dev Sol's review: liquidity that starts exactly at the limit cannot trade (the swap stops there), so exact
+    /// input short of a lot's cost stays as dust.
+    function test_subLotExactInputWithLiquidityOnlyAtTheLimit() public {
+        _subLotDust(false, 1000, 3000, 1000);
+        _subLotDust(true, -3000, -1000, -1000);
+    }
+
+    /// @dev Sol's review: liquidity where the price stands that a downward swap removes by crossing that tick before
+    /// moving. In catch-up (a bid level left above the pool price), with only a position [-1000, -940) at the pool's
+    /// tick -1000 and nothing below, exact input short of a lot's cost stays as dust.
+    function test_subLotExactInputWithLiquidityCrossedAway() public {
+        _lp(-200, 6000, 1e13);
+        hook.setLotSizes(1e12, 1e12);
+        _fixed(false, -100, 10);
+        _swapChecked(true, 36e11, TickMath.getSqrtPriceAtTick(-1000)); // exact output short of a lot: to the limit
+        (, int24 tick,,) = manager.getSlot0(id);
+        assertEq(tick, -1000);
+        _lp(-1000, -940, 1e18);
+        assertGt(manager.getLiquidity(id), 0, "liquidity where the price stands");
+        BalanceDelta delta = _swapChecked(true, -5e11, TickMath.getSqrtPriceAtTick(-3000));
+        (BookWalk.Fill memory f,) = hook.last();
+        assertEq(f.dust, 5e11, "kept as dust");
+        assertEq(delta.amount1(), 0, "nothing received");
+    }
+
+    /// @dev Sol's review: the look-ahead's boundary. With one word per search, liquidity found after one empty step
+    /// takes the input; liquidity two steps out counts as none.
+    function test_subLotExactInputLookAheadBoundary() public {
+        hook.setLimits(BookWalk.Limits(512, 128, 1, 64));
+        uint256 snapshot = vm.snapshotState();
+        _lp(1000, 3000, 1e18); // in the first word of the bitmap
+        _subLotSwap(false, 6000);
+        (BookWalk.Fill memory f,) = hook.last();
+        assertEq(f.dust, 0, "one empty step: traded");
+        vm.revertToState(snapshot);
+        hook.setLimits(BookWalk.Limits(512, 128, 1, 64));
+        _lp(3000, 5000, 1e18); // across a word edge
+        _subLotSwap(false, 6000);
+        (f,) = hook.last();
+        assertGt(f.dust, 0, "two empty steps: none");
+    }
+
+    /// @dev On a fresh pool at tick 0 with this AMM position, exact input short of a lot's cost stays as dust.
+    function _subLotDust(bool zeroForOne, int24 lower, int24 upper, int24 limitTick) private {
+        uint256 snapshot = vm.snapshotState();
+        _lp(lower, upper, 1e18);
+        BalanceDelta delta = _subLotSwap(zeroForOne, limitTick);
+        (BookWalk.Fill memory f,) = hook.last();
+        assertEq(f.dust, 5e11, "kept as dust");
+        assertEq(zeroForOne ? delta.amount1() : delta.amount0(), 0, "nothing received");
+        vm.revertToState(snapshot);
+    }
+
+    /// @dev A level of 1e12 lots at 100 (or -100), and exact input of about half a lot's cost.
+    function _subLotSwap(bool zeroForOne, int24 limitTick) private returns (BalanceDelta) {
+        hook.setLotSizes(1e12, 1e12);
+        _fixed(!zeroForOne, zeroForOne ? int24(-100) : int24(100), 10);
+        return _swapChecked(zeroForOne, -5e11, TickMath.getSqrtPriceAtTick(limitTick));
+    }
+
+    /// @dev Exact input worth less than one lot, with the pool price at a partly filled level: the book cannot fill
+    /// a whole lot, so the AMM takes the input. (The book used to keep it as dust, and the taker received nothing.)
+    function test_regression_subLotExactInputGoesToTheAmm() public {
+        _subLotAtALevel(false);
+    }
+
+    function test_regression_subLotExactInputGoesToTheAmm_bids() public {
+        _subLotAtALevel(true);
+    }
+
+    function _subLotAtALevel(bool zeroForOne) private {
+        _lp(-6000, 6000, 1e18);
+        hook.setLotSizes(1e12, 1e12);
+        int24 tick = zeroForOne ? int24(-100) : int24(100);
+        _fixed(!zeroForOne, tick, 1000);
+        _swapChecked(zeroForOne, -55e14, _limit(zeroForOne)); // through the AMM up to the level, and part of it
+        uint128 live = hook.live(!zeroForOne, tick);
+        assertGt(live, 0);
+        assertLt(live, 1000);
+        BalanceDelta delta = _swapChecked(zeroForOne, -5e11, _limit(zeroForOne)); // about half a lot's cost
+        (BookWalk.Fill memory f,) = hook.last();
+        assertEq(f.dust, 0);
+        assertEq(zeroForOne ? delta.amount0() : delta.amount1(), -5e11, "paid the request");
+        assertGt(zeroForOne ? delta.amount1() : delta.amount0(), 0, "received the AMM's output");
+        assertEq(hook.live(!zeroForOne, tick), live, "no lot filled");
+    }
+
+    /// @dev Sol's review: the solvency oracle at a price whose square does not fit 256 bits, and its mirror for bids
+    /// near the bottom price.
+    function test_solvencyAtAWidePrice() public {
+        _poolAt(500, 600_000);
+        assertGt(TickMath.getSqrtPriceAtTick(600_010), type(uint128).max);
+        _fixed(true, 600_010, 1000);
+        _range(true, 600_020, 600_200, 1e9);
+        _swapChecked(false, -1e33, MAX_LIMIT);
+        assertEq(hook.live(true, 600_010), 0, "the level filled");
+        _checkSolvency();
+    }
+
+    function test_solvencyAtAWidePrice_bids() public {
+        _poolAt(500, -600_000);
+        _fixed(false, -600_010, 1000);
+        _range(false, -600_200, -600_020, 1e9);
+        _swapChecked(true, -1e33, MIN_LIMIT);
+        assertEq(hook.live(false, -600_010), 0, "the level filled");
+        _checkSolvency();
+    }
+
     /// @dev An ask range of the largest liquidity from `lower`, and an exact output past what it holds up to `upper`,
     /// with the limit there.
     function _rangeToLimit(int24 lower, int24 upper) private {
@@ -730,18 +983,66 @@ contract BookWalkTest is Test {
     // ---------------------------------------------------------------- brute force
 
     function test_bruteForce_exactInput() public {
-        _bruteForce(true);
+        _bruteForce(true, PLAIN);
     }
 
     function test_bruteForce_exactOutput() public {
-        _bruteForce(false);
+        _bruteForce(false, PLAIN);
     }
+
+    /// @dev Sol's review: lots of three units, so levels fill in steps the request does not divide.
+    function test_bruteForce_lots_exactInput() public {
+        _bruteForce(true, LOTS);
+    }
+
+    function test_bruteForce_lots_exactOutput() public {
+        _bruteForce(false, LOTS);
+    }
+
+    /// @dev Sol's review: a protocol fee on both pools; the book charges the combined rate.
+    function test_bruteForce_protocolFee_exactInput() public {
+        _bruteForce(true, PROTOCOL_FEE);
+    }
+
+    function test_bruteForce_protocolFee_exactOutput() public {
+        _bruteForce(false, PROTOCOL_FEE);
+    }
+
+    /// @dev Sol's review: after earlier swaps in both directions and a cancelled level and range per side, so levels
+    /// are partly filled and ranges resume from their frontiers.
+    function test_bruteForce_afterFills_exactInput() public {
+        _bruteForce(true, AFTER_FILLS);
+    }
+
+    function test_bruteForce_afterFills_exactOutput() public {
+        _bruteForce(false, AFTER_FILLS);
+    }
+
+    /// @dev Sol's review: all three together.
+    function test_bruteForce_combined_exactInput() public {
+        _bruteForce(true, LOTS | PROTOCOL_FEE | AFTER_FILLS);
+    }
+
+    function test_bruteForce_combined_exactOutput() public {
+        _bruteForce(false, LOTS | PROTOCOL_FEE | AFTER_FILLS);
+    }
+
+    uint256 private constant PLAIN = 0;
+    uint256 private constant LOTS = 1;
+    uint256 private constant PROTOCOL_FEE = 2;
+    uint256 private constant AFTER_FILLS = 4;
 
     /// @dev Every amount from 1 to 40 (and a few larger exact inputs) against every split: the AMM side swaps for
     /// real in a hook-free twin pool, the book side comes from the test's own record of the orders.
-    function _bruteForce(bool exactIn) private {
+    function _bruteForce(bool exactIn, uint256 variant) private {
         vm.pauseGasMetering();
         _twin();
+        if (variant & LOTS != 0) hook.setLotSizes(3, 3);
+        if (variant & PROTOCOL_FEE != 0) {
+            manager.setProtocolFeeController(address(this));
+            manager.setProtocolFee(key, 500 | (300 << 12));
+            manager.setProtocolFee(twin, 500 | (300 << 12));
+        }
         _lpBoth(-6000, 6000, 100);
         _range(true, 20, 900, 1000);
         _range(true, 150, 400, 700);
@@ -751,6 +1052,7 @@ contract BookWalkTest is Test {
         _range(false, -400, -150, 700);
         _fixed(false, -300, 20);
         _fixed(false, -60, 7);
+        if (variant & AFTER_FILLS != 0) _fillAndCancel(variant & LOTS != 0 ? 3 : 1);
         for (uint256 d; d < 2; ++d) {
             bool zeroForOne = d == 1;
             for (uint256 amount = 1; amount <= 43; ++amount) {
@@ -831,14 +1133,17 @@ contract BookWalkTest is Test {
     /// @dev Quotes the swap, runs it, and checks it against the quote, the replay and the book.
     function _swapChecked(bool zeroForOne, int256 specified, uint160 limit) private returns (BalanceDelta delta) {
         BookHook.Quote memory q = hook.quote(key, SwapParams(zeroForOne, specified, limit));
+        // The AMM's output up to the book's quoted frontier, to measure how far past it the AMM goes.
+        (uint160 price,,,) = manager.getSlot0(id);
+        uint256 toFrontier = _beyond(zeroForOne, q.frontier, price) ? hook.ammOutputTo(key, zeroForOne, q.frontier) : 0;
         delta = _swap(zeroForOne, specified, limit);
-        _check(zeroForOne, specified < 0, delta);
+        _check(zeroForOne, specified < 0, delta, toFrontier);
         _checkQuote(q);
         _checkRequest(zeroForOne, specified, delta);
         _checkStart();
     }
 
-    function _check(bool zeroForOne, bool exactIn, BalanceDelta delta) private {
+    function _check(bool zeroForOne, bool exactIn, BalanceDelta delta, uint256 toFrontier) private {
         (BookWalk.Fill memory f, AmmReplay.Result memory e) = hook.last();
         assertTrue(e.complete, "replay cap");
         (uint160 price, int24 tick,,) = manager.getSlot0(id);
@@ -851,15 +1156,14 @@ contract BookWalkTest is Test {
         Currency input = zeroForOne ? key.currency0 : key.currency1;
         assertEq(manager.balanceOf(HOOK, input.toId()), claimed[side], "claims");
         // The book's start is where it stopped. When the request ran out and the AMM traded, the book left nothing
-        // unfilled before the AMM's landing, except that exact output below one lot of a partly filled level goes to
-        // the AMM, which then trades that little past the level.
+        // unfilled before the AMM's landing, except that what is below one lot of a partly filled level (exact output
+        // short of a lot, or exact input short of a lot's cost) goes to the AMM, which then trades that little past
+        // the level.
         assertEq(hook.start(!zeroForOne), f.frontier, "book start");
         if (f.stop == BookWalk.INSIDE && e.specified != 0 && _beyond(zeroForOne, e.sqrtPriceX96, f.frontier)) {
-            assertFalse(exactIn, "book left behind the AMM");
-            uint128 liquidity = manager.getLiquidity(id);
-            uint256 past = zeroForOne
-                ? SqrtPriceMath.getAmount1Delta(e.sqrtPriceX96, f.frontier, liquidity, false)
-                : SqrtPriceMath.getAmount0Delta(f.frontier, e.sqrtPriceX96, liquidity, false);
+            // The AMM's output beyond the frontier: its whole output less what it had delivered by the frontier
+            // (replayed across ticks before the swap), each step rounding once.
+            uint256 past = (exactIn ? e.other : e.specified) - toFrontier;
             assertLe(past, hook.lotSize(zeroForOne ? 1 : 0) + 2, "AMM past the book by more than a lot");
         }
     }
@@ -943,10 +1247,8 @@ contract BookWalkTest is Test {
         for (uint256 i; i < fixedOrders.length; ++i) {
             FixedModel memory o = fixedOrders[i];
             uint256 filled = uint256(hook.filledLots(o.id)) * hook.lotSize(o.sell0 ? 0 : 1);
-            uint160 price = TickMath.getSqrtPriceAtTick(o.tick);
-            uint256 squared = uint256(price) * price;
             // An ask sells currency0 for currency1 at price^2; a bid the reverse.
-            uint256 proceeds = o.sell0 ? FullMath.mulDiv(filled, squared, 1 << 192) : FullMath.mulDiv(filled, 1 << 192, squared);
+            uint256 proceeds = _proceeds(o.sell0, TickMath.getSqrtPriceAtTick(o.tick), filled);
             owed[o.sell0 ? 1 : 0] += proceeds;
             net[o.sell0 ? 1 : 0] += proceeds - FullMath.mulDivRoundingUp(proceeds, o.fee, 1_000_000);
             sold[o.sell0 ? 0 : 1] += filled;
@@ -970,6 +1272,18 @@ contract BookWalkTest is Test {
             assertLe(hook.bookOut(c), sold[c], "book paid out more than makers sold");
             assertLe(net[c] + hook.makerFees(c), hook.principal(c), "net claims plus maker fees beyond principal");
         }
+    }
+
+    /// @dev What `out` sold at sqrt price `price` earns, rounded down; the price is applied in two steps when its
+    /// square would not fit.
+    function _proceeds(bool sell0, uint160 price, uint256 out) private pure returns (uint256) {
+        if (price <= type(uint128).max) {
+            uint256 squared = uint256(price) * price;
+            return sell0 ? FullMath.mulDiv(out, squared, 1 << 192) : FullMath.mulDiv(out, 1 << 192, squared);
+        }
+        return sell0
+            ? FullMath.mulDiv(FullMath.mulDiv(out, price, 1 << 96), price, 1 << 96)
+            : FullMath.mulDiv(FullMath.mulDiv(out, 1 << 96, price), 1 << 96, price);
     }
 
     // ---------------------------------------------------------------- setup helpers
@@ -1108,6 +1422,35 @@ contract BookWalkTest is Test {
 
     /// @dev The best split by brute force. Each AMM share runs as a real swap in the twin pool, reverted afterwards;
     /// the book side comes from `bookAlone`.
+    /// @dev Swaps part way into each side, cancels the first level and range of each side, and moves the twin pool
+    /// to the hooked pool's price so both AMMs start alike.
+    function _fillAndCancel(uint256 lot) private {
+        int256 amount = lot == 1 ? int256(-50) : int256(-100);
+        _swapChecked(false, amount, MAX_LIMIT);
+        _swapChecked(true, amount, MIN_LIMIT);
+        assertGt(hook.rangeFrontier(rangeOrders[0].id), TickMath.getSqrtPriceAtTick(20), "the ask range partly sold");
+        assertLt(hook.rangeFrontier(rangeOrders[2].id), TickMath.getSqrtPriceAtTick(-20), "the bid range partly sold");
+        // Sol's review: a live, partly filled level on each side (the levels at 300 and -300, of 20 lots).
+        for (uint256 k; k < 2; ++k) {
+            uint256 live = hook.live(k == 0, k == 0 ? int24(300) : int24(-300));
+            assertGt(live, 0, "the level is live");
+            assertLt(live, 20, "the level is partly filled");
+        }
+        hook.cancelFixed(fixedOrders[1].id); // the ask at 60
+        hook.cancelFixed(fixedOrders[3].id); // the bid at -60
+        hook.cancelRange(rangeOrders[1].id); // the ask range [150, 400]
+        hook.cancelRange(rangeOrders[3].id); // the bid range [-400, -150]
+        (uint160 price,,,) = manager.getSlot0(id);
+        (uint160 twinPrice,,,) = manager.getSlot0(twin.toId());
+        if (twinPrice != price) {
+            swapRouter.swap(
+                twin, SwapParams(price < twinPrice, -1e30, price), PoolSwapTest.TestSettings(false, false), ""
+            );
+        }
+        (twinPrice,,,) = manager.getSlot0(twin.toId());
+        assertEq(twinPrice, price, "twin in step");
+    }
+
     function _best(bool zeroForOne, bool exactIn, uint256 amount) private returns (uint256 best, bool feasible) {
         best = exactIn ? 0 : type(uint256).max;
         for (uint256 r; r <= amount; ++r) {
@@ -1153,7 +1496,8 @@ contract BookWalkTest is Test {
     /// BookWalk: every order's price points are visited in order, with the range liquidity active between them.
     function bookAlone(bool zeroForOne, bool exactIn, uint256 amount) external view returns (uint256, bool) {
         bool sell0 = !zeroForOne;
-        (,,, uint24 fee) = manager.getSlot0(id);
+        (,,, uint24 lpFee) = manager.getSlot0(id);
+        uint24 fee = AmmReplay.swapFee(manager, id, zeroForOne, lpFee);
         uint160[] memory points = _points(sell0);
         if (points.length == 0) return (0, exactIn || amount == 0);
         Oracle memory o = Oracle(zeroForOne, exactIn, fee, amount, 0, points[0]);
@@ -1171,7 +1515,7 @@ contract BookWalkTest is Test {
 
     /// @dev Every order's price points on a side, sorted in walk order, without duplicates.
     function _points(bool sell0) private view returns (uint160[] memory points) {
-        uint160[] memory all = new uint160[](fixedOrders.length + 2 * rangeOrders.length);
+        uint160[] memory all = new uint160[](fixedOrders.length + 3 * rangeOrders.length);
         uint256 n;
         for (uint256 i; i < fixedOrders.length; ++i) {
             if (fixedOrders[i].sell0 == sell0) all[n++] = TickMath.getSqrtPriceAtTick(fixedOrders[i].tick);
@@ -1180,6 +1524,7 @@ contract BookWalkTest is Test {
             if (rangeOrders[i].sell0 != sell0) continue;
             all[n++] = TickMath.getSqrtPriceAtTick(rangeOrders[i].lower);
             all[n++] = TickMath.getSqrtPriceAtTick(rangeOrders[i].upper);
+            all[n++] = hook.rangeFrontier(rangeOrders[i].id); // where a partly sold range resumes
         }
         // Insertion sort in walk order: asks upward, bids downward.
         for (uint256 i = 1; i < n; ++i) {
@@ -1201,19 +1546,20 @@ contract BookWalkTest is Test {
         }
     }
 
-    function _lotsAt(bool sell0, uint160 price) private view returns (uint256 lots) {
-        for (uint256 i; i < fixedOrders.length; ++i) {
-            FixedModel memory o = fixedOrders[i];
-            if (o.sell0 == sell0 && TickMath.getSqrtPriceAtTick(o.tick) == price) lots += o.lots;
-        }
+    /// @dev The level's live lots: placed, less fills and cancellations (the FixedBook tests check those).
+    function _lotsAt(bool sell0, uint160 price) private view returns (uint256) {
+        if (TickMath.getSqrtPriceAtTick(TickMath.getTickAtSqrtPrice(price)) != price) return 0;
+        return hook.live(sell0, TickMath.getTickAtSqrtPrice(price));
     }
 
     function _liquidityBetween(bool sell0, uint160 a, uint160 b) private view returns (uint256 liquidity) {
         for (uint256 i; i < rangeOrders.length; ++i) {
             RangeModel memory o = rangeOrders[i];
-            if (o.sell0 != sell0) continue;
-            uint160 lower = TickMath.getSqrtPriceAtTick(o.lower);
-            uint160 upper = TickMath.getSqrtPriceAtTick(o.upper);
+            if (o.sell0 != sell0 || hook.rangeOrder(o.id).frozen != 0) continue;
+            // Only the unsold part: an ask from its frontier up, a bid from its frontier down.
+            uint160 frontier = hook.rangeFrontier(o.id);
+            uint160 lower = sell0 ? frontier : TickMath.getSqrtPriceAtTick(o.lower);
+            uint160 upper = sell0 ? TickMath.getSqrtPriceAtTick(o.upper) : frontier;
             (uint160 lo, uint160 hi) = a < b ? (a, b) : (b, a);
             if (lower <= lo && hi <= upper) liquidity += o.liquidity;
         }

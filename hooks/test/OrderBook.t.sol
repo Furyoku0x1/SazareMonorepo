@@ -35,164 +35,17 @@ import {BookOrders, IDepositVault} from "../src/libraries/BookOrders.sol";
 import {FixedBook} from "../src/libraries/FixedBook.sol";
 import {RangeBook} from "../src/libraries/RangeBook.sol";
 
-/// @dev An extension that overrides the LP fee in beforeSwap, as LVRHook does.
-contract FeeOverrider is IKernelHookExtension {
-    uint24 public immutable FEE;
-
-    constructor(uint24 fee) {
-        FEE = fee;
-    }
-
-    function onInstall(PoolKey calldata, ExtensionSettings calldata) external pure returns (bytes4) {
-        return this.onInstall.selector;
-    }
-
-    function onConfigure(PoolKey calldata, ExtensionSettings calldata, ExtensionSettings calldata)
-        external
-        pure
-        returns (bytes4)
-    {
-        return this.onConfigure.selector;
-    }
-
-    function canActivate(PoolKey calldata, ExtensionSettings calldata) external pure returns (bool) {
-        return true;
-    }
-
-    function canUninstall(PoolKey calldata) external pure returns (bool) {
-        return true;
-    }
-
-    function onUninstall(PoolKey calldata, bytes calldata) external pure returns (bytes4) {
-        return this.onUninstall.selector;
-    }
-
-    function onCallback(ExecutionContext calldata, PoolKey calldata, bytes calldata)
-        external
-        virtual
-        returns (CallbackResult memory)
-    {
-        return CallbackResult(0, 0, FEE | LPFeeLibrary.OVERRIDE_FEE_FLAG);
-    }
-}
-
-/// @dev An extension that, inside a nested route, pays the route executor one unit of a currency straight through the
-/// PoolManager, with no callback delta.
-contract ExecutorGift is FeeOverrider {
-    IPoolManager public immutable MANAGER;
-    bool public immutable PAY1;
-
-    constructor(IPoolManager manager, bool pay1) FeeOverrider(0) {
-        MANAGER = manager;
-        PAY1 = pay1;
-    }
-
-    function onCallback(ExecutionContext calldata context, PoolKey calldata key, bytes calldata)
-        external
-        override
-        returns (CallbackResult memory)
-    {
-        if (context.depth > 1) {
-            Currency currency = PAY1 ? key.currency1 : key.currency0;
-            MANAGER.sync(currency);
-            MockERC20(Currency.unwrap(currency)).transfer(address(MANAGER), 1);
-            MANAGER.settleFor(context.sender);
-        }
-        return CallbackResult(0, 0, 0);
-    }
-}
-
-/// @dev An extension that charges (positive) or credits (negative) the caller of an exact-input swap of one unit, as
-/// the book's empty-pool price move is: a charge in the input currency, a credit in the output currency.
-contract UnitSwapTax is FeeOverrider {
-    int128 public immutable AMOUNT;
-
-    constructor(int128 amount) FeeOverrider(0) {
-        AMOUNT = amount;
-    }
-
-    function fund(address vault, PoolId pool, Currency currency, uint256 amount) external {
-        MockERC20(Currency.unwrap(currency)).approve(vault, amount);
-        IDepositVault(vault).deposit(pool, address(this), currency, amount);
-    }
-
-    function onCallback(ExecutionContext calldata, PoolKey calldata, bytes calldata data)
-        external
-        view
-        override
-        returns (CallbackResult memory)
-    {
-        SwapParams memory params = abi.decode(data, (SwapParams));
-        if (params.amountSpecified != -1) return CallbackResult(0, 0, 0);
-        bool charge0 = params.zeroForOne == AMOUNT > 0;
-        return charge0 ? CallbackResult(AMOUNT, 0, 0) : CallbackResult(0, AMOUNT, 0);
-    }
-}
-
-/// @dev Two swaps in one transaction (Foundry clears transient storage between a test's own calls), the first with a
-/// gas allowance of its own.
-contract TwoSwaps {
-    PoolSwapTest internal immutable ROUTER;
-
-    constructor(PoolSwapTest router, Currency currency0, Currency currency1) {
-        ROUTER = router;
-        MockERC20(Currency.unwrap(currency0)).approve(address(router), type(uint256).max);
-        MockERC20(Currency.unwrap(currency1)).approve(address(router), type(uint256).max);
-    }
-
-    function run(PoolKey calldata key, SwapParams calldata first, uint256 firstGas, SwapParams calldata second)
-        external
-    {
-        ROUTER.swap{gas: firstGas}(key, first, PoolSwapTest.TestSettings(false, false), "");
-        ROUTER.swap(key, second, PoolSwapTest.TestSettings(false, false), "");
-    }
-}
+import {
+    OrderBookFixture,
+    FeeOverrider,
+    ExecutorGift,
+    UnitSwapTax,
+    TwoSwaps
+} from "./utils/OrderBookFixture.sol";
 
 /// @dev The order book extension through the Kernel, against a real PoolManager.
-contract OrderBookTest is Test {
+contract OrderBookTest is OrderBookFixture {
     using StateLibrary for IPoolManager;
-
-    address internal constant HOOK_ADDRESS = address(uint160(0xC0FFEE) << 136 | uint160(Hooks.ALL_HOOK_MASK));
-    address internal constant TREASURY = address(0x7EA5);
-    address internal constant MAKER = address(0x4A4E);
-    uint160 internal constant PRICE_1 = 1 << 96;
-    uint160 internal constant MIN_LIMIT = TickMath.MIN_SQRT_PRICE + 1;
-    uint160 internal constant MAX_LIMIT = TickMath.MAX_SQRT_PRICE - 1;
-    uint16 internal constant MASK = uint16(1) << uint8(CallbackType.BeforeSwap) | uint16(1) << uint8(CallbackType.AfterSwap);
-
-    IPoolManager internal manager;
-    PoolSwapTest internal swapRouter;
-    PoolModifyLiquidityTest internal lpRouter;
-    HookCatalog internal catalog;
-    KernelHook internal hook;
-    WETH internal weth;
-    OrderBook internal book;
-    Currency internal currency0;
-    Currency internal currency1;
-    PoolKey internal key;
-    PoolId internal pool;
-
-    function setUp() public {
-        manager = IPoolManager(deployCode("PoolManager.sol:PoolManager", abi.encode(address(this))));
-        swapRouter = new PoolSwapTest(manager);
-        lpRouter = new PoolModifyLiquidityTest(manager);
-        MockERC20 a = new MockERC20("A", "A", 18);
-        MockERC20 b = new MockERC20("B", "B", 18);
-        (MockERC20 t0, MockERC20 t1) = address(a) < address(b) ? (a, b) : (b, a);
-        (currency0, currency1) = (Currency.wrap(address(t0)), Currency.wrap(address(t1)));
-        catalog = new HookCatalog();
-        deployCodeTo("KernelHook.sol:KernelHook", abi.encode(manager, address(catalog)), HOOK_ADDRESS);
-        hook = KernelHook(HOOK_ADDRESS);
-        weth = new WETH();
-        book = new OrderBook(IKernelHook(address(hook)), IWETH(address(weth)));
-        catalog.admit(address(book), IHookCatalog.Entry(address(book).codehash, MASK, true, true, false, true, true));
-        _fund(t0);
-        _fund(t1);
-        key = PoolKey(currency0, currency1, 3000, 10, IHooks(address(hook)));
-        pool = key.toId();
-        hook.preparePool(key);
-        manager.initialize(key, PRICE_1);
-    }
 
     // ---------------------------------------------------------------- swaps
 
@@ -603,6 +456,27 @@ contract OrderBookTest is Test {
         _checkBacking();
     }
 
+    /// @dev Exact input worth less than one lot, with the pool price at a partly filled level: the AMM takes it and
+    /// the taker receives its output; the book's reserve gets nothing. (The book used to keep all of it.)
+    function test_subLotExactInputGoesToTheAmm() public {
+        _lp(-6000, 6000, 1e18);
+        OrderBook.Policy memory p = _policy();
+        p.lotSize0 = 1e12;
+        _install(p);
+        uint256 id = _placeFixed(true, 100, 1000);
+        _swap(SwapParams(false, -55e14, MAX_LIMIT)); // up to the level and part of it
+        (, uint64 filled) = book.fixedOrder(pool, id);
+        assertGt(filled, 0);
+        assertLt(filled, 1000);
+        BalanceDelta delta = _swap(SwapParams(false, -5e11, MAX_LIMIT)); // about half a lot's cost
+        assertEq(delta.amount1(), -5e11);
+        assertGt(delta.amount0(), 0, "the taker received the AMM's output");
+        (, uint64 after_) = book.fixedOrder(pool, id);
+        assertEq(after_, filled, "no lot filled");
+        assertEq(book.ledger(pool).reserve[1], 0, "nothing kept");
+        _checkBacking();
+    }
+
     /// @dev Random placements, cancellations, claims and swaps in both directions and modes; the vault always holds
     /// exactly what the ledger owes. Then everything is cancelled and claimed, the rest swept and withdrawn, and the
     /// extension removed.
@@ -626,6 +500,12 @@ contract OrderBookTest is Test {
 
     uint256[] private fixedIds;
     uint256[] private rangeIds;
+    // What the test saw each order receive, for the independent check at the close.
+    mapping(uint256 => uint64) private placedLots;
+    mapping(uint256 => uint256) private fixedPaid;
+    mapping(uint256 => uint256) private fixedRefunded;
+    mapping(uint256 => uint256) private rangePaid;
+    mapping(uint256 => uint256) private rangeRefunded;
 
     function _randomFixed(uint256 r) private {
         (, int24 tick,,) = manager.getSlot0(pool);
@@ -633,8 +513,11 @@ contract OrderBookTest is Test {
         int24 offset = int24(int256((r >> 8) % 40));
         int24 at = sell0 ? tick + 1 + offset : tick - offset; // asks above the pool price, bids at or below it
         if (!_postOnlyHolds(sell0, at)) return;
+        uint64 lots = uint64(1 + (r >> 20) % 1e11);
         vm.prank(MAKER);
-        fixedIds.push(book.placeFixed(key, sell0, at, uint64(1 + (r >> 20) % 1e11)));
+        uint256 id = book.placeFixed(key, sell0, at, lots);
+        fixedIds.push(id);
+        placedLots[id] = lots;
     }
 
     function _randomRange(uint256 r) private {
@@ -666,31 +549,105 @@ contract OrderBookTest is Test {
     }
 
     function _randomCancel(uint256 r) private {
-        vm.startPrank(MAKER);
-        if (r & 1 == 1 && fixedIds.length != 0) book.cancelFixed(pool, fixedIds[(r >> 8) % fixedIds.length]);
-        else if (rangeIds.length != 0) book.cancelRange(pool, rangeIds[(r >> 8) % rangeIds.length]);
-        vm.stopPrank();
+        if (r & 1 == 1 && fixedIds.length != 0) _cancelFixed(fixedIds[(r >> 8) % fixedIds.length]);
+        else if (rangeIds.length != 0) _cancelRange(rangeIds[(r >> 8) % rangeIds.length]);
     }
 
     function _randomClaim(uint256 r) private {
-        vm.startPrank(MAKER);
-        if (r & 1 == 1 && fixedIds.length != 0) book.claimFixed(pool, fixedIds[(r >> 8) % fixedIds.length], MAKER);
-        else if (rangeIds.length != 0) book.claimRange(pool, rangeIds[(r >> 8) % rangeIds.length], MAKER);
-        vm.stopPrank();
+        if (r & 1 == 1 && fixedIds.length != 0) _claimFixed(fixedIds[(r >> 8) % fixedIds.length]);
+        else if (rangeIds.length != 0) _claimRange(rangeIds[(r >> 8) % rangeIds.length]);
+    }
+
+    /// @dev Claims go to a recipient other than the maker; every payment is checked as received.
+    address private constant CLAIMANT = address(0xC1A1);
+
+    function _cancelFixed(uint256 id) private {
+        (FixedBook.Order memory o,) = book.fixedOrder(pool, id);
+        fixedRefunded[id] += _paid(o.sell0 ? currency0 : currency1, MAKER, abi.encodeCall(book.cancelFixed, (pool, id)));
+    }
+
+    function _cancelRange(uint256 id) private {
+        (RangeBook.Range memory o,) = book.rangeOrder(pool, id);
+        rangeRefunded[id] += _paid(o.sell0 ? currency0 : currency1, MAKER, abi.encodeCall(book.cancelRange, (pool, id)));
+    }
+
+    function _claimFixed(uint256 id) private {
+        (FixedBook.Order memory o,) = book.fixedOrder(pool, id);
+        fixedPaid[id] +=
+            _paid(o.sell0 ? currency1 : currency0, CLAIMANT, abi.encodeCall(book.claimFixed, (pool, id, CLAIMANT)));
+    }
+
+    function _claimRange(uint256 id) private {
+        (RangeBook.Range memory o,) = book.rangeOrder(pool, id);
+        rangePaid[id] +=
+            _paid(o.sell0 ? currency1 : currency0, CLAIMANT, abi.encodeCall(book.claimRange, (pool, id, CLAIMANT)));
+    }
+
+    /// @dev Calls the book as the maker and returns the amount it reported paying, checked against what `recipient`
+    /// received.
+    function _paid(Currency currency, address recipient, bytes memory call) private returns (uint256 amount) {
+        uint256 before = currency.balanceOf(recipient);
+        vm.prank(MAKER);
+        (bool ok, bytes memory ret) = address(book).call(call);
+        assertTrue(ok, "maker call");
+        amount = abi.decode(ret, (uint256));
+        assertEq(currency.balanceOf(recipient) - before, amount, "paid as reported");
+    }
+
+    /// @dev Each closed order, from its own fills: refunds are its unfilled lots, or its range's unsold part rounded
+    /// down; its claims add up to x - ceil(r x) of its gross proceeds x, rounded down at its price or along its range.
+    function _checkMakers() private view {
+        uint256 fee = _policy().makerFeePips;
+        for (uint256 i; i < fixedIds.length; ++i) {
+            uint256 id = fixedIds[i];
+            (FixedBook.Order memory o, uint64 filled) = book.fixedOrder(pool, id);
+            uint256 lotSize = o.sell0 ? _policy().lotSize0 : _policy().lotSize1;
+            assertEq(fixedRefunded[id], uint256(placedLots[id] - filled) * lotSize, "fixed refund");
+            uint256 x = _proceeds(o.sell0, TickMath.getSqrtPriceAtTick(o.tick), uint256(filled) * lotSize);
+            assertEq(fixedPaid[id], x - FullMath.mulDivRoundingUp(x, fee, 1e6), "fixed net claims");
+        }
+        for (uint256 i; i < rangeIds.length; ++i) {
+            uint256 id = rangeIds[i];
+            (RangeBook.Range memory o, uint160 frontier) = book.rangeOrder(pool, id);
+            uint160 lower = TickMath.getSqrtPriceAtTick(o.lower);
+            uint160 upper = TickMath.getSqrtPriceAtTick(o.upper);
+            (uint256 x, uint256 unsold) = o.sell0
+                ? (
+                    SqrtPriceMath.getAmount1Delta(lower, frontier, o.liquidity, false),
+                    SqrtPriceMath.getAmount0Delta(frontier, upper, o.liquidity, false)
+                )
+                : (
+                    SqrtPriceMath.getAmount0Delta(frontier, upper, o.liquidity, false),
+                    SqrtPriceMath.getAmount1Delta(lower, frontier, o.liquidity, false)
+                );
+            assertEq(rangeRefunded[id], unsold, "range refund");
+            assertEq(rangePaid[id], x - FullMath.mulDivRoundingUp(x, fee, 1e6), "range net claims");
+        }
+    }
+
+    /// @dev What `out` sold at sqrt price `price` earns, rounded down; the price is applied in two steps when its
+    /// square would not fit.
+    function _proceeds(bool sell0, uint160 price, uint256 out) private pure returns (uint256) {
+        if (price <= type(uint128).max) {
+            uint256 squared = uint256(price) * price;
+            return sell0 ? FullMath.mulDiv(out, squared, 1 << 192) : FullMath.mulDiv(out, 1 << 192, squared);
+        }
+        return sell0
+            ? FullMath.mulDiv(FullMath.mulDiv(out, price, 1 << 96), price, 1 << 96)
+            : FullMath.mulDiv(FullMath.mulDiv(out, 1 << 96, price), 1 << 96, price);
     }
 
     function _closeAll() private {
-        vm.startPrank(MAKER);
         for (uint256 i; i < fixedIds.length; ++i) {
-            book.cancelFixed(pool, fixedIds[i]);
-            book.claimFixed(pool, fixedIds[i], MAKER);
+            _cancelFixed(fixedIds[i]);
+            _claimFixed(fixedIds[i]);
         }
         for (uint256 i; i < rangeIds.length; ++i) {
-            book.cancelRange(pool, rangeIds[i]);
-            book.claimRange(pool, rangeIds[i], MAKER);
+            _cancelRange(rangeIds[i]);
+            _claimRange(rangeIds[i]);
         }
-        vm.stopPrank();
         assertEq(book.ledger(pool).openOrders, 0, "every order settled");
+        _checkMakers();
         _checkBacking();
         // Undonated LP shares go out with a swap while liquidity is in range.
         (uint160 price,,,) = manager.getSlot0(pool);
@@ -744,127 +701,4 @@ contract OrderBookTest is Test {
         vm.snapshotValue("OrderBookExtensionGas", label, measured.gasTotalUsed);
     }
 
-    // ---------------------------------------------------------------- checks
-
-    /// @dev The vault holds exactly what the ledger owes.
-    function _checkBacking() private view {
-        OrderBook.Ledger memory l = book.ledger(pool);
-        for (uint256 c; c < 2; ++c) {
-            Currency currency = c == 0 ? key.currency0 : key.currency1;
-            uint256 owed = l.escrow[c] + l.makers[c] + l.treasury[c] + l.lpFees[c] + l.reserve[c];
-            assertEq(hook.VAULT().balanceOf(pool, address(book), currency), owed, "vault balance equals the ledger");
-        }
-    }
-
-    function _bookFilled() private returns (uint256 specified, uint256 other) {
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        for (uint256 i; i < logs.length; ++i) {
-            if (logs[i].emitter == address(book) && logs[i].topics[0] == OrderBook.BookFilled.selector) {
-                (, specified, other,,) = abi.decode(logs[i].data, (uint64, uint256, uint256, uint256, uint8));
-            }
-        }
-    }
-
-    /// @dev Whether the Kernel skipped the book in the recorded logs.
-    function _skipped() private returns (bool) {
-        return _skippedIn(vm.getRecordedLogs());
-    }
-
-    function _skippedIn(Vm.Log[] memory logs) private view returns (bool) {
-        for (uint256 i; i < logs.length; ++i) {
-            if (
-                logs[i].emitter == address(hook) && logs[i].topics[0] == IKernelHook.ExtensionSkipped.selector
-                    && logs[i].topics[2] == bytes32(uint256(uint160(address(book))))
-            ) return true;
-        }
-        return false;
-    }
-
-    function _emitted(bytes32 topic) private returns (bool) {
-        return _emittedIn(vm.getRecordedLogs(), topic);
-    }
-
-    function _emittedIn(Vm.Log[] memory logs, bytes32 topic) private view returns (bool) {
-        for (uint256 i; i < logs.length; ++i) {
-            if (logs[i].emitter == address(book) && logs[i].topics[0] == topic) return true;
-        }
-        return false;
-    }
-
-    // ---------------------------------------------------------------- setup
-
-    function _policy() internal pure returns (OrderBook.Policy memory p) {
-        p.lotSize0 = 1e6;
-        p.lotSize1 = 1e6;
-        p.minRangeLiquidity = 1e6;
-        p.makerFeePips = 3000;
-        p.nestedFills = true;
-        p.gasReserve = 300_000;
-        p.treasury = TREASURY;
-        p.limits = BookWalk.Limits(512, 128, 8, 64);
-    }
-
-    function _settings() internal pure returns (ExtensionSettings memory settings) {
-        settings.callbackMask = MASK;
-        settings.optionalCallbacks = true;
-        settings.allowNesting = true;
-        settings.lifecycleGasLimit = 500_000;
-        settings.callbackGasLimits[uint8(CallbackType.BeforeSwap)] = 2_500_000;
-        settings.callbackGasLimits[uint8(CallbackType.AfterSwap)] = 2_500_000;
-    }
-
-    function _install(OrderBook.Policy memory p) internal {
-        _installWith(_settings(), p);
-    }
-
-    function _installWith(ExtensionSettings memory settings, OrderBook.Policy memory p) internal {
-        _installInactive(settings, p);
-        hook.activateExtension(key, IHookExtension(address(book)));
-    }
-
-    /// @dev Installs, sets the policy and configures the book, leaving `settings` at its version.
-    function _installInactive(ExtensionSettings memory settings, OrderBook.Policy memory p) internal {
-        settings.configuration = abi.encode(uint64(0));
-        hook.installExtension(key, IHookExtension(address(book)), settings);
-        book.setPolicy(key, 0, p);
-        settings.configuration = abi.encode(uint64(1));
-        hook.configureExtension(key, IHookExtension(address(book)), settings);
-    }
-
-    function _placeFixed(bool sell0, int24 tick, uint64 lots) internal returns (uint256 id) {
-        vm.prank(MAKER);
-        id = book.placeFixed(key, sell0, tick, lots);
-    }
-
-    function _placeRange(bool sell0, int24 lower, int24 upper, uint128 liquidity) internal returns (uint256 id) {
-        vm.prank(MAKER);
-        id = book.placeRange(key, sell0, lower, upper, liquidity);
-    }
-
-    function _rangeDeposit(bool sell0, int24 lower, int24 upper, uint128 liquidity) internal pure returns (uint256) {
-        uint160 low = TickMath.getSqrtPriceAtTick(lower);
-        uint160 high = TickMath.getSqrtPriceAtTick(upper);
-        return sell0
-            ? SqrtPriceMath.getAmount0Delta(low, high, liquidity, true)
-            : SqrtPriceMath.getAmount1Delta(low, high, liquidity, true);
-    }
-
-    function _swap(SwapParams memory params) internal returns (BalanceDelta) {
-        return swapRouter.swap(key, params, PoolSwapTest.TestSettings(false, false), "");
-    }
-
-    function _lp(int24 lower, int24 upper, uint256 liquidity) internal {
-        lpRouter.modifyLiquidity(key, ModifyLiquidityParams(lower, upper, int256(liquidity), 0), "");
-    }
-
-    function _fund(MockERC20 token) private {
-        token.mint(address(this), 1e30);
-        token.approve(address(swapRouter), type(uint256).max);
-        token.approve(address(lpRouter), type(uint256).max);
-        token.mint(MAKER, 1e30);
-        vm.prank(MAKER);
-        token.approve(address(book), type(uint256).max);
-    }
-
-    receive() external payable {}
 }

@@ -76,7 +76,7 @@ library BookWalk {
         uint256 other;
         uint256 principal; // input to makers, rounded up per piece, without the taker fee
         uint256 takerFee; // the pool-rate fee on the book's fills, input currency
-        uint256 dust; // exact input the book kept without trading it
+        uint256 dust; // exact input the book kept without trading it, where the AMM had no liquidity
         uint256 ammShare; // the specified amount the walk sized for the AMM (the PoolManager swaps the rest)
         uint160 frontier; // the book filled everything before this price, and `Plan.frontierLots` at it
         uint8 stop;
@@ -172,9 +172,9 @@ library BookWalk {
                 p.fill.stop = INSIDE;
                 p.fill.frontier = s0;
                 p.reach = ammStart;
-                uint256 shortfall = _spend(p, b, r, true);
-                if (shortfall != 0) {
-                    p.fill.ammShare = shortfall; // rounding: the PoolManager decides where it lands
+                uint256 left = _rest(p, r, c, _spend(p, b, r));
+                if (left != 0) {
+                    p.fill.ammShare = left; // below a lot, or rounding: the PoolManager decides where it lands
                     p.fill.stop = BOOK_DONE;
                 }
                 return _finish(p, r);
@@ -232,10 +232,10 @@ library BookWalk {
             break; // spent exactly at the step's end
         }
         p.total = _cost(p, r, p.fill.frontier);
-        // Fixed orders exactly at the price limit are reachable; the taker keeps any input left.
+        // Fixed orders exactly at the price limit are reachable; the taker keeps what is left.
         if (p.fill.stop == LIMIT) {
             p.reach = r.pool.limit;
-            _spend(p, b, r, false);
+            _spend(p, b, r);
         }
     }
 
@@ -283,11 +283,10 @@ library BookWalk {
         _search(p, b, r, c, s, stepAmount);
         p.fill.stop = INSIDE;
         p.total = _cost(p, r, p.fill.frontier);
-        uint256 shortfall = _spend(p, b, r, true);
-        if (shortfall == 0) return;
-        // Exact output the book could not deliver (its last unit can round away, or a lot is larger than what is
-        // left) goes to the AMM.
-        p.fill.ammShare += shortfall;
+        uint256 left = _rest(p, r, c, _spend(p, b, r));
+        if (left == 0) return;
+        // What the book could not trade goes to the AMM (see `_rest`).
+        p.fill.ammShare += left;
         if (p.end != 0 && p.fill.frontier == p.end) p.fill.stop = CAP; // the book stopped at a limit; the AMM goes on
         else if (p.fill.ammShare - before > stepAmount) p.fill.stop = BOOK_DONE; // the PoolManager decides where it lands
     }
@@ -430,15 +429,10 @@ library BookWalk {
     }
 
     /// @dev The rest of the request fills book liquidity from the frontier on, in price order: a fixed level at the
-    /// frontier (in whole lots), then range liquidity, across later points while it lasts. With `keepDust`, exact
-    /// input the book cannot spend stays with it.
-    /// @return shortfall Exact output the book could not deliver.
-    function _spend(Plan memory p, PoolBook storage b, Request memory r, bool keepDust)
-        private
-        view
-        returns (uint256 shortfall)
-    {
-        uint256 left = r.budget - p.fill.ammShare - _spec(r, p.total);
+    /// frontier (in whole lots), then range liquidity, across later points while it lasts.
+    /// @return left What the book could not trade, in the specified currency.
+    function _spend(Plan memory p, PoolBook storage b, Request memory r) private view returns (uint256 left) {
+        left = r.budget - p.fill.ammShare - _spec(r, p.total);
         uint160 x = p.fill.frontier;
         uint256 j = _segAt(p, x);
         bool levelDone = x != p.segs[j].price;
@@ -462,8 +456,38 @@ library BookWalk {
             levelDone = false;
         }
         p.fill.frontier = x;
-        if (!r.exactIn) shortfall = left;
-        else if (keepDust) p.fill.dust += left;
+    }
+
+    /// @dev What the book could not trade, for the AMM: exact output it could not deliver (its last unit can round
+    /// away, or a lot is larger than what is left), and exact input it could not use (less than a lot's cost, or worth
+    /// less than the AMM's next unit), which the AMM trades from where it stands. Where the AMM finds no liquidity
+    /// toward the limit, exact input stays with the book as dust: the AMM would trade none of it and only run the
+    /// price to the limit.
+    /// ponytail: the dust is below one lot's cost at the book's frontier, so book-only pools want small lots.
+    function _rest(Plan memory p, Request memory r, AmmReplay.Cursor memory c, uint256 left)
+        private
+        view
+        returns (uint256)
+    {
+        if (left == 0 || !r.exactIn || _ammTrades(r, c)) return left;
+        p.fill.dust += left;
+        return 0;
+    }
+
+    /// @dev Whether the AMM, from the cursor toward the limit, reaches a step that moves the price with liquidity,
+    /// crossing at most a search's worth (`limits.words`) of empty steps or ticks first, so exact input handed to it
+    /// trades.
+    /// ponytail: liquidity further out than that counts as none; the input it would buy there is worth little at that
+    /// distance.
+    function _ammTrades(Request memory r, AmmReplay.Cursor memory c) private view returns (bool) {
+        AmmReplay.Cursor memory probe = AmmReplay.Cursor(c.sqrtPriceX96, c.tick, c.liquidity);
+        for (uint256 i; i <= r.limits.words; ++i) {
+            if (probe.sqrtPriceX96 == r.pool.limit) return false;
+            AmmReplay.Step memory s = AmmReplay.next(r.pool, probe);
+            if (probe.liquidity != 0 && s.target != probe.sqrtPriceX96) return true;
+            AmmReplay.move(r.pool, probe, s, s.target); // an empty step, or a crossing where the price stands
+        }
+        return false;
     }
 
     /// @dev Fills segment j's range liquidity from x toward e with what is left.

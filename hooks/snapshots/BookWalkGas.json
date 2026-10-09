@@ -1,9 +1,9 @@
 {
-  "book_swap_2_ranges_2_levels_gross": "1026229",
+  "book_swap_2_ranges_2_levels_gross": "1026223",
   "book_swap_points": "5",
   "book_swap_probes": "2",
   "book_walk_commit": "126107",
-  "book_walk_plan": "210303",
+  "book_walk_plan": "210269",
   "commit_empty": "21273",
   "commit_far_order": "4106",
   "commit_one_level": "13086",
@@ -11,8 +11,8 @@
   "commit_range_and_level": "110156",
   "plain_swap_gross": "145144",
   "plan_empty": "40928",
-  "plan_far_order": "132956",
-  "plan_one_level": "119753",
-  "plan_one_range": "149274",
-  "plan_range_and_level": "170511"
+  "plan_far_order": "132922",
+  "plan_one_level": "119719",
+  "plan_one_range": "149240",
+  "plan_range_and_level": "170477"
 }

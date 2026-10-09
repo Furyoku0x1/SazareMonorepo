@@ -27,6 +27,10 @@ contract FixedBookHarness {
         return FixedBook.take(_book.sides[sell0 ? 0 : 1], tick, want, maxChunks);
     }
 
+    function available(bool sell0, int24 tick, uint256 maxChunks) external view returns (uint256 lots, bool complete) {
+        return FixedBook.available(_book.sides[sell0 ? 0 : 1], tick, maxChunks);
+    }
+
     function filled(uint256 id) external view returns (uint64) {
         return FixedBook.filledLots(_book, id);
     }
@@ -279,10 +283,31 @@ contract FixedBookTest is Test {
     function _take(uint256 r) private {
         bool sell0 = !mode.bothSides || (r >> 7) & 1 == 1;
         int24 tick = mode.oneTick ? ticks[0] : ticks[(r >> 8) & 1];
-        uint256 want = mode.bigLots ? (r >> 16) % (uint256(FixedBook.MAX_ORDER_LOTS) * 3) : 1 + (r >> 16) % 4000;
-        if (want == 0) want = 1;
-        _takeAt(sell0, tick, want);
+        uint256 want = mode.bigLots ? (r >> 16) % (uint256(FixedBook.MAX_ORDER_LOTS) * 3) : (r >> 16) % 4000;
+        // Half the takes are bounded by a chunk allowance, as the walk's are, including zero wants (its cleanup).
+        if ((r >> 100) & 1 == 1) {
+            _takeBoundedAt(sell0, tick, (r >> 101) % 3 == 0 ? 0 : want, (r >> 104) % 4);
+        } else {
+            _takeAt(sell0, tick, want == 0 ? 1 : want);
+        }
         _checkLevels();
+    }
+
+    /// @dev Sol's review: a take bounded by a chunk allowance takes exactly what `available` reports for the same
+    /// allowance, which is complete only when it is the whole level; a take of nothing over emptied chunks moves past
+    /// them, so repeated walks progress.
+    function _takeBoundedAt(bool sell0, int24 tick, uint256 want, uint256 maxChunks) private {
+        uint256 liveLots = _live(sell0, tick);
+        (uint256 lots, bool complete) = book.available(sell0, tick, maxChunks);
+        assertLe(lots, liveLots, "available within live");
+        assertEq(complete, lots == liveLots, "complete means the whole level");
+        uint64 head = book.level(sell0, tick).head;
+        (uint256 taken, uint256 feeWeighted) = book.take(sell0, tick, want, maxChunks);
+        assertEq(taken, want < lots ? want : lots, "bounded take matches available");
+        assertEq(feeWeighted, _fill(sell0, tick, taken), "fee-weighted");
+        if (lots == 0 && !complete && maxChunks != 0) {
+            assertGt(book.level(sell0, tick).head, head, "a take over emptied chunks moves past them");
+        }
     }
 
     function _claim(uint256 r) private {
