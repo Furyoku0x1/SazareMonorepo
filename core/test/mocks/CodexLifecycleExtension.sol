@@ -16,6 +16,7 @@ contract CodexLifecycleExtension is IKernelHookExtension {
     KernelHookVault public immutable VAULT;
     mapping(bytes4 => uint8) public responseMode;
     bytes public managementCall;
+    mapping(bytes4 => uint256) public gasToBurn;
     Currency public uninstallCurrency;
     uint256 public uninstallDeposit;
 
@@ -30,6 +31,10 @@ contract CodexLifecycleExtension is IKernelHookExtension {
     /// @dev Modes: 0 correct, 1 revert, 2 wrong selector or false, 3 empty, 4 oversized, 5 invalid bool.
     function setResponseMode(bytes4 selector, uint8 mode) external {
         responseMode[selector] = mode;
+    }
+
+    function setGasToBurn(bytes4 selector, uint256 amount) external {
+        gasToBurn[selector] = amount;
     }
 
     function setManagementCall(bytes calldata data) external {
@@ -92,6 +97,7 @@ contract CodexLifecycleExtension is IKernelHookExtension {
 
     function _selectorResponse(bytes4 selector) private returns (bytes4) {
         uint8 mode = responseMode[selector];
+        _burnGas(gasToBurn[selector]);
         _validateResponseLength(mode);
         emit LifecycleCalled(selector);
         return mode == 2 ? bytes4(0xdeadbeef) : selector;
@@ -99,6 +105,7 @@ contract CodexLifecycleExtension is IKernelHookExtension {
 
     function _boolResponse(bytes4 selector) private view returns (bool) {
         uint8 mode = responseMode[selector];
+        _burnGas(gasToBurn[selector]);
         _validateResponseLength(mode);
         if (mode == 5) {
             assembly ("memory-safe") {
@@ -107,6 +114,11 @@ contract CodexLifecycleExtension is IKernelHookExtension {
             }
         }
         return mode != 2;
+    }
+
+    function _burnGas(uint256 amount) private view {
+        uint256 start = gasleft();
+        while (start - gasleft() < amount) {}
     }
 
     function _validateResponseLength(uint8 mode) private pure {

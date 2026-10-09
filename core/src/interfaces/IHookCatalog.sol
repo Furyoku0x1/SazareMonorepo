@@ -16,7 +16,9 @@ interface IHookCatalog {
         bool supportsOptionalCallbacks;
         /// @notice True if the extension may start nested routes with executeRoute.
         bool supportsNesting;
-        /// @notice True if the extension may be called again while one of its calls is in progress.
+        /// @notice True if a required callback may reenter the same installation (one pool and extension).
+        /// Optional callbacks always skip that reentry. Calls to the same extension in other pools are different
+        /// installations and are not gated.
         bool supportsReentrancy;
         /// @notice True if a pool may install the extension after the pool is initialized.
         bool supportsLateInstallation;

@@ -396,11 +396,28 @@ contract VaultTest is KernelHookFixture, IUnlockCallback {
         assertEq(vault.fundedCurrencyCount(poolId, address(extension)), 0);
     }
 
-    function test_settleDebtFor_clearsPreviousTokenSyncBeforeNativePayment() public {
+    function test_settleDebtFor_revertsWithPreviousTokenSyncBeforeNativePayment() public {
         _deposit(NATIVE, 100);
         vm.deal(address(manager), 100);
+        vm.expectRevert(KernelHookVault.RedemptionUnavailable.selector);
         manager.unlock(abi.encode(NATIVE, 100, address(hook), true));
-        assertEq(vault.accountedBalance(NATIVE), 0);
+        assertEq(vault.accountedBalance(NATIVE), 100);
+    }
+
+    function test_settleDebtFor_revertsWithPreviousTokenSyncBeforeTokenPayment() public {
+        _deposit(currency0, 100);
+        MockERC20(Currency.unwrap(currency0)).mint(address(manager), 100);
+        vm.expectRevert(KernelHookVault.RedemptionUnavailable.selector);
+        manager.unlock(abi.encode(currency0, 100, address(hook), true));
+        assertEq(vault.accountedBalance(currency0), 100);
+    }
+
+    function test_settleDebtFor_revertsWithPreviousTokenSyncBeforeClaimsPayment() public {
+        _creditClaims(currency0, 100);
+        mode = Mode.ClaimDebt;
+        vm.expectRevert(KernelHookVault.RedemptionUnavailable.selector);
+        manager.unlock(abi.encode(currency0, 70, address(hook), true));
+        assertEq(vault.balanceOf(poolId, address(extension), currency0), 100);
     }
 
     function test_settleDebtFor_partialPaymentKeepsFundedCurrency() public {
@@ -560,6 +577,7 @@ contract VaultTest is KernelHookFixture, IUnlockCallback {
             return "";
         }
         if (mode == Mode.ClaimDebt) {
+            if (leaveTokenSync) manager.sync(currency1);
             // The authority owes the PoolManager; the vault pays from claims first and the authority burns them.
             vm.prank(authority);
             manager.take(currency, address(this), amount);

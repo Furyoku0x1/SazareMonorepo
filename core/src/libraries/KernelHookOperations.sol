@@ -118,6 +118,15 @@ library OperationFrameLibrary {
         _store(frame, 10, bytes32(uint256(value)));
     }
 
+    /// @dev The specified-currency delta that the beforeSwap callbacks returned, packed above the unspecified one.
+    function beforeSwapSpecifiedDelta(OperationFrame frame) internal view returns (int128) {
+        return int128(uint128(uint256(_load(frame, 11)) >> 128));
+    }
+
+    function setBeforeSwapDeltas(OperationFrame frame, BalanceDelta value) internal {
+        _store(frame, 11, bytes32(uint256(BalanceDelta.unwrap(value))));
+    }
+
     /// @dev The unspecified-currency delta that the beforeSwap callbacks returned.
     function beforeSwapUnspecifiedDelta(OperationFrame frame) internal view returns (int128) {
         return int128(uint128(uint256(_load(frame, 11))));

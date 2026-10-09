@@ -123,6 +123,11 @@ contract KernelHook is BaseHook, Multicall, IKernelHook, IKernelExecutorCallback
     }
 
     /// @inheritdoc IKernelHook
+    function setDynamicLPFee(PoolKey calldata key, uint24 fee) external managementLock {
+        KernelHookConfiguration.setDynamicLPFee(_state, poolManager, key, fee);
+    }
+
+    /// @inheritdoc IKernelHook
     function setExecutionLimits(
         PoolKey calldata key,
         uint8 maxOperationDepth,
@@ -363,7 +368,7 @@ contract KernelHook is BaseHook, Multicall, IKernelHook, IKernelExecutorCallback
         bool specified0 = (params.amountSpecified < 0) == params.zeroForOne;
         int128 specified = specified0 ? result.delta0 : result.delta1;
         int128 unspecified = specified0 ? result.delta1 : result.delta0;
-        KernelHookOperations.currentFrame().setBeforeSwapUnspecifiedDelta(unspecified);
+        KernelHookOperations.currentFrame().setBeforeSwapDeltas(toBalanceDelta(specified, unspecified));
         return (IHooks.beforeSwap.selector, toBeforeSwapDelta(specified, unspecified), result.feeOverride);
     }
 

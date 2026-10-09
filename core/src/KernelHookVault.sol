@@ -147,6 +147,8 @@ contract KernelHookVault is ReentrancyGuardTransient, IUnlockCallback {
     /// the rest settled with real tokens.
     /// @dev The caller must burn `fromClaims` of the vault's claims in the same call, which credits its own delta;
     /// only KernelHook and the route executor call this, as the recipient, and they are operators of the claims.
+    /// Reverts with RedemptionUnavailable if an ERC20 currency is already synced, preserving the caller's pending
+    /// settlement instead of overwriting its sync, even when this payment uses only claims or native currency.
     /// @param poolId The pool whose installation pays the debt.
     /// @param extension The extension that owns the balance.
     /// @param currency The currency to settle.
@@ -159,6 +161,7 @@ contract KernelHookVault is ReentrancyGuardTransient, IUnlockCallback {
         nonReentrant
         returns (uint256 fromClaims)
     {
+        if (!POOL_MANAGER.getSyncedCurrency().isAddressZero()) revert RedemptionUnavailable();
         _debit(poolId, extension, currency, amount);
         uint256 claims = _claims(currency);
         fromClaims = claims < amount ? claims : amount;
@@ -166,8 +169,6 @@ contract KernelHookVault is ReentrancyGuardTransient, IUnlockCallback {
         if (physical == 0) return fromClaims;
         uint256 settled;
         if (Currency.unwrap(currency) == address(0)) {
-            // Clear any ERC20 sync left by a previous operation before settling native currency.
-            POOL_MANAGER.sync(currency);
             settled = POOL_MANAGER.settleFor{value: physical}(recipient);
         } else {
             POOL_MANAGER.sync(currency);

@@ -415,13 +415,9 @@ contract KernelHookHandler is Test {
             settings.callbackGasLimits[i] = limit;
         }
         settings.configuration = new bytes(bound(configurationBytes, 0, 1024));
-        bool active = _isActive(OPTIONAL);
-        bytes[] memory calls = new bytes[](3);
-        uint256 count;
-        if (active) calls[count++] = abi.encodeCall(IKernelHook.deactivateExtension, (_keys[0], _extension(OPTIONAL)));
+        (bool[3] memory active, bytes[] memory calls, uint256 count) = _startBatch();
         calls[count++] = abi.encodeCall(IKernelHook.configureExtension, (_keys[0], _extension(OPTIONAL), settings));
-        if (active) calls[count++] = abi.encodeCall(IKernelHook.activateExtension, (_keys[0], _extension(OPTIONAL)));
-        hook.multicall(_shorten(calls, count));
+        hook.multicall(_finishBatch(active, calls, count));
         ++successfulCalls["reconfigure"];
     }
 

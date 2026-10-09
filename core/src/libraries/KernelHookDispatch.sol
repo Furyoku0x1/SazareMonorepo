@@ -12,18 +12,29 @@ import {KernelHookConstants} from "./KernelHookConstants.sol";
 import {KernelHookState} from "./KernelHookState.sol";
 import {KernelHookOperations, OperationFrame} from "./KernelHookOperations.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
+import {TransientStateLibrary} from "v4-core/src/libraries/TransientStateLibrary.sol";
 import {LPFeeLibrary} from "v4-core/src/libraries/LPFeeLibrary.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolId} from "v4-core/src/types/PoolId.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
-import {SwapParams} from "v4-core/src/types/PoolOperation.sol";
+import {SwapParams, ModifyLiquidityParams} from "v4-core/src/types/PoolOperation.sol";
 import {BalanceDelta, toBalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 
 /// @notice Runs the extensions of a callback in order, each in its own rollback scope.
 /// @dev An external library: KernelHook delegatecalls it, which keeps KernelHook below the contract size limit.
 library KernelHookDispatch {
     using LPFeeLibrary for uint24;
+    using TransientStateLibrary for IPoolManager;
     using CallbackLibrary for CallbackType;
+
+    /// @dev An internal signal for a root forwarding shortfall, distinct from an extension's own revert.
+    error InsufficientCallbackGas();
+
+    struct AccountingSnapshot {
+        uint256 nonzeroDeltaCount;
+        int256 delta0;
+        int256 delta1;
+    }
 
     struct CallbackSequence {
         PoolKey key;
@@ -69,25 +80,23 @@ library KernelHookDispatch {
         if (frame.extension() != extension) revert IKernelHook.Unauthorized();
         // A nested operation pushes its frames above this frame and pops back to it, and only this operation's own
         // runCallbacks sets its callback, so poolId and callback stay the same across the extension call.
-        PoolId poolId = frame.poolId();
-        CallbackType callback = frame.callback();
-        if (PoolId.unwrap(poolId) != PoolId.unwrap(key.toId())) revert IKernelHook.Unauthorized();
-        KernelHookState.Installation storage installation = state.installations[poolId][extension];
+        if (PoolId.unwrap(frame.poolId()) != PoolId.unwrap(key.toId())) revert IKernelHook.Unauthorized();
+        KernelHookState.Installation storage installation = state.installations[frame.poolId()][extension];
         if (extension.codehash != installation.entry.codeHash) revert IKernelHook.ExtensionCodeMismatch();
-        KernelHookOperations.enterInvocation(poolId, extension);
+        KernelHookOperations.enterInvocation(frame.poolId(), extension);
         // The extension reads the results of the earlier extensions in its context (ExecutionContext.prior), and
         // currentContext() reads the same value from the frame.
         frame.setPriorDeltas(toBalanceDelta(aggregate.delta0, aggregate.delta1));
         frame.setPriorFeeOverride(aggregate.feeOverride);
-        CallbackResult memory result = _callExtension(installation, extension, key, data, callback);
+        AccountingSnapshot memory accounting = _snapshotAccounting(manager, key);
+        CallbackResult memory result = _callExtension(installation, extension, key, data, frame.callback());
         next = _accumulate(aggregate, result);
-        _validateResult(frame, callback, key, data, result, next);
-        _settleExtensionDelta(manager, vault, poolId, extension, key.currency0, result.delta0);
-        _settleExtensionDelta(manager, vault, poolId, extension, key.currency1, result.delta1);
-        if (callback.isInitialization()) {
-            installation.completedInitializationCallbacks |= callback.mask();
+        _validateResult(frame, frame.callback(), key, data, result, next);
+        _settleAndValidateAccounting(manager, vault, key, extension, result, accounting);
+        if (frame.callback().isInitialization()) {
+            installation.completedInitializationCallbacks |= frame.callback().mask();
         }
-        KernelHookOperations.exitInvocation(poolId, extension);
+        KernelHookOperations.exitInvocation(frame.poolId(), extension);
     }
 
     function _callExtension(
@@ -104,6 +113,8 @@ library KernelHookDispatch {
         // The invocation gas of this delegatecall covers the work before this point and the 1/64 that the EVM keeps
         // back, so the extension receives its whole gas limit. Less gas would charge KernelHook's cost to it.
         if (gasleft() < gasLimit + gasLimit / 63 + KernelHookConstants.COLD_CALL_GAS) {
+            // A root shortfall is fatal. Nested gas comes from the parent's limit, so an optional attempt skips.
+            if (KernelHookOperations.frameCount() == 1) revert InsufficientCallbackGas();
             revert IKernelHook.GasBudgetExceeded();
         }
         // BoundedCall caps return and revert data so extension payloads cannot exhaust the caller's gas.
@@ -265,6 +276,9 @@ library KernelHookDispatch {
         bool optional,
         bytes memory response
     ) private {
+        if (response.length == 4 && bytes4(response) == InsufficientCallbackGas.selector) {
+            revert IKernelHook.GasBudgetExceeded();
+        }
         if (!optional) revert IKernelHook.ExtensionFailed(extension, frame.callback(), response);
         // A failed optional after attempt rolls back only that attempt,
         // preserving an earlier successful before attempt.
@@ -288,7 +302,14 @@ library KernelHookDispatch {
         // Allow EIP-150 forwarding headroom (a call receives at most 63/64 of the remaining gas) for this call, and
         // for the later required calls in the reserve, so that this call cannot take their headroom.
         uint256 forwardingGas = invocationGas + invocationGas / 63 + reserveGas + reserveGas / 63;
-        return availableGas >= forwardingGas;
+        if (availableGas < forwardingGas) {
+            // Only a root caller controls the forwarded gas. Count the unwindPositions exit frame as a parent.
+            // In a root operation, an optional attempt skips only for a pool-budget shortfall. In a nested
+            // operation, gas comes from the parent's configured limit, so either shortfall can skip it.
+            if (KernelHookOperations.frameCount() == 1) revert IKernelHook.GasBudgetExceeded();
+            return false;
+        }
+        return true;
     }
 
     function _validateResult(
@@ -308,6 +329,10 @@ library KernelHookDispatch {
             return;
         }
         _validateNonSwapResult(callback, result);
+        if (callback == CallbackType.AfterAddLiquidity || callback == CallbackType.AfterRemoveLiquidity) {
+            (, BalanceDelta delta,,) = abi.decode(data, (ModifyLiquidityParams, BalanceDelta, BalanceDelta, bytes));
+            _validateCallerDelta(delta, aggregate.delta0, aggregate.delta1);
+        }
     }
 
     function _validateBeforeSwapResult(
@@ -319,6 +344,10 @@ library KernelHookDispatch {
         (SwapParams memory swapParameters,) = abi.decode(data, (SwapParams, bytes));
         int256 amount = BeforeSwapLibrary.remainingAmountSpecified(swapParameters, aggregate);
         if (swapParameters.amountSpecified < 0 ? amount > 0 : amount < 0) revert IKernelHook.DeltaExceedsSwapAmount();
+        // A later specified delta can reopen exact output after an earlier override covered the whole amount.
+        if (aggregate.feeOverride.removeOverrideFlag() == LPFeeLibrary.MAX_LP_FEE && amount > 0) {
+            revert IKernelHook.InvalidFeeOverride();
+        }
         if (result.feeOverride == 0) return;
         if (!key.fee.isDynamicFee()) revert IKernelHook.InvalidFeeOverride();
         if (!result.feeOverride.isOverride()) revert IKernelHook.InvalidFeeOverride();
@@ -331,7 +360,7 @@ library KernelHookDispatch {
         CallbackResult memory result,
         CallbackResult memory aggregate
     ) private view {
-        (SwapParams memory swapParameters,,) = abi.decode(data, (SwapParams, BalanceDelta, bytes));
+        (SwapParams memory swapParameters, BalanceDelta delta,) = abi.decode(data, (SwapParams, BalanceDelta, bytes));
         bool specifiedIsCurrency0 = BeforeSwapLibrary.isSpecifiedCurrency0(swapParameters);
         int128 specified = specifiedIsCurrency0 ? aggregate.delta0 : aggregate.delta1;
         int128 unspecified = specifiedIsCurrency0 ? aggregate.delta1 : aggregate.delta0;
@@ -341,6 +370,67 @@ library KernelHookDispatch {
         int256 combined = int256(frame.beforeSwapUnspecifiedDelta()) + int256(unspecified);
         if (combined > type(int128).max) revert IKernelHook.DeltaOverflow();
         if (combined < type(int128).min) revert IKernelHook.DeltaOverflow();
+        int256 beforeSpecified = frame.beforeSwapSpecifiedDelta();
+        _validateCallerDelta(
+            delta, specifiedIsCurrency0 ? beforeSpecified : combined, specifiedIsCurrency0 ? combined : beforeSpecified
+        );
+    }
+
+    function _validateCallerDelta(BalanceDelta delta, int256 hookDelta0, int256 hookDelta1) private pure {
+        int256 callerDelta0 = int256(delta.amount0()) - hookDelta0;
+        int256 callerDelta1 = int256(delta.amount1()) - hookDelta1;
+        if (callerDelta0 > type(int128).max || callerDelta0 < type(int128).min) revert IKernelHook.DeltaOverflow();
+        if (callerDelta1 > type(int128).max || callerDelta1 < type(int128).min) revert IKernelHook.DeltaOverflow();
+    }
+
+    function _settleAndValidateAccounting(
+        IPoolManager manager,
+        KernelHookVault vault,
+        PoolKey calldata key,
+        address extension,
+        CallbackResult memory result,
+        AccountingSnapshot memory accounting
+    ) private {
+        PoolId poolId = key.toId();
+        _settleExtensionDelta(manager, vault, poolId, extension, key.currency0, result.delta0);
+        _settleExtensionDelta(manager, vault, poolId, extension, key.currency1, result.delta1);
+        _validateAccounting(manager, key, accounting, result);
+    }
+
+    function _snapshotAccounting(IPoolManager manager, PoolKey calldata key)
+        private
+        view
+        returns (AccountingSnapshot memory)
+    {
+        return AccountingSnapshot(
+            manager.getNonzeroDeltaCount(),
+            manager.currencyDelta(address(this), key.currency0),
+            manager.currencyDelta(address(this), key.currency1)
+        );
+    }
+
+    function _validateAccounting(
+        IPoolManager manager,
+        PoolKey calldata key,
+        AccountingSnapshot memory beforeCall,
+        CallbackResult memory result
+    ) private view {
+        int256 expected0 = beforeCall.delta0 - int256(result.delta0);
+        int256 expected1 = beforeCall.delta1 - int256(result.delta1);
+        if (manager.currencyDelta(address(this), key.currency0) != expected0) {
+            revert IKernelHook.UnexpectedAccounting();
+        }
+        if (manager.currencyDelta(address(this), key.currency1) != expected1) {
+            revert IKernelHook.UnexpectedAccounting();
+        }
+        // Settlement changes KernelHook's own deltas until PoolManager accounts the callback's result. Remove the
+        // old hook entries from the count and add the expected new ones. Other accounts must leave the count alone.
+        uint256 expectedCount = beforeCall.nonzeroDeltaCount;
+        if (beforeCall.delta0 != 0) --expectedCount;
+        if (beforeCall.delta1 != 0) --expectedCount;
+        if (expected0 != 0) ++expectedCount;
+        if (expected1 != 0) ++expectedCount;
+        if (manager.getNonzeroDeltaCount() != expectedCount) revert IKernelHook.UnexpectedAccounting();
     }
 
     function _validateNonSwapResult(CallbackType callback, CallbackResult memory result) private pure {
@@ -369,7 +459,8 @@ library KernelHookDispatch {
             manager.mint(address(vault), currency.toId(), uint256(int256(delta)));
             vault.credit(poolId, extension, currency, uint256(int256(delta)));
         } else if (delta < 0) {
-            uint256 fromClaims = vault.settleDebtFor(poolId, extension, currency, uint256(-int256(delta)), address(this));
+            uint256 fromClaims =
+                vault.settleDebtFor(poolId, extension, currency, uint256(-int256(delta)), address(this));
             if (fromClaims != 0) manager.burn(address(vault), currency.toId(), fromClaims);
         }
     }

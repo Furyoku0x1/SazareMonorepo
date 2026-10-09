@@ -28,6 +28,17 @@ import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 ///   binds the next before callback to that exact action. finishAction removes the ticket when the action is
 ///   complete. A ForeignSwap (hookless pool) or ExternalSwap (outside venue) calls no KernelHook callback, so it
 ///   gets no ticket and the executor does not call finishAction for it.
+/// - Each callback attempt settles at most an int128 delta per currency. Route net settlement has the same limit.
+/// - An extension contract installed in several pools is one trust domain: it is the custodian of its vault funds
+///   and may withdraw from one installation to fund another. Pools needing isolation must use separate instances.
+/// - Optional attempts roll back their own call, result validation and settlement on failure. In a root operation
+///   (one frame, including the unwindPositions exit frame), a gas skip is allowed only when the pool's callback
+///   budget cannot fit the attempt and its reserves; a caller forwarding too little gas makes the operation revert.
+///   In a nested operation, gas comes from the parent's limit, so a shortfall skips an optional extension.
+///   A skip lasts through the rest of that operation.
+/// - Accounting checks compare PoolManager's nonzero-delta count and KernelHook's deltas around each attempt,
+///   allowing only its settlement changes. This is a tripwire, not a sandbox: count-neutral manipulation by admitted
+///   code outside KernelHook's pool currencies is outside it.
 interface IKernelHook {
     /// @notice Thrown when the caller does not have the role or identity that the function requires.
     error Unauthorized();
@@ -56,15 +67,19 @@ interface IKernelHook {
     /// @notice Thrown when a callback or a route step does not match the operation that KernelHook expects.
     error UnexpectedCallback();
 
-    /// @notice Thrown when an extension would be called again while one of its calls is in progress, or when a
-    /// nested action targets a pool whose operation is not yet in its after callback or still has required
-    /// extensions to run.
+    /// @notice Thrown when a required callback would reenter the same installation (one pool and extension)
+    /// without supportsReentrancy, or a nested action targets a pool whose operation is not yet in its after callback
+    /// or still has required extensions to run.
+    /// @dev Optional callbacks skip reentry into the same installation even with supportsReentrancy. Calls to the
+    /// same extension contract in other pools are different installations.
     error ReentrancyDenied();
 
     /// @notice Thrown when a nested route is not allowed here.
     error NestingDenied();
 
-    /// @notice Thrown when the extensions of a callback need more gas than the pool's callback gas budget.
+    /// @notice Thrown when the pool's callback budget cannot cover required extensions, or the forwarded gas cannot
+    /// cover a root callback, required nested callback or lifecycle call's full limit and KernelHook's reserves.
+    /// @dev Forwarded-gas shortfalls skip optional nested callbacks because their gas comes from the parent's limit.
     error GasBudgetExceeded();
 
     /// @notice Thrown when a lifecycle call to an extension does not return the expected value.
@@ -76,10 +91,11 @@ interface IKernelHook {
 
     /// @notice Thrown when a required (not optional) extension callback fails.
     /// @dev reason is one of: the extension's revert data; its return data, if that is not exactly one
-    /// CallbackResult; or the error of KernelHook's check or settlement of the result. KernelHook raises
-    /// GasBudgetExceeded here when its own reserve cannot give the extension its whole gas limit, for example with
-    /// very large hookData; an extension can also raise the same error itself. Empty data can also mean that the
-    /// settlement ran out of gas, for example with a token whose transfer costs more than a standard ERC20 transfer.
+    /// CallbackResult; or the error of KernelHook's check or settlement of the result.
+    /// GasBudgetExceeded raised by an extension itself, including from a required nested callback, is an attempt
+    /// failure. KernelHook's own root forwarding and reserve shortfalls revert the operation directly with
+    /// GasBudgetExceeded. Empty data can also mean that the settlement ran out of gas, for example with a token
+    /// whose transfer costs more than a standard ERC20 transfer.
     /// @param extension The extension that failed
     /// @param callback The callback that failed
     /// @param reason Up to 256 bytes of the revert or return data
@@ -157,15 +173,24 @@ interface IKernelHook {
     error DeltaExceedsSwapAmount();
 
     /// @notice Thrown when a fee override comes from a callback other than beforeSwap, for a pool without a
-    /// dynamic fee, or without the override flag.
+    /// dynamic fee, without the override flag, or a 100% override with positive remaining exact-output amount.
     /// @dev A fee above the maximum reverts with LPFeeLibrary.LPFeeTooLarge instead.
     error InvalidFeeOverride();
 
     /// @notice Thrown when two extensions return a fee override for the same callback.
     error MultipleFeeOverrides();
 
-    /// @notice Thrown when the beforeSwap and afterSwap unspecified deltas together do not fit in an int128.
+    /// @notice Thrown when combined hook deltas or the caller's resulting after-callback deltas do not fit int128.
     error DeltaOverflow();
+
+    /// @notice Thrown when a callback attempt leaves unexpected KernelHook currency deltas or changes the
+    /// PoolManager's nonzero-delta count beyond its settlement.
+    error UnexpectedAccounting();
+
+    /// @notice Emitted when the base LP fee of a dynamic-fee pool changes.
+    /// @param poolId The pool
+    /// @param fee The new base fee, in millionths
+    event DynamicLPFeeChanged(PoolId indexed poolId, uint24 fee);
 
     /// @notice Emitted when a pool key is reserved for its initializer.
     /// @param poolId The pool
@@ -232,7 +257,8 @@ interface IKernelHook {
 
     /// @notice Reserves a pool key for the caller, who must then initialize the pool in the PoolManager.
     /// @dev The caller is the pool's only admin until initialization. A factory can prepare and initialize
-    /// a pool, grant admin to its user, and then revoke its own role.
+    /// a pool, grant admin to its user, and then revoke its own role. The initializer becomes the first admin:
+    /// use an EOA or an access-controlled contract, never a shared public forwarder such as Multicall3.
     /// WARNING: the first caller reserves the key permanently, and a reservation does not expire. Any account can
     /// reserve a key first and never initialize it. The key is then blocked, but other keys are not: a pool with a
     /// different fee or tick spacing has a different key. To keep the gap small, prepare, install, and initialize
@@ -251,7 +277,9 @@ interface IKernelHook {
 
     /// @notice Replaces the settings of an inactive installation.
     /// @dev Only a configurer or pool admin can call this. The extension's onConfigure must accept the change. A new
-    /// callback mask, or optional callbacks made required, needs every subscriber of the callbacks involved inactive.
+    /// callback mask, optional callbacks made required, a subscribed callback's gas limit change, or an allowNesting
+    /// change in either direction needs every subscriber of the callbacks involved inactive. Required callbacks
+    /// made optional, configuration bytes, lifecycleGasLimit and unsubscribed gas limits do not need this gate.
     /// @param key The pool key
     /// @param extension The installed extension
     /// @param settings The new settings
@@ -285,6 +313,14 @@ interface IKernelHook {
     /// @param callback The callback
     /// @param order The subscribed extensions in call order
     function setCallbackOrder(PoolKey calldata key, CallbackType callback, address[] calldata order) external;
+
+    /// @notice Sets the base LP fee used when a dynamic-fee pool's swap has no extension override.
+    /// @dev Only a pool admin can call this, after initialization and outside an operation or management call.
+    /// Static-fee pools are rejected. Dynamic pools start at 0%; admins must set their desired fallback fee.
+    /// A 100% base fee is valid, but PoolManager rejects exact-output swaps at that fee.
+    /// @param key The dynamic-fee pool key
+    /// @param fee The base fee in millionths, from 0 to 1,000,000
+    function setDynamicLPFee(PoolKey calldata key, uint24 fee) external;
 
     /// @notice Sets the maximum operation depth and the callback gas budgets of a pool.
     /// @dev Only a configurer or pool admin can call this, and only while all installations are inactive.
@@ -328,7 +364,9 @@ interface IKernelHook {
     /// nested operation. Net debts are paid from the extension's own vault balance. A ForeignSwap action swaps in
     /// a hookless pool on the same PoolManager, and an ExternalSwap action swaps on an outside venue through a
     /// Catalog-admitted adapter. Neither opens a Kernel operation, and the route settles both net with the other
-    /// actions. The target pool of every other action must use this KernelHook.
+    /// actions. The target pool of every other action must use this KernelHook. Routing liquidity into another
+    /// Kernel pool trusts that pool's admin: its extensions and depth limits govern removal, and open positions
+    /// pin the origin installation until closed. Net settlement is limited to int128 per currency.
     /// @param actions The actions, in order
     /// @return The balance delta of each action
     function executeRoute(RouteAction[] calldata actions) external returns (BalanceDelta[] memory);

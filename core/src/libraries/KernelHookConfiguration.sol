@@ -12,6 +12,8 @@ import {BoundedCall} from "./BoundedCall.sol";
 import {CallbackLibrary} from "./CallbackLibrary.sol";
 import {KernelHookConstants} from "./KernelHookConstants.sol";
 import {KernelHookState} from "./KernelHookState.sol";
+import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
+import {LPFeeLibrary} from "v4-core/src/libraries/LPFeeLibrary.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolId} from "v4-core/src/types/PoolId.sol";
 
@@ -20,6 +22,7 @@ import {PoolId} from "v4-core/src/types/PoolId.sol";
 /// framework code, not an extension, and has no administrative owner or upgrade mechanism.
 library KernelHookConfiguration {
     using CallbackLibrary for CallbackType;
+    using LPFeeLibrary for uint24;
 
     /// @notice Prepares a pool with the default execution limits.
     /// @dev See IKernelHook.preparePool.
@@ -98,6 +101,16 @@ library KernelHookConfiguration {
         // ones being optional. Making callbacks required waits for them, as a new subscription does.
         if (installation.settings.optionalCallbacks && !settings.optionalCallbacks) {
             _requireCallbacksInactive(state, poolId, settings.callbackMask);
+        }
+        if (settings.allowNesting != installation.settings.allowNesting) {
+            _requireCallbacksInactive(state, poolId, settings.callbackMask);
+        }
+        // A callback's gas limit changes what later subscribers can fit in the pool budget.
+        for (uint8 i; i < CALLBACK_COUNT; ++i) {
+            if (!CallbackLibrary.includes(settings.callbackMask, CallbackType(i))) continue;
+            if (settings.callbackGasLimits[i] != installation.settings.callbackGasLimits[i]) {
+                _requireCallbacksInactive(state, poolId, CallbackType(i).mask());
+            }
         }
         // The extension validates that new settings preserve outstanding users' rights.
         _callLifecycleHook(
@@ -185,6 +198,23 @@ library KernelHookConfiguration {
         _validateCallbackOrder(state, poolId, callback, order);
         state.callbackOrders[poolId][callback] = order;
         emit IKernelHook.CallbackOrderChanged(poolId, callback, order);
+    }
+
+    /// @notice Sets the base LP fee of an initialized dynamic-fee pool.
+    /// @dev See IKernelHook.setDynamicLPFee.
+    function setDynamicLPFee(
+        KernelHookState.State storage state,
+        IPoolManager manager,
+        PoolKey calldata key,
+        uint24 fee
+    ) public {
+        PoolId poolId = KernelHookState.requireKnownPool(state, key);
+        _requireAdmin(state, poolId);
+        if (state.pools[poolId].status != PoolStatus.Initialized) revert IKernelHook.PoolNotInitialized();
+        if (!key.fee.isDynamicFee()) revert IKernelHook.InvalidPool();
+        fee.validate();
+        manager.updateDynamicLPFee(key, fee);
+        emit IKernelHook.DynamicLPFeeChanged(poolId, fee);
     }
 
     /// @notice Sets the operation depth and callback gas budgets of a pool.
@@ -297,11 +327,10 @@ library KernelHookConfiguration {
         PoolKey calldata key,
         KernelHookState.Installation storage installation
     ) private view {
-        (bool success, bytes memory response) = BoundedCall.tryStaticCall(
-            account,
-            installation.settings.lifecycleGasLimit,
-            abi.encodeCall(IKernelHookExtension.canActivate, (key, installation.settings))
-        );
+        bytes memory input = abi.encodeCall(IKernelHookExtension.canActivate, (key, installation.settings));
+        _requireLifecycleGas(installation.settings.lifecycleGasLimit);
+        (bool success, bytes memory response) =
+            BoundedCall.tryStaticCall(account, installation.settings.lifecycleGasLimit, input);
         // tryStaticCall succeeds only with exactly one 32-byte word.
         if (!success) revert IKernelHook.ActivationRejected();
         if (!abi.decode(response, (bool))) revert IKernelHook.ActivationRejected();
@@ -461,8 +490,9 @@ library KernelHookConfiguration {
             revert IKernelHook.OutstandingObligations();
         }
         if (routeExecutor.openPositionCount(poolId, account) != 0) revert IKernelHook.OutstandingObligations();
-        (bool success, bytes memory response) =
-            BoundedCall.tryStaticCall(account, gasLimit, abi.encodeCall(IKernelHookExtension.canUninstall, (key)));
+        bytes memory input = abi.encodeCall(IKernelHookExtension.canUninstall, (key));
+        _requireLifecycleGas(gasLimit);
+        (bool success, bytes memory response) = BoundedCall.tryStaticCall(account, gasLimit, input);
         // tryStaticCall succeeds only with exactly one 32-byte word.
         if (!success) revert IKernelHook.OutstandingObligations();
         if (!abi.decode(response, (bool))) revert IKernelHook.OutstandingObligations();
@@ -470,11 +500,18 @@ library KernelHookConfiguration {
 
     /// @dev BoundedCall limits copied return and revert data so lifecycle hooks cannot exhaust gas with large payloads.
     function _callLifecycleHook(address account, uint256 gasLimit, bytes memory data, bytes4 expected) private {
+        _requireLifecycleGas(gasLimit);
         (bool success, bytes memory response) =
             BoundedCall.tryCall(account, gasLimit, data, KernelHookConstants.ABI_WORD_BYTES);
         // tryCall succeeds only with exactly one 32-byte word.
         if (!success) revert IKernelHook.InvalidResponse();
         if (abi.decode(response, (bytes4)) != expected) revert IKernelHook.InvalidResponse();
+    }
+
+    function _requireLifecycleGas(uint256 gasLimit) private view {
+        if (gasleft() < gasLimit + gasLimit / 63 + KernelHookConstants.COLD_CALL_GAS) {
+            revert IKernelHook.GasBudgetExceeded();
+        }
     }
 
     function _requireAdmin(KernelHookState.State storage state, PoolId poolId) private view {
