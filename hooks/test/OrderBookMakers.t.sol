@@ -108,7 +108,7 @@ contract OrderBookMakersTest is OrderBookFixture {
         _install(_policy());
         Reenterer maker = _reenterer();
         uint256 id = abi.decode(
-            maker.exec(address(book), 0, abi.encodeCall(book.placeFixed, (key, false, -100, 1e11))), (uint256)
+            maker.exec(address(book), 0, abi.encodeCall(book.placeFixed, (key, false, -100, 1e11, _version()))), (uint256)
         );
         swapRouter.swap{value: 5e17}(key, SwapParams(true, -5e17, MIN_LIMIT), PoolSwapTest.TestSettings(false, false), "");
         maker.arm(abi.encodeCall(book.claimFixed, (pool, id, address(maker))));
@@ -128,10 +128,10 @@ contract OrderBookMakersTest is OrderBookFixture {
         Reenterer maker = _reenterer();
         vm.deal(address(maker), 1e11);
         uint256 id = abi.decode(
-            maker.exec(address(book), 1e11, abi.encodeCall(book.placeFixed, (key, true, 100, 1e5))), (uint256)
+            maker.exec(address(book), 1e11, abi.encodeCall(book.placeFixed, (key, true, 100, 1e5, _version()))), (uint256)
         );
-        maker.arm(abi.encodeCall(book.cancelFixed, (pool, id)));
-        maker.exec(address(book), 0, abi.encodeCall(book.cancelFixed, (pool, id)));
+        maker.arm(abi.encodeCall(book.cancelFixed, (pool, id, address(maker))));
+        maker.exec(address(book), 0, abi.encodeCall(book.cancelFixed, (pool, id, address(maker))));
         _assertReentryFailed(maker.attempted(), maker.reentered(), maker.reason());
         assertEq(address(maker).balance, 1e11, "refunded once");
         _checkBacking();
@@ -181,7 +181,7 @@ contract OrderBookMakersTest is OrderBookFixture {
 
         token.arm(address(book), sweep);
         vm.prank(MAKER);
-        assertEq(book.cancelFixed(pool, id), 1e11, "refunded");
+        assertEq(book.cancelFixed(pool, id, MAKER), 1e11, "refunded");
         _assertReentryFailed(token.attempted(), token.reentered(), token.reason());
         _checkBacking();
     }
@@ -202,7 +202,7 @@ contract OrderBookMakersTest is OrderBookFixture {
         _swap(SwapParams(false, -3e16, MAX_LIMIT));
         assertEq(keccak256(abi.encode(book.ledger(pool))), keccak256(abi.encode(before)), "swaps skip the book");
         vm.startPrank(MAKER);
-        assertGt(book.cancelFixed(pool, fixedId) + book.cancelRange(pool, rangeId), 0, "refunds");
+        assertGt(book.cancelFixed(pool, fixedId, MAKER) + book.cancelRange(pool, rangeId, MAKER), 0, "refunds");
         assertGt(book.claimFixed(pool, fixedId, MAKER) + book.claimRange(pool, rangeId, MAKER), 0, "proceeds");
         vm.stopPrank();
         assertEq(book.ledger(pool).openOrders, 0);
@@ -219,7 +219,7 @@ contract OrderBookMakersTest is OrderBookFixture {
         _swap(SwapParams(false, -3e16, MAX_LIMIT));
         vm.startPrank(MAKER);
         for (uint256 i; i < 2; ++i) {
-            uint256 refunds = book.cancelFixed(pool, a) + book.cancelRange(pool, b);
+            uint256 refunds = book.cancelFixed(pool, a, MAKER) + book.cancelRange(pool, b, MAKER);
             uint256 proceeds = book.claimFixed(pool, a, MAKER) + book.claimRange(pool, b, MAKER);
             if (i == 0) assertGt(refunds + proceeds, 0);
             else assertEq(refunds + proceeds, 0, "nothing the second time");
@@ -239,7 +239,7 @@ contract OrderBookMakersTest is OrderBookFixture {
         vm.expectRevert(OrderBook.OrdersOpen.selector);
         book.setPolicy(key, 1, p);
         vm.prank(MAKER);
-        book.cancelFixed(pool, id);
+        book.cancelFixed(pool, id, MAKER);
         book.setPolicy(key, 1, p);
         (OrderBook.Policy memory stored,,) = book.policy(pool);
         assertEq(stored.lotSize0, 2e6);
@@ -274,8 +274,8 @@ contract OrderBookMakersTest is OrderBookFixture {
         _swap(SwapParams(false, -3e16, MAX_LIMIT));
         _swap(SwapParams(true, -6e16, MIN_LIMIT));
         vm.startPrank(MAKER);
-        book.cancelFixed(pool, ask);
-        book.cancelRange(pool, bid);
+        book.cancelFixed(pool, ask, MAKER);
+        book.cancelRange(pool, bid, MAKER);
         book.claimFixed(pool, ask, MAKER);
         book.claimRange(pool, bid, MAKER);
         vm.stopPrank();
@@ -313,15 +313,15 @@ contract OrderBookMakersTest is OrderBookFixture {
         vm.deal(MAKER, 10 ether);
         vm.prank(MAKER);
         vm.expectRevert(BookOrders.InvalidAmount.selector);
-        book.placeRange{value: deposit - 1}(key, true, 50, 600, 1e18);
+        book.placeRange{value: deposit - 1}(key, true, 50, 600, 1e18, _version());
         vm.prank(MAKER);
-        uint256 ask = book.placeRange{value: deposit}(key, true, 50, 600, 1e18);
+        uint256 ask = book.placeRange{value: deposit}(key, true, 50, 600, 1e18, _version());
         uint256 bid = _placeRange(false, -600, -50, 1e18);
         _swap(SwapParams(false, -3e16, MAX_LIMIT));
         swapRouter.swap{value: 1e17}(key, SwapParams(true, -1e17, MIN_LIMIT), PoolSwapTest.TestSettings(false, false), "");
         uint256 balance = MAKER.balance;
         vm.startPrank(MAKER);
-        uint256 refund = book.cancelRange(pool, ask);
+        uint256 refund = book.cancelRange(pool, ask, MAKER);
         assertEq(MAKER.balance - balance, refund, "native refund");
         (RangeBook.Range memory range, uint160 frontier) = book.rangeOrder(pool, ask);
         assertEq(
@@ -344,7 +344,7 @@ contract OrderBookMakersTest is OrderBookFixture {
         vm.deal(MAKER, 1);
         vm.prank(MAKER);
         vm.expectRevert(BookOrders.InvalidAmount.selector);
-        book.placeFixed{value: 1}(key, true, 100, 1e5);
+        book.placeFixed{value: 1}(key, true, 100, 1e5, _version());
     }
 
     // ---------------------------------------------------------------- removal
@@ -356,7 +356,7 @@ contract OrderBookMakersTest is OrderBookFixture {
         uint256 id = _placeFixed(true, 200, 1e11);
         _swap(SwapParams(false, -5e16, MAX_LIMIT));
         vm.startPrank(MAKER);
-        book.cancelFixed(pool, id);
+        book.cancelFixed(pool, id, MAKER);
         book.claimFixed(pool, id, MAKER);
         vm.stopPrank();
         book.sweep(pool);

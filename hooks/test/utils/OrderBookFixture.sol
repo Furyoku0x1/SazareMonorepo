@@ -129,8 +129,8 @@ contract UnitSwapTax is FeeOverrider {
     }
 }
 
-/// @dev Two swaps in one transaction (Foundry clears transient storage between a test's own calls), the first with a
-/// gas allowance of its own.
+/// @dev Two swaps in one transaction (Foundry clears transient storage between a test's own calls), with a call
+/// between them.
 contract TwoSwaps {
     PoolSwapTest internal immutable ROUTER;
 
@@ -140,11 +140,40 @@ contract TwoSwaps {
         MockERC20(Currency.unwrap(currency1)).approve(address(router), type(uint256).max);
     }
 
-    function run(PoolKey calldata key, SwapParams calldata first, uint256 firstGas, SwapParams calldata second)
-        external
-    {
-        ROUTER.swap{gas: firstGas}(key, first, PoolSwapTest.TestSettings(false, false), "");
+    function run(
+        PoolKey calldata key,
+        SwapParams calldata first,
+        address target,
+        bytes calldata between,
+        SwapParams calldata second
+    ) external {
+        ROUTER.swap(key, first, PoolSwapTest.TestSettings(false, false), "");
+        (bool ok,) = target.call(between);
+        require(ok, "between");
         ROUTER.swap(key, second, PoolSwapTest.TestSettings(false, false), "");
+    }
+}
+
+/// @dev An extension that burns a set amount of gas in its callbacks. Placed before the book in afterSwap, it can
+/// leave too little of the pool's callback budget for the book, which the Kernel then skips.
+contract GasBurner is FeeOverrider {
+    uint256 public burn;
+
+    constructor() FeeOverrider(0) {}
+
+    function setBurn(uint256 amount) external {
+        burn = amount;
+    }
+
+    function onCallback(ExecutionContext calldata, PoolKey calldata, bytes calldata)
+        external
+        view
+        override
+        returns (CallbackResult memory result)
+    {
+        uint256 start = gasleft();
+        while (start - gasleft() < burn) {}
+        return result;
     }
 }
 
@@ -273,6 +302,26 @@ abstract contract OrderBookFixture is Test {
         hook.activateExtension(key, IHookExtension(address(book)));
     }
 
+    /// @dev Installs a GasBurner in afterSwap ahead of the book (install it before the book), not yet active.
+    function _installBurner() internal returns (GasBurner burner) {
+        burner = new GasBurner();
+        uint16 afterSwap = uint16(1) << uint8(CallbackType.AfterSwap);
+        catalog.admit(address(burner), IHookCatalog.Entry(address(burner).codehash, afterSwap, true, false, false, true, true));
+        ExtensionSettings memory settings;
+        settings.callbackMask = afterSwap;
+        settings.optionalCallbacks = true;
+        settings.lifecycleGasLimit = 500_000;
+        settings.callbackGasLimits[uint8(CallbackType.AfterSwap)] = 3_300_000;
+        hook.installExtension(key, IHookExtension(address(burner)), settings);
+    }
+
+    /// @dev Book settings small enough to fit the pool's afterSwap budget after the burner, unless it burns a lot.
+    function _settingsBesideBurner() internal pure returns (ExtensionSettings memory settings) {
+        settings = _settings();
+        settings.callbackGasLimits[uint8(CallbackType.BeforeSwap)] = 1_000_000;
+        settings.callbackGasLimits[uint8(CallbackType.AfterSwap)] = 1_000_000;
+    }
+
     /// @dev Installs, sets the policy and configures the book, leaving `settings` at its version.
     function _installInactive(ExtensionSettings memory settings, OrderBook.Policy memory p) internal {
         settings.configuration = abi.encode(uint64(0));
@@ -282,14 +331,22 @@ abstract contract OrderBookFixture is Test {
         hook.configureExtension(key, IHookExtension(address(book)), settings);
     }
 
+    /// @dev The pool's current policy version, which placements name. Read from storage (`_installations`, slot 0:
+    /// installed, then the policy version) rather than through `policy`, so it can sit inside a call made under
+    /// `vm.prank` or `vm.expectRevert` without being that call.
+    function _version() internal view returns (uint64) {
+        bytes32 word = vm.load(address(book), keccak256(abi.encode(pool, uint256(0))));
+        return uint64(uint256(word) >> 8);
+    }
+
     function _placeFixed(bool sell0, int24 tick, uint64 lots) internal returns (uint256 id) {
         vm.prank(MAKER);
-        id = book.placeFixed(key, sell0, tick, lots);
+        id = book.placeFixed(key, sell0, tick, lots, _version());
     }
 
     function _placeRange(bool sell0, int24 lower, int24 upper, uint128 liquidity) internal returns (uint256 id) {
         vm.prank(MAKER);
-        id = book.placeRange(key, sell0, lower, upper, liquidity);
+        id = book.placeRange(key, sell0, lower, upper, liquidity, _version());
     }
 
     function _rangeDeposit(bool sell0, int24 lower, int24 upper, uint128 liquidity) internal pure returns (uint256) {

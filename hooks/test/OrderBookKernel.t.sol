@@ -19,13 +19,16 @@ import {
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
+import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
+import {LPFeeLibrary} from "v4-core/src/libraries/LPFeeLibrary.sol";
+import {PoolSwapTest} from "v4-core/src/test/PoolSwapTest.sol";
 import {PoolId} from "v4-core/src/types/PoolId.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "v4-core/src/types/PoolOperation.sol";
 import {OrderBook} from "../src/OrderBook.sol";
 import {IDepositVault} from "../src/libraries/BookOrders.sol";
-import {OrderBookFixture, FeeOverrider, TwoSwaps} from "./utils/OrderBookFixture.sol";
+import {OrderBookFixture, FeeOverrider, TwoSwaps, GasBurner} from "./utils/OrderBookFixture.sol";
 
 /// @dev An extension that does nothing in its callbacks.
 contract Noop is FeeOverrider {
@@ -294,11 +297,10 @@ contract OrderBookKernelTest is OrderBookFixture {
     function test_staleFrontierWithAWholeEarlierFill() public {
         Prefill prefill = new Prefill();
         _installExtension(address(prefill), BEFORE_SWAP, true, 200_000);
-        ExtensionSettings memory settings = _settings();
-        settings.callbackGasLimits[uint8(CallbackType.BeforeSwap)] = 1_000_000;
-        settings.callbackGasLimits[uint8(CallbackType.AfterSwap)] = 3_000_000;
-        _installInactive(settings, _policy());
+        GasBurner burner = _installBurner();
+        _installInactive(_settingsBesideBurner(), _policy());
         hook.activateExtension(key, IHookExtension(address(prefill)));
+        hook.activateExtension(key, IHookExtension(address(burner)));
         hook.activateExtension(key, IHookExtension(address(book)));
         MockERC20(Currency.unwrap(currency1)).mint(address(prefill), 1e18);
         prefill.fund(address(hook.VAULT()), pool, currency1, 1e18);
@@ -307,14 +309,87 @@ contract OrderBookKernelTest is OrderBookFixture {
         TwoSwaps swaps = new TwoSwaps(swapRouter, currency0, currency1);
         MockERC20(Currency.unwrap(currency0)).mint(address(swaps), 1e18);
         MockERC20(Currency.unwrap(currency1)).mint(address(swaps), 1e18);
+        burner.setBurn(3_100_000);
         vm.recordLogs();
-        swaps.run(key, SwapParams(false, -5e16, MAX_LIMIT), 2_500_000, SwapParams(true, -1e6, MIN_LIMIT));
+        swaps.run(
+            key,
+            SwapParams(false, -5e16, MAX_LIMIT),
+            address(burner),
+            abi.encodeCall(burner.setBurn, (0)),
+            SwapParams(true, -1e6, MIN_LIMIT)
+        );
         assertTrue(_skipped(), "the first afterSwap skipped");
         (, uint64 filled) = book.fixedOrder(pool, id);
         assertGt(filled, 0, "the first swap filled the book");
         (uint160 price,,,) = manager.getSlot0(pool);
         assertEq(price, PRICE_1, "no move to the first swap's frontier");
         _checkBacking();
+    }
+
+    /// @dev Audit: an optional nesting extension before the book in afterSwap sells into the bids; the nested book
+    /// moves the empty pool's price there. The parent book's afterSwap used to move it back to its own older frontier;
+    /// a later fill in the pool now supersedes the parent's record.
+    function test_regression_nestedTradeKeepsItsPrice() public {
+        NestedSwapper swapper = new NestedSwapper(IKernelHook(address(hook)));
+        _installExtension(address(swapper), AFTER_SWAP, true, 3_000_000); // before the book in afterSwap
+        ExtensionSettings memory settings = _settings();
+        settings.callbackGasLimits[uint8(CallbackType.BeforeSwap)] = 800_000;
+        settings.callbackGasLimits[uint8(CallbackType.AfterSwap)] = 800_000;
+        _installInactive(settings, _policy());
+        hook.activateExtension(key, IHookExtension(address(swapper)));
+        hook.activateExtension(key, IHookExtension(address(book)));
+        MockERC20(Currency.unwrap(currency0)).mint(address(swapper), 1e18);
+        swapper.fund(address(hook.VAULT()), pool, currency0, 1e18);
+        _placeFixed(true, 100, 1e11);
+        uint256 bid = _placeFixed(false, -100, 1e11);
+        swapper.arm(SwapParams(true, -1e16, MIN_LIMIT)); // the nested sell
+        _swap(SwapParams(false, -5e16, MAX_LIMIT)); // the root buy
+        (, uint64 bidFilled) = book.fixedOrder(pool, bid);
+        assertGt(bidFilled, 0, "the nested sell filled the bid, the latest trade");
+        (, int24 tick,,) = manager.getSlot0(pool);
+        assertEq(tick, -100, "the pool shows the latest trade");
+        _checkBacking();
+    }
+
+    /// @dev Audit (Kernel): a swapper used to choose whether the optional book ran by the gas it forwarded (and gas
+    /// estimation tends to find that amount). Now, at every forwarded gas amount, the swap either runs with the book
+    /// or reverts; it never succeeds without it.
+    function test_regression_callerCannotSkipTheBookWithGas() public {
+        _lp(-6000, 6000, 1e18);
+        _install(_policy());
+        uint256 id = _placeFixed(true, 100, 1e11);
+        SwapParams memory params = SwapParams(false, -2e17, MAX_LIMIT);
+        uint256 reverted;
+        for (uint256 gas = 600_000; gas <= 4_000_000; gas += 50_000) {
+            uint256 snapshot = vm.snapshotState();
+            try swapRouter.swap{gas: gas}(key, params, PoolSwapTest.TestSettings(false, false), "") {
+                (, uint64 filled) = book.fixedOrder(pool, id);
+                assertGt(filled, 0, "succeeded without the book");
+            } catch {
+                ++reverted;
+            }
+            vm.revertToState(snapshot);
+        }
+        assertGt(reverted, 0, "too little gas reverts");
+        _swap(params);
+        (, uint64 filledNormally) = book.fixedOrder(pool, id);
+        assertGt(filledNormally, 0);
+    }
+
+    /// @dev Audit (Kernel): an optional extension's 100% fee override used to revert every exact-output swap (v4
+    /// rejects it after the hook returns). The Kernel now rejects that override for exact output, so the optional
+    /// extension is skipped and the swap goes through.
+    function test_regression_fullFeeOverrideDoesNotBlockExactOutput() public {
+        key = PoolKey(currency0, currency1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 10, IHooks(address(hook)));
+        pool = key.toId();
+        hook.preparePool(key);
+        manager.initialize(key, PRICE_1);
+        _lp(-6000, 6000, 1e18);
+        FeeOverrider overrider = new FeeOverrider(1_000_000);
+        _installExtension(address(overrider), BEFORE_SWAP, true, 200_000);
+        hook.activateExtension(key, IHookExtension(address(overrider)));
+        BalanceDelta delta = _swap(SwapParams(false, 1e15, MAX_LIMIT));
+        assertEq(delta.amount0(), 1e15, "exact output delivered");
     }
 
     // ---------------------------------------------------------------- helpers

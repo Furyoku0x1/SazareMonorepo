@@ -28,7 +28,7 @@ contract FixedBookHarness {
     }
 
     function available(bool sell0, int24 tick, uint256 maxChunks) external view returns (uint256 lots, bool complete) {
-        return FixedBook.available(_book.sides[sell0 ? 0 : 1], tick, maxChunks);
+        (lots, complete,) = FixedBook.available(_book.sides[sell0 ? 0 : 1], tick, maxChunks);
     }
 
     function filled(uint256 id) external view returns (uint64) {

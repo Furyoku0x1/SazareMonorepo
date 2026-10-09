@@ -27,6 +27,17 @@ library BookWalk {
     uint256 internal constant MAX_BOOK_AMOUNT = 1 << 126;
     uint256 private constant Q96 = 1 << 96;
     uint256 private constant Q192 = 1 << 192;
+    /// @dev The commit's gas, counted as the walk loads the book, on top of the request's reserve (the settlement and
+    /// the commit's fixed part): per point (a level's and the bitmap's writes, a dead boundary's clear), per chunk a
+    /// level spans (each one written when taken), and once for a range stop's three slots.
+    uint256 private constant COMMIT_GAS_PER_POINT = 20_000;
+    uint256 private constant COMMIT_GAS_PER_CHUNK = 5_000;
+    uint256 private constant COMMIT_GAS_FOR_RANGES = 70_000;
+    /// @dev Gas to load one more point (its searches read up to `limits.words` bitmap words each), and to read one chunk
+    /// of a level, kept in hand so the walk never starts loading what it could not then commit.
+    uint256 private constant LOAD_GAS = 30_000;
+    uint256 private constant LOAD_GAS_PER_WORD = 5_000;
+    uint256 private constant READ_GAS_PER_CHUNK = 4_500;
 
     /// @dev The request ran out: inside an AMM step, at its end, or in the book.
     uint8 internal constant INSIDE = 0;
@@ -101,6 +112,7 @@ library BookWalk {
         uint256 m; // the range cursor's stop index here
         uint256 lots; // fixed lots available exactly at `price`
         bool complete; // `lots` is the whole level, so the walk may pass it
+        uint256 chunks; // the level's chunks the walk read, which the commit takes from
         Amounts level; // a whole fill of `lots`
         Amounts before; // the book from the walk's start up to `price`, the level at `price` excluded
     }
@@ -129,6 +141,10 @@ library BookWalk {
         uint160 bound; // searches stop here: the nearer of the limit and the side's extent
         uint160 reach; // the book's spending crosses empty space no further: the AMM's next reachable price
         Amounts ahead; // the book from the walk's start through the last segment, up to the next point
+        bool gasEnd; // the gas guard cut the walk short
+        uint256 commitGas; // what committing the loaded book will cost
+        bool ranged; // range liquidity was loaded
+        bool clear; // nothing of the side is left ahead of the walk's end, up to the bound
     }
 
     // ---------------------------------------------------------------- entry points
@@ -153,12 +169,19 @@ library BookWalk {
         if (s0 == 0 || _beyond(p, s0, ammStart)) s0 = ammStart;
         p.fill.frontier = s0;
         p.position = s0;
+        // v4 checks the price limit only when the AMM has something left to swap. A limit not ahead of the pool price,
+        // or outside the price bounds, would have the book walk the wrong way: the book stays out, and v4 rejects it.
+        uint160 limit = r.pool.limit;
+        if (!_beyond(p, limit, ammStart) || limit <= TickMath.MIN_SQRT_PRICE || limit >= TickMath.MAX_SQRT_PRICE) {
+            p.fill.stop = LIMIT;
+            return p;
+        }
         // A 100% fee leaves nothing to price the book against; the AMM takes the swap.
         if (r.pool.fee >= PIPS) {
             p.fill.stop = BOOK_DONE;
             return p;
         }
-        if (_lowGas(r)) {
+        if (_lowGas(p, r)) {
             p.fill.stop = GAS;
             return p;
         }
@@ -188,10 +211,7 @@ library BookWalk {
     /// range stop when range liquidity sold, and moves the side's start to the frontier.
     /// @return makerFee Maker fees on the fills, rounded down, in the input currency.
     function commit(PoolBook storage b, Request memory r, Plan memory p) internal returns (uint256 makerFee) {
-        if (p.count == 0) {
-            b.start[p.side] = p.fill.frontier; // the walk's start: at or before the old one
-            return 0;
-        }
+        if (p.count == 0) return 0; // the walk never began: the book and its start stay as they were
         RangeBook.Side storage rs = b.ranges.sides[p.side];
         for (uint256 i; i < p.deadCount; ++i) {
             RangeBook.clearDead(rs, p.dead[i]);
@@ -202,6 +222,13 @@ library BookWalk {
             Seg memory s = p.segs[_segAt(p, frontier)];
             RangeBook.record(rs, RangeBook.Cursor(p.down, frontier, 0, s.liquidity, s.feeLiquidity, s.m));
         }
+        // With nothing left ahead up to the bound, the start moves there, or clears when no order reaches beyond it,
+        // so an old price does not hold back the other side's makers.
+        if (p.clear) {
+            uint160 extent = b.extent[p.side];
+            if (extent == 0 || !_beyond(p, extent, p.bound)) frontier = 0;
+            else if (_beyond(p, p.bound, frontier)) frontier = p.bound;
+        }
         b.start[p.side] = frontier;
     }
 
@@ -210,7 +237,7 @@ library BookWalk {
     function _walkAmm(Plan memory p, PoolBook storage b, Request memory r, AmmReplay.Cursor memory c) private view {
         uint256 steps;
         while (true) {
-            if (_lowGas(r)) {
+            if (_lowGas(p, r)) {
                 p.fill.stop = GAS;
                 break;
             }
@@ -347,6 +374,11 @@ library BookWalk {
         AmmReplay.Step memory s,
         uint256 x
     ) private view returns (bool) {
+        // Short of gas the search stops growing the AMM's share; the book spends from there, and the AMM takes the rest.
+        if (_lowGas(p, r)) {
+            p.gasEnd = true;
+            return false;
+        }
         ++p.fill.probes;
         uint160 landing = _landing(r, c, s, x);
         _loadThrough(p, b, r, landing);
@@ -469,7 +501,7 @@ library BookWalk {
         view
         returns (uint256)
     {
-        if (left == 0 || !r.exactIn || _ammTrades(r, c)) return left;
+        if (left == 0 || !r.exactIn || _ammTrades(p, r, c)) return left;
         p.fill.dust += left;
         return 0;
     }
@@ -479,7 +511,9 @@ library BookWalk {
     /// trades.
     /// ponytail: liquidity further out than that counts as none; the input it would buy there is worth little at that
     /// distance.
-    function _ammTrades(Request memory r, AmmReplay.Cursor memory c) private view returns (bool) {
+    function _ammTrades(Plan memory p, Request memory r, AmmReplay.Cursor memory c) private view returns (bool) {
+        // Short of gas to look, the input goes to the AMM: at worst it trades none of it.
+        if (_lowGas(p, r)) return true;
         AmmReplay.Cursor memory probe = AmmReplay.Cursor(c.sqrtPriceX96, c.tick, c.liquidity);
         for (uint256 i; i <= r.limits.words; ++i) {
             if (probe.sqrtPriceX96 == r.pool.limit) return false;
@@ -553,7 +587,16 @@ library BookWalk {
             p.fill.frontier = p.end;
             p.fill.stop = CAP;
         }
+        if (p.gasEnd) p.fill.stop = GAS;
+        p.clear = p.end == 0 && !_hasPending(p, r) && _usedUp(p);
         return p;
+    }
+
+    /// @dev Whether the book's fills reach its last loaded point and use up all of its liquidity there.
+    function _usedUp(Plan memory p) private pure returns (bool) {
+        Seg memory s = p.segs[p.count - 1];
+        if (s.liquidity != 0 || _beyond(p, s.price, p.position)) return false;
+        return s.lots == 0 || _beyond(p, p.position, s.price) || (p.levelPrice == s.price && p.frontierLots == s.lots);
     }
 
     /// @dev Takes every fixed level the plan passed, and the lots it filled at its last position.
@@ -570,7 +613,7 @@ library BookWalk {
             // A level the chunk limit cut short still moves past its emptied chunks, so later walks progress.
             if (lots == 0 && s.complete) continue;
             (uint256 taken, uint256 feeWeighted) =
-                FixedBook.take(fs, TickMath.getTickAtSqrtPrice(s.price), lots, r.limits.chunks);
+                FixedBook.take(fs, TickMath.getTickAtSqrtPrice(s.price), lots, s.chunks);
             assert(taken == lots); // `available` sized the plan with the same chunk limit
             if (lots != 0) makerFee += FullMath.mulDiv(a.principal, feeWeighted, lots * PIPS);
         }
@@ -627,11 +670,6 @@ library BookWalk {
         if (p.end != 0) return false;
         Seg memory prev = p.segs[p.count - 1];
         uint160 x = _nextPoint(p);
-        // The book cannot load more points than its limit; `_ahead` kept its amounts within theirs.
-        if (p.count == p.segs.length) {
-            p.end = prev.price;
-            return false;
-        }
         Seg memory s;
         p.segs[p.count] = s;
         s.price = x;
@@ -655,26 +693,63 @@ library BookWalk {
         }
         _snapshot(p, s);
         ++p.count;
+        // When no further point can be loaded (the point limit, or the gas to commit what is loaded), the newest point
+        // ends the book at once: no amount past it is ever counted, so the commit records everything the book sells.
+        if (p.end == 0 && (p.count == p.segs.length || _lowGas(p, r))) {
+            p.gasEnd = p.count != p.segs.length;
+            p.end = s.price;
+        }
         _ahead(p, r);
         return true;
     }
 
     /// @dev The book's amounts through the last segment's range liquidity up to the next point, beyond which the walk
-    /// computes none before loading that point. The book ends at the segment if they would exceed the amount bound.
-    /// ponytail: it ends at the segment's start, not inside it; filling up to the bound would let such a stretch fill
-    /// over several swaps.
+    /// computes none before loading that point. If they would exceed the amount bound, the book ends inside the stretch.
     function _ahead(Plan memory p, Request memory r) private pure {
         if (p.end != 0) return;
         Seg memory s = p.segs[p.count - 1];
         Amounts memory a = _sum(s.before, s.level);
         if (s.liquidity != 0) _addTo(a, _rangeAll(r, s.price, _nextPoint(p), s));
         p.ahead = a;
-        if (a.principal + a.fee > MAX_BOOK_AMOUNT || a.out > MAX_BOOK_AMOUNT) p.end = s.price;
+        if (a.principal + a.fee > MAX_BOOK_AMOUNT || a.out > MAX_BOOK_AMOUNT) _endWithin(p, r, s);
+    }
+
+    /// @dev Ends the book where its amounts reach the bound inside segment s's stretch, with a segment there that sells
+    /// nothing further, so a later walk goes on from it. It ends at s's start instead when no segment is left, when the
+    /// stretch up to that price would deliver no output (it would charge the taker for nothing), or when rounding
+    /// leaves the price's amounts past the bound.
+    function _endWithin(Plan memory p, Request memory r, Seg memory s) private pure {
+        p.end = s.price;
+        if (p.count == p.segs.length) return;
+        Amounts memory a = _sum(s.before, s.level);
+        uint256 roomIn = MAX_BOOK_AMOUNT - (a.principal + a.fee);
+        uint256 roomOut = MAX_BOOK_AMOUNT - a.out;
+        if (roomIn == 0 || roomOut == 0) return;
+        uint160 x = _nextPoint(p);
+        uint128 liquidity = uint128(s.liquidity);
+        (uint160 qIn,,,) = SwapMath.computeSwapStep(s.price, x, liquidity, -int256(roomIn), r.pool.fee);
+        (uint160 qOut,,,) = SwapMath.computeSwapStep(s.price, x, liquidity, int256(roomOut), r.pool.fee);
+        uint160 q = _beyond(p, qIn, qOut) ? qOut : qIn;
+        if (q == s.price) return;
+        Amounts memory range = _rangeAll(r, s.price, q, s);
+        _addTo(a, range);
+        if (range.out == 0 || a.principal + a.fee > MAX_BOOK_AMOUNT || a.out > MAX_BOOK_AMOUNT) return;
+        Seg memory t;
+        p.segs[p.count++] = t;
+        (t.price, t.before, t.complete) = (q, a, true);
+        (t.liquidity, t.feeLiquidity, t.m) = (s.liquidity, s.feeLiquidity, s.m);
+        p.end = q;
     }
 
     /// @dev Records the range cursor in a new segment. The book ends at a segment it cannot pass: a level it cannot
     /// fill whole, or range liquidity too large for one SwapMath step.
     function _snapshot(Plan memory p, Seg memory s) private pure {
+        p.commitGas += COMMIT_GAS_PER_POINT;
+        // The first range liquidity loaded: a commit may record a range stop.
+        if (p.rc.liquidity != 0 && !p.ranged) {
+            p.ranged = true;
+            p.commitGas += COMMIT_GAS_FOR_RANGES;
+        }
         s.liquidity = p.rc.liquidity;
         s.feeLiquidity = p.rc.feeLiquidity;
         s.m = p.rc.m;
@@ -687,7 +762,12 @@ library BookWalk {
     /// @dev A level whose whole fill would take the book's totals past its amounts is left unfillable, as is one the
     /// chunk limit cuts short: the book ends there, and the next walk starts there.
     function _loadLevel(Plan memory p, PoolBook storage b, Request memory r, Seg memory s, int24 tick) private view {
-        (uint256 lots, bool complete) = FixedBook.available(b.fixedOrders.sides[p.side], tick, r.limits.chunks);
+        // Short of gas the walk reads fewer chunks: the level is then cut short, which ends the book there.
+        s.chunks = _affordableChunks(p, r);
+        (uint256 lots, bool complete, uint256 chunks) =
+            FixedBook.available(b.fixedOrders.sides[p.side], tick, s.chunks);
+        if (!complete && s.chunks < r.limits.chunks) p.gasEnd = true;
+        p.commitGas += chunks * COMMIT_GAS_PER_CHUNK;
         s.complete = complete;
         if (lots == 0) return;
         Amounts memory before = s.before;
@@ -933,8 +1013,28 @@ library BookWalk {
         return lo;
     }
 
-    function _lowGas(Request memory r) private view returns (bool) {
-        return r.minGas != 0 && gasleft() < r.minGas;
+    /// @dev Whether the gas left would not cover the reserve, a commit of the book loaded so far, and loading and
+    /// committing one more point (with a first range stop).
+    function _lowGas(Plan memory p, Request memory r) private view returns (bool) {
+        if (r.minGas == 0) return false;
+        uint256 left = gasleft();
+        return left < r.minGas || left - r.minGas < _gasAhead(p, r);
+    }
+
+    /// @dev The chunks of a level the walk can read and commit with the gas left after `_lowGas`'s needs: the chunk
+    /// limit when gas is ample (always for quotes).
+    function _affordableChunks(Plan memory p, Request memory r) private view returns (uint256) {
+        if (r.minGas == 0) return r.limits.chunks;
+        uint256 left = gasleft();
+        uint256 need = _gasAhead(p, r);
+        if (left < r.minGas || left - r.minGas <= need) return 0;
+        uint256 n = (left - r.minGas - need) / (READ_GAS_PER_CHUNK + COMMIT_GAS_PER_CHUNK);
+        return n < r.limits.chunks ? n : r.limits.chunks;
+    }
+
+    function _gasAhead(Plan memory p, Request memory r) private pure returns (uint256) {
+        return p.commitGas + LOAD_GAS + r.limits.words * LOAD_GAS_PER_WORD + COMMIT_GAS_PER_POINT
+            + (p.ranged ? 0 : COMMIT_GAS_FOR_RANGES);
     }
 
     function _beyond(Plan memory p, uint160 a, uint160 b) private pure returns (bool) {

@@ -13,13 +13,19 @@ import {FullMath} from "v4-core/src/libraries/FullMath.sol";
 import {FixedBook} from "./FixedBook.sol";
 import {RangeBook} from "./RangeBook.sol";
 import {BookWalk} from "./BookWalk.sol";
+import {IKernelHook} from "core/src/interfaces/IKernelHook.sol";
+import {Operation, RouteAction} from "core/src/types/KernelHookTypes.sol";
+import {PoolKey} from "v4-core/src/types/PoolKey.sol";
+import {SwapParams} from "v4-core/src/types/PoolOperation.sol";
+import {IExtensionVault} from "../base/KernelExtension.sol";
 
-/// @notice The deployed form of the makers' operations on a pool's book: placing, cancelling and claiming fixed and
-/// range orders. The order book extension delegates to it and keeps custody, fees and payments itself.
 interface IDepositVault {
     function deposit(PoolId pool, address extension, Currency currency, uint256 amount) external payable;
 }
 
+/// @notice The deployed form of the makers' operations on a pool's book: placing, cancelling and claiming fixed and
+/// range orders; and of the book's same-pool routes from afterSwap. The order book extension delegates to it and keeps
+/// custody, fees and payments itself.
 library BookOrders {
     using StateLibrary for IPoolManager;
     using SafeERC20 for IERC20;
@@ -34,6 +40,7 @@ library BookOrders {
     error Crossing();
     error InvalidAmount();
     error TransferMismatch();
+    error RouteMismatch();
 
     /// @notice Moves a maker's deposit into the extension's vault balance, with exact-amount checks. Runs in the
     /// extension's context: the maker is msg.sender, and pays msg.value for native currency.
@@ -211,5 +218,41 @@ library BookOrders {
         uint160 far = TickMath.getSqrtPriceAtTick(range.sell0 ? range.upper : range.lower);
         bool closed = range.frozen != 0 || RangeBook.frontierOf(book.ranges, id) == far;
         return closed && range.claimed == RangeBook.proceedsOf(book.ranges, id);
+    }
+
+    /// @notice Runs one of the book's same-pool routes, in the book's context: with no target, a donation of the
+    /// amounts to LPs; with one, a swap that moves an empty pool's price there and trades nothing. It reverts unless
+    /// the book's vault balances fell by exactly the amounts and a move landed on its target. Another extension's
+    /// charge or credit on the route, or a payment settled for the route executor, would otherwise leave the vault
+    /// apart from the ledger.
+    function route(
+        IKernelHook kernel,
+        IExtensionVault vault,
+        IPoolManager manager,
+        PoolKey calldata key,
+        uint256 amount0,
+        uint256 amount1,
+        uint160 target
+    ) external {
+        PoolId pool = key.toId();
+        RouteAction[] memory actions = new RouteAction[](1);
+        if (target == 0) {
+            actions[0] = RouteAction(key, Operation.Donate, abi.encode(amount0, amount1), "");
+        } else {
+            (uint160 price,,,) = manager.getSlot0(pool);
+            actions[0] = RouteAction(key, Operation.Swap, abi.encode(SwapParams(target < price, -1, target)), "");
+        }
+        uint256 held0 = vault.balanceOf(pool, address(this), key.currency0);
+        uint256 held1 = vault.balanceOf(pool, address(this), key.currency1);
+        kernel.executeRoute(actions);
+        if (target != 0) {
+            (uint160 price,,,) = manager.getSlot0(pool);
+            if (price != target) revert RouteMismatch();
+        }
+        // A balance that rose reverts here too.
+        if (
+            held0 - vault.balanceOf(pool, address(this), key.currency0) != amount0
+                || held1 - vault.balanceOf(pool, address(this), key.currency1) != amount1
+        ) revert RouteMismatch();
     }
 }

@@ -160,22 +160,24 @@ library FixedBook {
     /// @notice Lots `take` with the same `maxChunks` would take at one price.
     /// @return lots Available lots.
     /// @return complete Whether that is everything at the price.
+    /// @return chunks The chunks it read, which `take` writes when it takes them all.
     function available(Side storage side, int24 tick, uint256 maxChunks)
         internal
         view
-        returns (uint256 lots, bool complete)
+        returns (uint256 lots, bool complete, uint256 chunks)
     {
         Level memory level = side.levels[tick];
-        if (level.live == 0) return (0, true);
+        if (level.live == 0) return (0, true, 0);
         uint64 c = level.head;
-        for (uint256 visits; visits < maxChunks; ++visits) {
+        while (chunks < maxChunks) {
             Chunk memory chunk = side.chunks[tick][c];
+            ++chunks;
             lots += uint256(chunk.deposited) - chunk.cancelled - chunk.filled;
-            if (lots == level.live) return (lots, true);
+            if (lots == level.live) return (lots, true, chunks);
             if (c == level.tail) break;
             ++c;
         }
-        return (lots, lots == level.live);
+        return (lots, lots == level.live, chunks);
     }
 
     function filledLots(Book storage book, uint256 id) internal view returns (uint64) {

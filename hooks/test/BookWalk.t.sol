@@ -703,7 +703,7 @@ contract BookWalkTest is Test {
     /// @dev A range up to the limit whose input, about 1.3 * 2^126, would fit int128 but not the book's bound.
     function test_regression_rangeAmountBoundBelowInt128() public {
         _rangeToLimit(480_000, 481_000);
-        _checkEndedAt(480_000);
+        _checkEndedWithin(480_000, 481_000);
     }
 
     /// @dev The same over a stretch wider than one search: the book fills up to a searched word edge, within its bound.
@@ -743,7 +743,7 @@ contract BookWalkTest is Test {
         assertGt(2 * principal, BookWalk.MAX_BOOK_AMOUNT);
         token1.mint(address(this), 1 << 128);
         _swapChecked(false, int256(SqrtPriceMath.getAmount0Delta(low, limit, liquidity, false) + 1000), limit);
-        _checkEndedAt(480_000);
+        _checkEndedWithin(480_000, 480_500);
     }
 
     /// @dev Sol's review: a level fills, then an oversized range stretch from the same price ends the book there. The
@@ -755,19 +755,19 @@ contract BookWalkTest is Test {
         uint160 at = TickMath.getSqrtPriceAtTick(480_010);
         uint160 limit = TickMath.getSqrtPriceAtTick(481_000);
         token1.mint(address(this), 1 << 128);
+        // The whole stretch to the limit would cost more than the bound, but this request needs little of it: the book
+        // fills the level and enough of the range, within the bound, rather than stopping at the range.
         _swapChecked(false, 5000, limit);
         (BookWalk.Fill memory f,) = hook.last();
-        assertEq(f.stop, BookWalk.CAP);
-        assertEq(f.specified, 1000, "the level filled");
-        assertEq(f.frontier, at, "the book ended at the range");
+        assertEq(f.stop, BookWalk.INSIDE);
+        assertEq(f.specified, 5000, "the level and part of the range");
         assertEq(hook.filledLots(fixedOrders[level].id), 1000);
-        assertEq(hook.rangeFrontier(rangeOrders[range].id), at, "the range unsold");
+        assertGt(hook.rangeFrontier(rangeOrders[range].id), at, "the range sold up to the frontier");
         _checkSolvency();
-        hook.cancelRange(rangeOrders[range].id);
-        _fixed(true, 480_100, 1000);
-        _swapChecked(false, 1000, limit);
+        _swapChecked(false, 5000, limit);
         (f,) = hook.last();
-        assertEq(f.specified, 1000, "after the cancel the side fills again");
+        assertEq(f.specified, 5000, "and goes on");
+        _checkSolvency();
     }
 
     /// @dev Sol's review: exact output whose last part is below one lot, where the AMM runs out of liquidity before
@@ -972,12 +972,35 @@ contract BookWalkTest is Test {
         _swapChecked(false, int256(SqrtPriceMath.getAmount0Delta(low, limit, liquidity, false) + 1000), limit);
     }
 
+    /// @dev The book filled up to its amount bound inside the range's stretch, and recorded the range sold up to there.
+    function _checkEndedWithin(int24 lower, int24 upper) private view {
+        (BookWalk.Fill memory f,) = hook.last();
+        assertEq(f.stop, BookWalk.CAP);
+        assertGt(f.specified, 0, "progress");
+        assertLe(f.other, BookWalk.MAX_BOOK_AMOUNT, "within the bound");
+        assertGt(f.frontier, TickMath.getSqrtPriceAtTick(lower));
+        assertLt(f.frontier, TickMath.getSqrtPriceAtTick(upper));
+        assertEq(hook.rangeFrontier(rangeOrders[rangeOrders.length - 1].id), f.frontier, "sold up to the frontier");
+        _checkSolvency();
+    }
+
     function _checkEndedAt(int24 tick) private view {
         (BookWalk.Fill memory f,) = hook.last();
         assertEq(f.stop, BookWalk.CAP);
         assertEq(f.specified, 0);
         assertEq(f.other, 0);
         assertEq(f.frontier, TickMath.getSqrtPriceAtTick(tick), "the book ends at the range");
+    }
+
+    /// @dev Audit (high): the walk reached its book-point limit with the AMM landing inside the last loaded range
+    /// segment, then ended the book back at that segment's start: the taker was paid for range liquidity that stayed
+    /// recorded as unsold (sold twice). The last loadable point now ends the book at once.
+    function test_regression_pointLimitInsideARangeSegment() public {
+        hook.setLimits(BookWalk.Limits(512, 1, 8, 64)); // one point after the start
+        _lp(-6000, 6000, 1e19); // the AMM's first step, to the bitmap word's edge, costs more than the request
+        _range(true, 120, 720, 1e20);
+        _swapChecked(false, -1e18, MAX_LIMIT); // lands inside the range
+        _checkSolvency();
     }
 
     // ---------------------------------------------------------------- brute force
@@ -1159,7 +1182,7 @@ contract BookWalkTest is Test {
         // unfilled before the AMM's landing, except that what is below one lot of a partly filled level (exact output
         // short of a lot, or exact input short of a lot's cost) goes to the AMM, which then trades that little past
         // the level.
-        assertEq(hook.start(!zeroForOne), f.frontier, "book start");
+        _checkBookStart(zeroForOne, f.frontier);
         if (f.stop == BookWalk.INSIDE && e.specified != 0 && _beyond(zeroForOne, e.sqrtPriceX96, f.frontier)) {
             // The AMM's output beyond the frontier: its whole output less what it had delivered by the frontier
             // (replayed across ticks before the swap), each step rounding once.
@@ -1202,23 +1225,38 @@ contract BookWalkTest is Test {
     }
 
     /// @dev Inspected order by order: every fixed order with unfilled lots, and every range with unsold liquidity, lies
-    /// at or beyond its side's start, so the next walk reaches it.
+    /// at or beyond its side's start, so the next walk reaches it. A start of 0 (nothing left on the side) has the
+    /// next walk begin at the pool price, so then no such order lies behind the pool price.
     function _checkStart() private view {
+        (uint160 price,,,) = manager.getSlot0(id);
         for (uint256 i; i < fixedOrders.length; ++i) {
             FixedModel memory o = fixedOrders[i];
-            uint160 start = hook.start(o.sell0);
-            if (start == 0 || hook.fixedOrder(o.id).lots == hook.filledLots(o.id)) continue;
-            uint160 price = TickMath.getSqrtPriceAtTick(o.tick);
-            assertTrue(o.sell0 ? price >= start : price <= start, "a live fixed order lies before the start");
+            if (hook.fixedOrder(o.id).lots == hook.filledLots(o.id)) continue;
+            uint160 start = _bar(o.sell0, price);
+            uint160 at = TickMath.getSqrtPriceAtTick(o.tick);
+            assertTrue(o.sell0 ? at >= start : at <= start, "a live fixed order lies before the start");
         }
         for (uint256 i; i < rangeOrders.length; ++i) {
             RangeModel memory o = rangeOrders[i];
-            uint160 start = hook.start(o.sell0);
+            if (hook.rangeOrder(o.id).frozen != 0) continue; // cancelled: nothing left to sell
             uint160 frontier = hook.rangeFrontier(o.id);
-            if (start == 0 || hook.rangeOrder(o.id).frozen != 0) continue; // cancelled: nothing left to sell
             if (frontier == TickMath.getSqrtPriceAtTick(o.sell0 ? o.upper : o.lower)) continue;
+            uint160 start = _bar(o.sell0, price);
             assertTrue(o.sell0 ? frontier >= start : frontier <= start, "an unsold range lies before the start");
         }
+    }
+
+    /// @dev The swap's side starts where the book stopped; with nothing left ahead up to the walk's bound, at the bound
+    /// or cleared to 0 (`_checkStart` checks it order by order).
+    function _checkBookStart(bool zeroForOne, uint160 frontier) private view {
+        uint160 start = hook.start(!zeroForOne);
+        assertTrue(start == 0 || start == frontier || _beyond(zeroForOne, start, frontier), "book start");
+    }
+
+    /// @dev Where the side's next walk begins: its start, or the pool price when it has none.
+    function _bar(bool sell0, uint160 price) private view returns (uint160) {
+        uint160 start = hook.start(sell0);
+        return start == 0 ? price : start;
     }
 
     /// @dev Quote and execution run the same code with the same limits; only the gas guard can differ.

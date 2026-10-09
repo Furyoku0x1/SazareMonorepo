@@ -171,7 +171,7 @@ contract OrderBook is KernelExtension, IKernelHookExtension {
         PoolId pool = _validateKey(key);
         Installation storage installation = _installations[pool];
         if (
-            !installation.installed || installation.policyVersion == 0
+            !installation.installed || installation.policyVersion == 0 || _policies[pool].treasury == address(0)
                 || installation.policyVersion != _version(settings.configuration)
                 || installation.configuredVersion != installation.policyVersion || !KERNEL.isPoolInitialized(pool)
         ) return false;
@@ -222,13 +222,15 @@ contract OrderBook is KernelExtension, IKernelHookExtension {
 
     /// @notice Places a fixed-price order of `lots` lots at `tick`: an ask sells currency0 at or above the pool price,
     /// a bid sells currency1 at or below it (post-only). The deposit is lots times the sold currency's lot size.
-    function placeFixed(PoolKey calldata key, bool sell0, int24 tick, uint64 lots)
+    /// @param policyVersion The policy the maker read (`policy`): a policy changed since then refuses the order, so
+    /// lot sizes and the maker fee cannot change under it.
+    function placeFixed(PoolKey calldata key, bool sell0, int24 tick, uint64 lots, uint64 policyVersion)
         external
         payable
         publicMutation
         returns (uint256 id)
     {
-        PoolId pool = _readyPool(key);
+        PoolId pool = _readyPool(key, policyVersion);
         uint256 amount;
         (id, amount) = BookOrders.placeFixed(_books[pool], _placement(pool, sell0), tick, lots);
         _escrow(pool, sell0, amount);
@@ -237,34 +239,37 @@ contract OrderBook is KernelExtension, IKernelHookExtension {
 
     /// @notice Places a range order of `liquidity` over [lower, upper), sold like an LP position: an ask from lower
     /// upward, a bid from upper downward. Post-only, at least the pool's minimum liquidity.
-    function placeRange(PoolKey calldata key, bool sell0, int24 lower, int24 upper, uint128 liquidity)
-        external
-        payable
-        publicMutation
-        returns (uint256 id)
-    {
-        PoolId pool = _readyPool(key);
+    /// @param policyVersion As for `placeFixed`.
+    function placeRange(
+        PoolKey calldata key,
+        bool sell0,
+        int24 lower,
+        int24 upper,
+        uint128 liquidity,
+        uint64 policyVersion
+    ) external payable publicMutation returns (uint256 id) {
+        PoolId pool = _readyPool(key, policyVersion);
         uint256 amount;
         (id, amount) = BookOrders.placeRange(_books[pool], _placement(pool, sell0), lower, upper, liquidity);
         _escrow(pool, sell0, amount);
         emit OrderPlaced(pool, true, id, msg.sender, amount);
     }
 
-    /// @notice Cancels a fixed order: refunds its unfilled lots; filled lots stay claimable.
-    function cancelFixed(PoolId pool, uint256 id) external publicMutation returns (uint256 refund) {
+    /// @notice Cancels a fixed order: refunds its unfilled lots to `recipient`; filled lots stay claimable.
+    function cancelFixed(PoolId pool, uint256 id, address recipient) external publicMutation returns (uint256 refund) {
         (uint64 lots, bool sell0, bool settled) = BookOrders.cancelFixed(_books[pool], id, msg.sender);
         refund = uint256(lots) * _lotSize(pool, sell0);
-        _refund(pool, sell0, refund);
+        _refund(pool, sell0, refund, recipient);
         if (settled) _settle(pool, false, id);
         emit OrderCancelled(pool, false, id, refund);
     }
 
-    /// @notice Cancels a range order: refunds its unsold part; proceeds stay claimable.
-    function cancelRange(PoolId pool, uint256 id) external publicMutation returns (uint256 refund) {
+    /// @notice Cancels a range order: refunds its unsold part to `recipient`; proceeds stay claimable.
+    function cancelRange(PoolId pool, uint256 id, address recipient) external publicMutation returns (uint256 refund) {
         bool sell0;
         bool settled;
         (refund, sell0, settled) = BookOrders.cancelRange(_books[pool], id, msg.sender);
-        _refund(pool, sell0, refund);
+        _refund(pool, sell0, refund, recipient);
         if (settled) _settle(pool, true, id);
         emit OrderCancelled(pool, true, id, refund);
     }
@@ -385,7 +390,7 @@ contract OrderBook is KernelExtension, IKernelHookExtension {
         SwapParams memory params = abi.decode(data, (SwapParams));
         int256 remaining = BeforeSwapLibrary.remainingAmountSpecified(params, context.prior);
         if (remaining == 0 || remaining == type(int256).min) return result;
-        // An invalid price limit needs no check here: v4 rejects it after beforeSwap, reverting the book's fills too.
+        // The walk refuses a price limit not ahead of the pool price; v4 then rejects the swap.
         (,,, uint24 lpFee) = MANAGER.getSlot0(pool);
         // An earlier extension's override is this swap's LP fee.
         if (context.prior.feeOverride != 0) lpFee = context.prior.feeOverride.removeOverrideFlag();
@@ -469,11 +474,11 @@ contract OrderBook is KernelExtension, IKernelHookExtension {
         } catch {}
     }
 
-    /// @notice The book's same-pool routes from afterSwap (see `BookEngine.route`), in a call to itself so that a
+    /// @notice The book's same-pool routes from afterSwap (see `BookOrders.route`), in a call to itself so that a
     /// route that left the vault apart from the ledger rolls back. Only the book calls it.
     function route(PoolKey calldata key, uint256 amount0, uint256 amount1, uint160 target) external {
         if (msg.sender != address(this)) revert Unauthorized();
-        BookEngine.route(KERNEL, VAULT, MANAGER, key, amount0, amount1, target);
+        BookOrders.route(KERNEL, VAULT, MANAGER, key, amount0, amount1, target);
     }
 
     function _request(
@@ -501,29 +506,42 @@ contract OrderBook is KernelExtension, IKernelHookExtension {
         r.minGas = gasReserve;
     }
 
+    /// @dev Records a fill's frontier (0 clears the record), tagged with the pool's count of book fills in this
+    /// transaction, which each fill advances.
     function _setSwapFrontier(PoolId pool, uint8 depth, uint160 frontier) private {
         bytes32 slot = keccak256(abi.encode(SWAP_RECORD, pool, depth));
+        bytes32 fills = keccak256(abi.encode(SWAP_RECORD, pool));
         assembly ("memory-safe") {
-            tstore(slot, frontier)
+            let record := 0
+            if frontier {
+                let n := add(tload(fills), 1)
+                tstore(fills, n)
+                record := or(frontier, shl(160, n))
+            }
+            tstore(slot, record)
         }
     }
 
+    /// @dev The recorded frontier, unless a later fill in the pool (a nested swap's) has superseded it.
     function _takeSwapFrontier(PoolId pool, uint8 depth) private returns (uint160 frontier) {
         bytes32 slot = keccak256(abi.encode(SWAP_RECORD, pool, depth));
+        bytes32 fills = keccak256(abi.encode(SWAP_RECORD, pool));
         assembly ("memory-safe") {
-            frontier := tload(slot)
+            let record := tload(slot)
             tstore(slot, 0)
+            if eq(shr(160, record), tload(fills)) { frontier := and(record, sub(shl(160, 1), 1)) }
         }
     }
 
     // ---------------------------------------------------------------- internals
 
-    function _readyPool(PoolKey calldata key) private view returns (PoolId pool) {
+    function _readyPool(PoolKey calldata key, uint64 policyVersion) private view returns (PoolId pool) {
         pool = _validateKey(key);
         Installation storage installation = _installations[pool];
         if (!installation.installed || installation.configuredVersion != installation.policyVersion) {
             revert InvalidPool();
         }
+        if (policyVersion != installation.policyVersion) revert InvalidVersion();
         (bool readable, uint256 flags) = _profile(pool, address(this));
         if (!readable || flags & ACTIVE == 0) revert InvalidPool();
     }
@@ -535,11 +553,11 @@ contract OrderBook is KernelExtension, IKernelHookExtension {
         );
     }
 
-    function _refund(PoolId pool, bool sell0, uint256 amount) private {
+    function _refund(PoolId pool, bool sell0, uint256 amount, address recipient) private {
         if (amount == 0) return;
         uint256 c = sell0 ? 0 : 1;
         _ledgers[pool].escrow[c] -= amount;
-        VAULT.withdraw(pool, c == 0 ? _keys[pool].currency0 : _keys[pool].currency1, amount, msg.sender);
+        VAULT.withdraw(pool, c == 0 ? _keys[pool].currency0 : _keys[pool].currency1, amount, recipient);
     }
 
     /// @param currency0 Whether the proceeds are in currency0 (a bid's).

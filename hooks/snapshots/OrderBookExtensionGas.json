@@ -1,10 +1,10 @@
 {
-  "cancel_range": "79578",
-  "claim_fixed": "185172",
-  "place_fixed_first": "491982",
-  "place_fixed_join": "270632",
-  "place_range": "441684",
-  "swap_book_and_amm": "895872",
-  "swap_empty_side": "364068",
-  "swap_through_level_and_range": "707425"
+  "cancel_range": "79948",
+  "claim_fixed": "185227",
+  "place_fixed_first": "492238",
+  "place_fixed_join": "270888",
+  "place_range": "442174",
+  "swap_book_and_amm": "936475",
+  "swap_empty_side": "371797",
+  "swap_through_level_and_range": "747160"
 }
