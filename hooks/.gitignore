@@ -1,0 +1,36 @@
+# Compiler files
+cache/
+out/
+
+# Commonly ignored directories
+.logs/
+.ignore/
+
+# Ignores development broadcast logs
+!/broadcast
+/broadcast/*/31337/
+/broadcast/**/dry-run/
+
+# Generated docs, with the hand-written design specs kept in Git
+docs/*
+!docs/README.md
+!docs/limit-orders-spec.md
+!docs/limit-order-validation.json
+!docs/limit-order-implementation.md
+!docs/range-limit-orders.md
+!docs/arbitrage-spec.md
+!docs/composition-spec.md
+!docs/network-discovery-spec.md
+!docs/claude-coordination.md
+!docs/kernel-review-snapshot.json
+!docs/implementation-notes.md
+!docs/arbitrage-gas-report.md
+!docs/arbitrage-gas-results.json
+!docs/whatthehook-research.md
+!docs/lvr-hook.md
+!docs/lvr-validation.json
+
+# Dotenv file
+.env
+.env.*
+!.env.example

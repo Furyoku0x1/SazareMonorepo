@@ -1,0 +1,32 @@
+# Integration tests of the Metric Lending Vault against Metric's own pool contracts (pool-contracts 99aa896,
+# lib/metric-pool-contracts). Metric's pool needs via_ir, so these tests live in their own root; the vault's sources
+# are compiled from ../src. Run from here: `forge test`.
+[profile.default]
+src = "test"
+test = "test"
+out = "out"
+cache_path = "cache"
+libs = ["../../lib"]
+solc = "0.8.37"
+evm_version = "cancun"
+via_ir = true
+optimizer = true
+optimizer_runs = 200
+allow_paths = ["../"]
+auto_detect_remappings = false
+remappings = [
+    "forge-std/=../../lib/forge-std/src/",
+    "@openzeppelin/contracts/=../../lib/openzeppelin-contracts/contracts/",
+    "v4-core/=../../lib/v4-core/",
+    "metric/=../../lib/metric-pool-contracts/contracts/",
+    "vault/=../src/metric/vault/",
+]
+
+[profile.default.fuzz]
+runs = 256
+
+[profile.default.invariant]
+runs = 64
+depth = 100
+fail_on_revert = true
+show_metrics = true
