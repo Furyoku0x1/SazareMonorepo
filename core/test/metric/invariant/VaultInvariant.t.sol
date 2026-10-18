@@ -59,6 +59,7 @@ contract VaultInvariantTest is VaultFixture {
         _assertCustody();
         _assertVault(vaultId);
         _assertVault(secondVaultId);
+        _assertOwnerLists();
     }
 
     /// @dev A fixed walk through every action, so a handler whose actions all fail cannot pass the campaign quietly.
@@ -79,6 +80,8 @@ contract VaultInvariantTest is VaultFixture {
         handler.actSettle(0);
         handler.actAddEscrow(0, 10e6);
         handler.actAddCollateral(2, 10e6);
+        handler.actIncrease(0, 1_000e6, 2 + 3 * 100, 2 + 3 * 10e6);
+        assertEq(handler.increases(), 1, "increased");
         handler.actMovePrice(-150, 0);
         handler.actClosePartial(0, 0.5e18);
         handler.actCloseFull(0);
@@ -216,7 +219,7 @@ contract VaultInvariantTest is VaultFixture {
     }
 
     function _actions() private view returns (bytes4[] memory selectors) {
-        selectors = new bytes4[](14);
+        selectors = new bytes4[](15);
         selectors[0] = handler.actDeposit.selector;
         selectors[1] = handler.actWithdraw.selector;
         selectors[2] = handler.actPayProtocol.selector;
@@ -231,5 +234,52 @@ contract VaultInvariantTest is VaultFixture {
         selectors[11] = handler.actForceClose.selector;
         selectors[12] = handler.actWarp.selector;
         selectors[13] = handler.actMovePrice.selector;
+        selectors[14] = handler.actIncrease.selector;
+    }
+
+    /// @dev Each owner's listed passive positions are exactly their open ones (`positionsOf`): opens list them, increases
+    /// keep them, and full and forced closes take them out however the list is reordered.
+    function _assertOwnerLists() private view {
+        uint256 count = handler.positionCount();
+        address[] memory owners = new address[](count);
+        uint256 ownerCount;
+        uint256 open;
+        // count <= the run's opens
+        for (uint256 index = 0; index < count; ++index) {
+            uint256 positionId = handler.positionIds(index);
+            address owner = vault.positionOf(positionId).owner;
+            if (owner == address(0)) continue;
+            open += 1;
+            assertTrue(_contains(_listed(owner), positionId), "an open position is in its owner's list");
+            ownerCount = _addOwner(owners, ownerCount, owner);
+        }
+        uint256 listedTotal;
+        // ownerCount <= count
+        for (uint256 index = 0; index < ownerCount; ++index) {
+            listedTotal += _listed(owners[index]).length;
+        }
+        assertEq(listedTotal, open, "the lists hold only open positions");
+    }
+
+    function _listed(address owner) private view returns (uint256[] memory listed) {
+        (listed,) = vault.positionsOf(owner);
+    }
+
+    function _contains(uint256[] memory positionIds, uint256 positionId) private pure returns (bool) {
+        // positionIds.length <= the owner's open positions
+        for (uint256 index = 0; index < positionIds.length; ++index) {
+            if (positionIds[index] == positionId) return true;
+        }
+        return false;
+    }
+
+    /// @dev Appends `owner` to the first `ownerCount` owners if it is not there yet; returns the new count.
+    function _addOwner(address[] memory owners, uint256 ownerCount, address owner) private pure returns (uint256) {
+        // ownerCount <= owners.length
+        for (uint256 index = 0; index < ownerCount; ++index) {
+            if (owners[index] == owner) return ownerCount;
+        }
+        owners[ownerCount] = owner;
+        return ownerCount + 1;
     }
 }

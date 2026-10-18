@@ -3,6 +3,7 @@ pragma solidity 0.8.37;
 
 import {SqrtPriceMath} from "v4-core/src/libraries/SqrtPriceMath.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
+import {PositionIndex} from "./PositionIndex.sol";
 import {CloseRequest, Position, Vault, VaultStore} from "../VaultTypes.sol";
 import {IMetricLendingVault} from "../interfaces/IMetricLendingVault.sol";
 import {Charge, VaultAccrual} from "./VaultAccrual.sol";
@@ -387,6 +388,7 @@ library VaultClosing {
     ) private {
         VaultBook.removeDebt(vault, position, position.liquidity);
         if (closing.fractionWad == WAD) {
+            PositionIndex.remove(store.passivePositionIds[position.owner], store.indexInOwnerList, positionId);
             delete store.positions[positionId];
             return;
         }

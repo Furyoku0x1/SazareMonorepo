@@ -20,7 +20,8 @@ interface IMetricLendingVault {
     error Insolvent();
     /// @dev The repayment fails the repayment rule, or takes more than the closed part of the reserves.
     error RepaymentShort();
-    /// @dev A partial close must pay all premium owed.
+    /// @dev A partial close or an increase must pay all premium owed first; an increase is also refused while the
+    /// position is flagged.
     error PremiumUnpaid();
     error NotDelinquent();
     error GracePeriodRunning();
@@ -51,6 +52,8 @@ interface IMetricLendingVault {
         uint256 released0,
         uint256 released1
     );
+    /// @notice Liquidity added to an open position; `released0`/`released1` are the added part's release.
+    event Increased(uint256 indexed positionId, uint128 liquidity, uint256 released0, uint256 released1);
     event Closed(uint256 indexed positionId, uint256 fractionWad, uint256 paid0, uint256 paid1, uint256 profitShare);
     event ForceClosed(uint256 indexed positionId, address indexed closer, uint256 reward0, uint256 reward1);
     event Flagged(uint256 indexed positionId);

@@ -3,7 +3,7 @@ pragma solidity 0.8.37;
 
 import {MetricLendingVault} from "../../../src/metric/vault/MetricLendingVault.sol";
 import {FullMath} from "v4-core/src/libraries/FullMath.sol";
-import {CloseRequest, Ledger, OpenRequest, Position} from "../../../src/metric/vault/VaultTypes.sol";
+import {CloseRequest, IncreaseRequest, Ledger, OpenRequest, Position} from "../../../src/metric/vault/VaultTypes.sol";
 import {IMetricLendingVault} from "../../../src/metric/vault/interfaces/IMetricLendingVault.sol";
 import {DebtTotals, VaultMath} from "../../../src/metric/vault/libraries/VaultMath.sol";
 import {MockPriceSource, TestToken, VaultFixture} from "../utils/VaultFixture.sol";
@@ -58,6 +58,7 @@ contract VaultHandler is VaultFixture {
     uint256 public flags;
     uint256 public forceCloses;
     uint256 public protocolPayments;
+    uint256 public increases;
 
     constructor(
         MetricLendingVault sharedVault,
@@ -214,6 +215,36 @@ contract VaultHandler is VaultFixture {
             ++escrowTopUps;
         } catch (bytes memory reason) {
             _expect(reason, "addEscrow", 0, 0, 0);
+        }
+        _checkIsolation(before, position.vaultId);
+    }
+
+    /// @dev Adds liquidity with the collateral an open of the added size alone would need; refused only for idle,
+    /// the ceiling, or premium owed.
+    function actIncrease(uint256 positionChoice, uint256 notional, uint256 collateralChoice, uint256 escrowChoice)
+        external
+    {
+        (bool found, uint256 positionId, Position memory position) = _pick(positionChoice);
+        if (!found) return;
+        notional = bound(notional, MIN_NOTIONAL, MAX_NOTIONAL);
+        IncreaseRequest memory request;
+        request.positionId = positionId;
+        request.liquidity = liquidityFor1(position.tickLower, position.tickUpper, notional);
+        request.collateral =
+            uint128(_collateral(position.tickLower, position.tickUpper, request.liquidity, notional, collateralChoice));
+        request.escrow = uint128(_escrow(escrowChoice));
+        bytes32[VAULT_COUNT] memory before = _snapshot();
+        vm.prank(position.owner);
+        try vault.increase(request) {
+            ++increases;
+        } catch (bytes memory reason) {
+            _expect(
+                reason,
+                "increase",
+                IMetricLendingVault.UtilizationCeiling.selector,
+                IMetricLendingVault.InsufficientIdle.selector,
+                IMetricLendingVault.PremiumUnpaid.selector
+            );
         }
         _checkIsolation(before, position.vaultId);
     }

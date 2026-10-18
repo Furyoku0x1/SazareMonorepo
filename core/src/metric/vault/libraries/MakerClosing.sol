@@ -3,6 +3,7 @@ pragma solidity 0.8.37;
 
 import {FullMath} from "v4-core/src/libraries/FullMath.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
+import {PositionIndex} from "./PositionIndex.sol";
 import {Book, Bucket, Leg, MakerCloseRequest, MakerPosition} from "../MakerTypes.sol";
 import {Vault, VaultStore} from "../VaultTypes.sol";
 import {IMakerBook} from "../interfaces/IMakerBook.sol";
@@ -35,10 +36,11 @@ library MakerClosing {
         uint256 leftover1;
         uint256 basis;
         uint256 refund;
-        /// @dev The closed legs' extremes, for the closed part's strike and the profit share's weights.
+        /// @dev The closed legs' extremes, for the closed part's strike.
         uint256 closedMaximum0;
         uint256 closedMaximum1;
-        uint256[8] closedMaximum1ByLeg;
+        /// @dev Each leg's weight in the makers' profit share: the `M1` it closed times the seconds it was out, plus one.
+        uint256[8] shareWeights;
         uint256[8] closedLiquidity;
         /// @dev Premium a force close collects from the leftover, in token1: a wait that would leave the trader no
         /// more than this protects no one, so the close scales instead (audit finding W-3).
@@ -121,7 +123,7 @@ library MakerClosing {
             (uint256 maximum0, uint256 maximum1) =
                 VaultMath.debtExtremes(liquidity.toUint128(), sqrtLowerX96, sqrtUpperX96);
             closing.closedLiquidity[index] = liquidity;
-            closing.closedMaximum1ByLeg[index] = maximum1;
+            closing.shareWeights[index] = maximum1 * (block.timestamp - leg.openedAt + 1);
             closing.closedMaximum0 += maximum0;
             closing.closedMaximum1 += maximum1;
         }
@@ -448,7 +450,7 @@ library MakerClosing {
         share = _shareOwed(vault, closing, ok, sqrtBidX96);
         if (share == 0) return 0;
         (uint256 share0, uint256 share1) = _takeShare(vault, position, closing, share, ok, sqrtBidX96);
-        MakerSettlement.payProfitShare(store, vault, positionId, closing.closedMaximum1ByLeg, share0, share1);
+        MakerSettlement.payProfitShare(store, vault, positionId, closing.shareWeights, share0, share1);
     }
 
     /// @dev The profit share owed: proceeds valued at the bid when `priced`, else at the closed part's strike, less the
@@ -521,6 +523,7 @@ library MakerClosing {
             for (uint256 index = 0; index < legCount; ++index) {
                 delete store.legs[positionId][index];
             }
+            PositionIndex.remove(store.makerPositionIds[position.owner], store.indexInOwnerList, positionId);
             delete store.makerPositions[positionId];
             return;
         }

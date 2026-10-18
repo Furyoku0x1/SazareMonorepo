@@ -190,6 +190,11 @@ struct VaultStore {
     /// @dev Maker positions share the position id counter, so an id names one kind of position only.
     mapping(uint256 positionId => MakerPosition) makerPositions;
     mapping(uint256 positionId => mapping(uint256 legIndex => Leg)) legs;
+    /// @dev Each owner's open position ids by book, for `positionsOf`; a close reorders them (`PositionIndex`).
+    mapping(address owner => uint256[] positionIds) passivePositionIds;
+    mapping(address owner => uint256[] positionIds) makerPositionIds;
+    /// @dev Each open position's index in its owner's list for its book.
+    mapping(uint256 positionId => uint256 index) indexInOwnerList;
 }
 
 struct OpenRequest {
@@ -203,6 +208,21 @@ struct OpenRequest {
     /// @notice Token1 prepaid into the premium escrow.
     uint128 escrow;
     /// @notice Reserve tokens sold into the target asset through Metric after the release; zero for none.
+    uint256 entryAmountIn;
+    /// @notice The least the entry swap must return.
+    uint256 entryMinimumOut;
+}
+
+struct IncreaseRequest {
+    uint256 positionId;
+    /// @notice Liquidity added on the position's range. Its own `M1` must reach the minimum borrow, as an open's must.
+    uint128 liquidity;
+    /// @notice Token1 added to the reserves.
+    uint128 collateral;
+    /// @notice Token1 added to the premium escrow, after the premium owed at the old size is settled.
+    uint128 escrow;
+    /// @notice Tokens this call adds sold into the target asset through Metric after the release, as an open's entry
+    /// swap; zero for none. Reserves the position already held are not sold.
     uint256 entryAmountIn;
     /// @notice The least the entry swap must return.
     uint256 entryMinimumOut;

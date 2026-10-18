@@ -3,7 +3,17 @@ pragma solidity 0.8.37;
 
 import {FullMath} from "v4-core/src/libraries/FullMath.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
-import {Book, BookSettings, Bucket, Leg, LegRequest, MakerOpenRequest, MakerPosition} from "../MakerTypes.sol";
+import {PositionIndex} from "./PositionIndex.sol";
+import {
+    Book,
+    BookSettings,
+    Bucket,
+    Leg,
+    LegRequest,
+    MakerIncreaseRequest,
+    MakerOpenRequest,
+    MakerPosition
+} from "../MakerTypes.sol";
 import {Vault, VaultStore} from "../VaultTypes.sol";
 import {IMakerBook} from "../interfaces/IMakerBook.sol";
 import {IMetricLendingVault} from "../interfaces/IMetricLendingVault.sol";
@@ -55,14 +65,50 @@ library MakerPositions {
             _openLeg(vault, book, store.legs[positionId][index], request.legs[index], request.isLong, opening);
         }
         MakerPosition storage position = store.makerPositions[positionId];
-        _record(position, request, legCount, opening);
-        _fund(vault, position, request);
-        _prepay(store, vault, position, positionId);
-        _enter(vault, request.vaultId, position, request);
-        _requireOpenable(position, request, opening);
+        position.owner = msg.sender;
+        position.vaultId = request.vaultId.toUint32();
+        position.isLong = request.isLong;
+        _record(position, legCount, opening);
+        PositionIndex.add(store.makerPositionIds[position.owner], store.indexInOwnerList, positionId);
+        _fund(vault, position, request.collateral, request.escrow);
+        _prepay(store, vault, position, positionId, 0);
+        uint256 available = request.isLong ? position.reserve1 : position.reserve0;
+        _enter(vault, position, request.entryAmountIn, request.entryMinimumOut, available);
+        _priceLegs(store, book, positionId, legCount, opening);
+        _requireOpenable(position, request.maximumRateBps, opening);
         emit IMakerBook.MakerOpened(
             positionId, request.vaultId, msg.sender, request.isLong, legCount, opening.maximum0, opening.maximum1
         );
+    }
+
+    /// @notice Adds legs to the caller's position, as an open of them would and under the same checks applied to the
+    /// whole position after it. Settles first, so the position must owe nothing beyond its escrow and not be flagged.
+    function increase(VaultStore storage store, MakerIncreaseRequest calldata request) external {
+        uint256 positionId = request.positionId;
+        MakerPosition storage position = _owned(store, positionId);
+        Vault storage vault = store.vaults[position.vaultId];
+        Book storage book = _book(vault);
+        if (request.legs.length == 0) revert IMakerBook.InvalidLegs();
+        uint256 firstIndex = position.legCount;
+        uint256 legCount = firstIndex + request.legs.length;
+        if (legCount > MakerMath.MAX_LEGS) revert IMakerBook.InvalidLegs();
+        // A flagged position always has a shortfall (only a settlement clears the flag), so this refuses it too.
+        if (!_trySettle(store, vault, positionId)) revert IMetricLendingVault.PremiumUnpaid();
+        Opening memory opening;
+        (opening.sqrtBidX96, opening.sqrtAskX96) = VaultPricing.band(vault);
+        // legCount <= MAX_LEGS
+        for (uint256 index = firstIndex; index < legCount; ++index) {
+            LegRequest calldata legRequest = request.legs[index - firstIndex];
+            _openLeg(vault, book, store.legs[positionId][index], legRequest, position.isLong, opening);
+        }
+        _record(position, legCount, opening);
+        _fund(vault, position, request.collateral, request.escrow);
+        _prepay(store, vault, position, positionId, firstIndex);
+        uint256 available = position.isLong ? opening.release1 + request.collateral : opening.release0;
+        _enter(vault, position, request.entryAmountIn, request.entryMinimumOut, available);
+        _priceLegs(store, book, positionId, legCount, opening);
+        _requireOpenable(position, request.maximumRateBps, opening);
+        emit IMakerBook.MakerIncreased(positionId, legCount - firstIndex, opening.maximum0, opening.maximum1);
     }
 
     /// @notice Adds token1 to the escrow, then settles; a settled position is no longer delinquent.
@@ -151,6 +197,28 @@ library MakerPositions {
         if (bucket.retired) revert IMakerBook.BucketRetired();
         _borrow(vault, book, bucket, leg, request, sqrtLowerX96, sqrtUpperX96, opening);
         MakerAccounting.requireCeiling(book, bucket, isBuy, sqrtLowerX96, sqrtUpperX96);
+    }
+
+    /// @dev Adds every leg's rate and dues at the rates after all of the call's borrows: an increase may borrow from a
+    /// bucket an existing leg uses, which raises that leg's curve too.
+    function _priceLegs(
+        VaultStore storage store,
+        Book storage book,
+        uint256 positionId,
+        uint256 legCount,
+        Opening memory opening
+    ) private view {
+        // legCount <= MAX_LEGS
+        for (uint256 index = 0; index < legCount; ++index) {
+            _priceLeg(book, store.legs[positionId][index], opening);
+        }
+    }
+
+    function _priceLeg(Book storage book, Leg storage leg, Opening memory opening) private view {
+        uint256 bucketId = leg.bucketId;
+        (, bool isBuy,) = MakerMath.decode(bucketId);
+        (uint160 sqrtLowerX96, uint160 sqrtUpperX96) = MakerAccounting.range(book, bucketId);
+        Bucket storage bucket = book.buckets[bucketId];
         uint256 curveRateWad = MakerAccounting.curveRateWad(book, bucket, isBuy, sqrtLowerX96, sqrtUpperX96);
         uint256 floorRateWad = uint256(leg.floorRateBps) * (MakerMath.WAD / MakerMath.BPS);
         opening.rateWeightedWad += uint256(leg.maximum1) * (curveRateWad + floorRateWad);
@@ -165,8 +233,9 @@ library MakerPositions {
         returns (uint256)
     {
         uint256 escrowSeconds = settings.minimumEscrowSeconds;
-        uint256 chargeSeconds = settings.minimumChargeSeconds;
-        uint256 floorSeconds = escrowSeconds > chargeSeconds ? escrowSeconds - chargeSeconds : 0;
+        uint256 horizonEnd = block.timestamp + escrowSeconds;
+        uint256 floorStart = leg.settledAt > block.timestamp ? leg.settledAt : block.timestamp;
+        uint256 floorSeconds = horizonEnd > floorStart ? horizonEnd - floorStart : 0;
         uint256 growthRay = VaultMath.growthAtRateRay(curveRateWad, escrowSeconds);
         return MakerMath.owed(leg.maximum1, growthRay, leg.floorRateBps, floorSeconds);
     }
@@ -205,6 +274,7 @@ library MakerPositions {
         leg.floorRateBps = _floorRateBps(book, request.bucketId, sqrtLowerX96, sqrtUpperX96, opening).toUint32();
         // The open prepays the floor's first `minimumChargeSeconds`, so it accrues from then.
         leg.settledAt = uint40(block.timestamp + book.settings.minimumChargeSeconds);
+        leg.openedAt = uint40(block.timestamp);
         opening.maximum0 += maximum0;
         opening.maximum1 += maximum1;
         opening.release0 += release0;
@@ -228,41 +298,38 @@ library MakerPositions {
 
     // ---------------------------------------------------------------- the position
 
-    function _record(
-        MakerPosition storage position,
-        MakerOpenRequest calldata request,
-        uint256 legCount,
-        Opening memory opening
-    ) private {
-        position.owner = msg.sender;
-        position.vaultId = request.vaultId.toUint32();
-        position.isLong = request.isLong;
+    /// @dev Adds the call's legs and releases to the position; an open starts from a zeroed position.
+    function _record(MakerPosition storage position, uint256 legCount, Opening memory opening) private {
         position.legCount = uint8(legCount);
-        position.maximum0 = opening.maximum0.toUint128();
-        position.maximum1 = opening.maximum1.toUint128();
-        position.reserve0 = opening.release0.toUint128();
-        position.reserve1 = opening.release1.toUint128();
+        position.maximum0 += opening.maximum0.toUint128();
+        position.maximum1 += opening.maximum1.toUint128();
+        position.reserve0 += opening.release0.toUint128();
+        position.reserve1 += opening.release1.toUint128();
     }
 
-    function _fund(Vault storage vault, MakerPosition storage position, MakerOpenRequest calldata request) private {
-        VaultLedger.pull(vault, 1, msg.sender, uint256(request.collateral) + request.escrow);
-        position.reserve1 += request.collateral;
-        vault.ledger.reserve1 += request.collateral;
-        position.escrow = request.escrow;
-        vault.ledger.escrow += request.escrow;
-        position.basis = uint128(uint256(request.collateral) + request.escrow);
+    function _fund(Vault storage vault, MakerPosition storage position, uint128 collateral, uint128 escrow) private {
+        VaultLedger.pull(vault, 1, msg.sender, uint256(collateral) + escrow);
+        position.reserve1 += collateral;
+        vault.ledger.reserve1 += collateral;
+        position.escrow += escrow;
+        vault.ledger.escrow += escrow;
+        position.basis += (uint256(collateral) + escrow).toUint128();
     }
 
     /// @dev Pays each leg's minimum charge, `minimumChargeSeconds` of its floor, from the escrow to its bucket. It stays
     /// in the trader's basis, like any premium.
-    function _prepay(VaultStore storage store, Vault storage vault, MakerPosition storage position, uint256 positionId)
-        private
-    {
+    function _prepay(
+        VaultStore storage store,
+        Vault storage vault,
+        MakerPosition storage position,
+        uint256 positionId,
+        uint256 firstIndex
+    ) private {
         uint256 chargeSeconds = vault.book.settings.minimumChargeSeconds;
         uint256 legCount = position.legCount;
         uint256 total;
         // legCount <= MAX_LEGS
-        for (uint256 index = 0; index < legCount; ++index) {
+        for (uint256 index = firstIndex; index < legCount; ++index) {
             Leg storage leg = store.legs[positionId][index];
             uint256 charge = MakerMath.owed(leg.maximum1, 0, leg.floorRateBps, chargeSeconds);
             total += charge;
@@ -274,20 +341,21 @@ library MakerPositions {
         vault.ledger.escrow -= total.toUint128();
     }
 
-    /// @dev The entry swap: a long sells token1 for token0, a short token0 for token1, through the vault's pool.
+    /// @dev The entry swap: a long sells token1 for token0, a short token0 for token1, through the vault's pool, from
+    /// no more than `available`, what the call itself put in.
     function _enter(
         Vault storage vault,
-        uint256 vaultId,
         MakerPosition storage position,
-        MakerOpenRequest calldata request
+        uint256 amountIn,
+        uint256 minimumOut,
+        uint256 available
     ) private {
-        if (request.entryAmountIn == 0) return;
+        if (amountIn == 0) return;
         if (vault.parameters.pool == address(0)) revert IMetricLendingVault.InvalidParameters();
-        bool zeroForOne = !request.isLong;
-        uint256 available = zeroForOne ? position.reserve0 : position.reserve1;
-        if (request.entryAmountIn > available) revert IMetricLendingVault.InvalidParameters();
+        if (amountIn > available) revert IMetricLendingVault.InvalidParameters();
+        bool zeroForOne = !position.isLong;
         (uint256 paid, uint256 received) =
-            MetricVenue.swapExactIn(vault, vaultId, zeroForOne, request.entryAmountIn, request.entryMinimumOut);
+            MetricVenue.swapExactIn(vault, position.vaultId, zeroForOne, amountIn, minimumOut);
         _moveReserves(vault, position, paid, received, zeroForOne);
     }
 
@@ -314,17 +382,17 @@ library MakerPositions {
     /// @dev The aggregate chord, with its per-leg rounding reserve; the trader's rate limit on the blended rate after
     /// the borrow, rounded up to a whole basis point; and, after the prepayment, an escrow covering every leg's dues
     /// over the minimum escrow period.
-    function _requireOpenable(MakerPosition storage position, MakerOpenRequest calldata request, Opening memory opening)
+    function _requireOpenable(MakerPosition storage position, uint256 maximumRateBps, Opening memory opening)
         private
         view
     {
+        uint256 maximum1 = position.maximum1;
         bool solvent = MakerMath.aggregateChordHolds(
-            position.reserve0, position.reserve1, opening.maximum0, opening.maximum1, position.legCount
+            position.reserve0, position.reserve1, position.maximum0, maximum1, position.legCount
         );
         if (!solvent) revert IMetricLendingVault.Insolvent();
-        uint256 blendedBps =
-            FullMath.mulDivRoundingUp(opening.rateWeightedWad, MakerMath.BPS, MakerMath.WAD * opening.maximum1);
-        if (blendedBps > request.maximumRateBps) revert IMakerBook.RateAboveMaximum();
+        uint256 blendedBps = FullMath.mulDivRoundingUp(opening.rateWeightedWad, MakerMath.BPS, MakerMath.WAD * maximum1);
+        if (blendedBps > maximumRateBps) revert IMakerBook.RateAboveMaximum();
         if (position.escrow < opening.escrowNeeded) revert IMetricLendingVault.EscrowTooSmall();
     }
 

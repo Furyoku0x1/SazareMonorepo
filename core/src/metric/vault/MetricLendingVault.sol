@@ -10,6 +10,7 @@ import {
     Accrual,
     CloseRequest,
     CurvePair,
+    IncreaseRequest,
     Ledger,
     OpenRequest,
     Position,
@@ -27,6 +28,7 @@ import {
     FloorRow,
     Leg,
     MakerCloseRequest,
+    MakerIncreaseRequest,
     MakerOpenRequest,
     MakerPosition,
     MakerShare
@@ -133,6 +135,10 @@ contract MetricLendingVault is
         return VaultPositions.open(_store, request);
     }
 
+    function increase(IncreaseRequest calldata request) external nonReentrant {
+        VaultPositions.increase(_store, request);
+    }
+
     function addEscrow(uint256 positionId, uint256 amount) external nonReentrant {
         VaultPositions.addEscrow(_store, positionId, amount);
     }
@@ -219,6 +225,10 @@ contract MetricLendingVault is
 
     function openMaker(MakerOpenRequest calldata request) external nonReentrant returns (uint256) {
         return MakerPositions.open(_store, request);
+    }
+
+    function increaseMaker(MakerIncreaseRequest calldata request) external nonReentrant {
+        MakerPositions.increase(_store, request);
     }
 
     function addMakerEscrow(uint256 positionId, uint256 amount) external nonReentrant {
@@ -349,6 +359,12 @@ contract MetricLendingVault is
 
     function positionOf(uint256 positionId) external view returns (Position memory) {
         return _store.positions[positionId];
+    }
+
+    /// @notice The owner's open position ids in each book, in no fixed order: a full close moves the list's last id
+    /// into the closed one's place.
+    function positionsOf(address owner) external view returns (uint256[] memory passive, uint256[] memory maker) {
+        return (_store.passivePositionIds[owner], _store.makerPositionIds[owner]);
     }
 
     function bookSettingsOf(uint256 vaultId) external view returns (BookSettings memory) {

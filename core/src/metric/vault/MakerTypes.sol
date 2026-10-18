@@ -130,6 +130,9 @@ struct Leg {
     uint40 settledAt;
     /// @dev Dues under one raw unit, in WAD of a unit, that the last settlement left for the next.
     uint64 owedFractionWad;
+    /// @dev When the leg was borrowed: the profit share weighs each leg by how long it was out, so a leg an increase
+    /// appends just before a close earns little of a gain the older legs carried.
+    uint40 openedAt;
 }
 
 struct LegRequest {
@@ -150,6 +153,23 @@ struct MakerOpenRequest {
     uint256 entryAmountIn;
     uint256 entryMinimumOut;
     /// @notice The highest blended yearly rate the trader accepts, after the borrow, in basis points.
+    uint256 maximumRateBps;
+}
+
+struct MakerIncreaseRequest {
+    uint256 positionId;
+    /// @notice New legs, appended after the position's own: bucket ids strictly ascending among themselves, all on the
+    /// position's side. A bucket an existing leg borrows from may be named again; it becomes a leg of its own.
+    LegRequest[] legs;
+    /// @notice Token1 added to the reserves.
+    uint128 collateral;
+    /// @notice Token1 added to the premium escrow.
+    uint128 escrow;
+    /// @notice Tokens the new legs released, or the collateral added, sold into the target asset through Metric; zero
+    /// for none.
+    uint256 entryAmountIn;
+    uint256 entryMinimumOut;
+    /// @notice The highest blended yearly rate the trader accepts over every leg after the increase, in basis points.
     uint256 maximumRateBps;
 }
 

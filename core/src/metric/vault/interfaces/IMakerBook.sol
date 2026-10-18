@@ -14,13 +14,12 @@ interface IMakerBook {
     /// @dev The bucket has filled once: it takes no deposits and lends nothing.
     error BucketRetired();
     error UnknownBucket();
-    /// @dev Legs must name distinct buckets in ascending order, all on the position's side.
+    /// @dev A request's legs must name distinct buckets in ascending order, all on the position's side, and a position
+    /// holds at most `MakerMath.MAX_LEGS`. An increase's new legs may name a bucket an older leg borrows from.
     error InvalidLegs();
     error BelowMinimumNotional();
     /// @dev The blended rate after the borrow is above the trader's limit.
     error RateAboveMaximum();
-    /// @dev The escrow does not cover `minimumEscrowSeconds` at the blended rate.
-
     /// @dev The band has not passed the whole level, or the bucket has nothing waiting to fill.
     error NotFillable();
 
@@ -53,6 +52,8 @@ interface IMakerBook {
         uint256 maximum0,
         uint256 maximum1
     );
+    /// @notice Legs added to an open position: how many, and their extremes.
+    event MakerIncreased(uint256 indexed positionId, uint256 legsAdded, uint256 maximum0, uint256 maximum1);
     /// @notice A leg's repayment reached its bucket; keepers watch for buckets whose level the price has passed.
     event LegRepaid(uint256 indexed positionId, uint256 indexed bucketId, uint256 repay0, uint256 repay1);
 }

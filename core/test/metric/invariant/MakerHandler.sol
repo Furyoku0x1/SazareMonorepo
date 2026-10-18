@@ -8,6 +8,7 @@ import {
     Leg,
     LegRequest,
     MakerCloseRequest,
+    MakerIncreaseRequest,
     MakerOpenRequest,
     MakerPosition
 } from "../../../src/metric/vault/MakerTypes.sol";
@@ -48,6 +49,7 @@ contract MakerHandler is MakerFixture {
     uint256 public withdrawals;
     uint256 public claims;
     uint256 public opens;
+    uint256 public increases;
     uint256 public settlements;
     uint256 public fullCloses;
     uint256 public partialCloses;
@@ -169,6 +171,37 @@ contract MakerHandler is MakerFixture {
         (ids, liquidities) = _sorted(ids, liquidities);
         if (_hasDuplicate(ids)) return;
         _open(_request(isLong, ids, liquidities, tight));
+    }
+
+    /// @dev Adds one leg on the position's side, collateralized for its own chord, so the whole stays on the aggregate
+    /// chord; any level, including one an existing leg already borrows from.
+    function actIncrease(uint256 positionChoice, uint256 levelSeed, uint256 sizeSeed, bool tight) external {
+        (bool found, uint256 positionId) = _pick(positionChoice);
+        if (!found) return;
+        bool isLong = vault.makerPositionOf(positionId).isLong;
+        int24 level = isLong ? buyLevels[levelSeed % LEVEL_COUNT] : sellLevels[levelSeed % LEVEL_COUNT];
+        uint256[] memory ids = new uint256[](1);
+        uint128[] memory liquidities = new uint128[](1);
+        ids[0] = vault.currentBucketOf(vaultId, level, isLong);
+        liquidities[0] = liquidityOn(level, bound(sizeSeed, 101e6, 20_000e6));
+        MakerOpenRequest memory terms = _request(isLong, ids, liquidities, tight);
+        MakerIncreaseRequest memory request;
+        request.positionId = positionId;
+        request.legs = terms.legs;
+        request.collateral = terms.collateral;
+        request.escrow = terms.escrow;
+        request.maximumRateBps = type(uint256).max;
+        bytes32 before = _passiveBooks();
+        vm.prank(trader);
+        try vault.increaseMaker(request) {
+            ++increases;
+        } catch (bytes memory reason) {
+            bytes4 selector = reason.length >= 4 ? bytes4(reason) : bytes4(0);
+            if (selector == IMetricLendingVault.PremiumUnpaid.selector) return;
+            if (selector == IMakerBook.InvalidLegs.selector) return;
+            _expectOpen(reason);
+        }
+        _checkIsolation(before);
     }
 
     function actAddEscrow(uint256 positionChoice, uint256 amountSeed) external {

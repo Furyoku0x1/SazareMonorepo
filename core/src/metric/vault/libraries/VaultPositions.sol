@@ -3,7 +3,8 @@ pragma solidity 0.8.37;
 
 import {FullMath} from "v4-core/src/libraries/FullMath.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
-import {OpenRequest, Position, Vault, VaultStore} from "../VaultTypes.sol";
+import {PositionIndex} from "./PositionIndex.sol";
+import {IncreaseRequest, OpenRequest, Position, Vault, VaultStore} from "../VaultTypes.sol";
 import {IMetricLendingVault} from "../interfaces/IMetricLendingVault.sol";
 import {Charge, VaultAccrual} from "./VaultAccrual.sol";
 import {VaultBook} from "./VaultBook.sol";
@@ -38,16 +39,16 @@ library VaultPositions {
         Vault storage vault = _vault(store, request.vaultId);
         if (request.liquidity == 0) revert IMetricLendingVault.ZeroAmount();
         VaultAccrual.checkpoint(vault, request.vaultId);
-        Opening memory opening = _price(vault, request);
+        Opening memory opening = _price(vault, request.tickLower, request.tickUpper, request.liquidity);
         _release(vault, request.vaultId, opening);
         positionId = ++store.lastPositionId;
         Position storage position = store.positions[positionId];
         _record(vault, position, request, opening);
-        _fund(vault, position, request);
-        _enter(vault, request.vaultId, position, request);
-        if (!VaultMath.chordHolds(position.reserve0, position.reserve1, position.maximum0, position.maximum1)) {
-            revert IMetricLendingVault.Insolvent();
-        }
+        PositionIndex.add(store.passivePositionIds[position.owner], store.indexInOwnerList, positionId);
+        _fund(vault, position, request.collateral, request.escrow);
+        uint256 sellable = _sellable(opening, request.isLong, request.collateral);
+        _enter(vault, request.vaultId, position, request.entryAmountIn, request.entryMinimumOut, sellable);
+        _requireSolvent(position);
         _requireEscrow(vault, position);
         MetricVenue.place(vault, request.vaultId);
         emit IMetricLendingVault.Opened(
@@ -61,6 +62,30 @@ library VaultPositions {
             opening.release0,
             opening.release1
         );
+    }
+
+    /// @notice Adds liquidity to the caller's position on its own range: settles the premium owed at the old size, then
+    /// borrows the added liquidity as an open of that size would, merged into the same position, and requires every
+    /// check an open makes of the combined position.
+    function increase(VaultStore storage store, IncreaseRequest calldata request) external {
+        Position storage position = _owned(store, request.positionId);
+        if (request.liquidity == 0) revert IMetricLendingVault.ZeroAmount();
+        uint256 vaultId = position.vaultId;
+        Vault storage vault = store.vaults[vaultId];
+        // Settled at the old size first, so the added liquidity pays nothing for the time before it was borrowed. A
+        // flagged position always has a shortfall (only a settlement clears the flag), so this refuses it too; the
+        // trader cures it with `addEscrow`.
+        if (!_trySettle(vault, request.positionId, position)) revert IMetricLendingVault.PremiumUnpaid();
+        Opening memory opening = _price(vault, position.tickLower, position.tickUpper, request.liquidity);
+        _release(vault, vaultId, opening);
+        _merge(vault, position, request.liquidity, opening);
+        _fund(vault, position, request.collateral, request.escrow);
+        uint256 sellable = _sellable(opening, position.isLong, request.collateral);
+        _enter(vault, vaultId, position, request.entryAmountIn, request.entryMinimumOut, sellable);
+        _requireSolvent(position);
+        _requireEscrow(vault, position);
+        MetricVenue.place(vault, vaultId);
+        emit IMetricLendingVault.Increased(request.positionId, request.liquidity, opening.release0, opening.release1);
     }
 
     /// @notice Adds token1 to the premium escrow, then settles; a settled position is no longer delinquent.
@@ -129,15 +154,20 @@ library VaultPositions {
 
     // ---------------------------------------------------------------- opening
 
-    function _price(Vault storage vault, OpenRequest calldata request) private returns (Opening memory opening) {
-        (opening.sqrtLowerX96, opening.sqrtUpperX96) = VaultMath.rangeSqrtPrices(request.tickLower, request.tickUpper);
+    /// @dev Prices borrowing `liquidity` on a range now: its extremes, which must reach the minimum borrow, and its
+    /// release across the band. An increase prices only the liquidity it adds, as an open of that size would.
+    function _price(Vault storage vault, int24 tickLower, int24 tickUpper, uint128 liquidity)
+        private
+        returns (Opening memory opening)
+    {
+        (opening.sqrtLowerX96, opening.sqrtUpperX96) = VaultMath.rangeSqrtPrices(tickLower, tickUpper);
         (opening.maximum0, opening.maximum1) =
-            VaultMath.debtExtremes(request.liquidity, opening.sqrtLowerX96, opening.sqrtUpperX96);
+            VaultMath.debtExtremes(liquidity, opening.sqrtLowerX96, opening.sqrtUpperX96);
         if (opening.maximum1 < vault.parameters.minBorrowNotional) revert IMetricLendingVault.BelowMinimumBorrow();
         uint160 sqrtAskX96;
         (opening.sqrtBidX96, sqrtAskX96) = VaultPricing.band(vault);
         (opening.release0, opening.release1) = VaultMath.releaseAcrossBand(
-            request.liquidity, opening.sqrtLowerX96, opening.sqrtUpperX96, opening.sqrtBidX96, sqrtAskX96
+            liquidity, opening.sqrtLowerX96, opening.sqrtUpperX96, opening.sqrtBidX96, sqrtAskX96
         );
     }
 
@@ -197,6 +227,36 @@ library VaultPositions {
         VaultBook.addDebt(vault, position, request.liquidity);
     }
 
+    /// @dev Merges added liquidity into the position as one debt on its range: extremes from the total liquidity, as a
+    /// partial close recomputes them, and the debt tree's entry replaced whole, since its terms round per entry.
+    function _merge(Vault storage vault, Position storage position, uint128 added, Opening memory opening) private {
+        uint128 liquidity = position.liquidity;
+        uint128 total = liquidity + added;
+        (uint256 maximum0, uint256 maximum1) = VaultMath.debtExtremes(total, opening.sqrtLowerX96, opening.sqrtUpperX96);
+        uint256 weight0Wad = _mergedWeight0(position.weight0Wad, position.maximum1, _weight0(opening), opening.maximum1);
+        VaultBook.removeDebt(vault, position, liquidity);
+        position.liquidity = total;
+        position.maximum0 = maximum0.toUint128();
+        position.maximum1 = maximum1.toUint128();
+        position.weight0Wad = weight0Wad.toUint64();
+        position.reserve0 += opening.release0.toUint128();
+        position.reserve1 += opening.release1.toUint128();
+        position.released0 += opening.release0.toUint128();
+        position.released1 += opening.release1.toUint128();
+        VaultBook.addDebt(vault, position, total);
+    }
+
+    /// @dev Each part's weight by its own `M1`, since each part's premium is its `M1` at its own blend. Divided by the
+    /// parts' sum, not the merged `M1`, which is a unit or two less (each extreme rounds up and adds one): the weight
+    /// stays at most WAD, and the merged premium is the parts' at most two units of notional less.
+    function _mergedWeight0(uint256 weight0Wad, uint256 maximum1, uint256 addedWeight0Wad, uint256 addedMaximum1)
+        private
+        pure
+        returns (uint256)
+    {
+        return (weight0Wad * maximum1 + addedWeight0Wad * addedMaximum1) / (maximum1 + addedMaximum1);
+    }
+
     /// @dev The premium blend: token0's share of the release's value at the bid.
     function _weight0(Opening memory opening) private pure returns (uint256) {
         uint256 value0 = VaultMath.priceTimes(opening.release0, opening.sqrtBidX96, false);
@@ -205,27 +265,46 @@ library VaultPositions {
         return FullMath.mulDiv(value0, WAD, total);
     }
 
-    function _fund(Vault storage vault, Position storage position, OpenRequest calldata request) private {
-        VaultLedger.pull(vault, 1, msg.sender, uint256(request.collateral) + request.escrow);
-        position.reserve1 += request.collateral;
-        vault.ledger.reserve1 += request.collateral;
-        position.escrow = request.escrow;
-        vault.ledger.escrow += request.escrow;
-        position.basis = uint128(uint256(request.collateral) + request.escrow);
+    /// @dev Adds the trader's token1: collateral to the reserves, escrow to the premium escrow, both to the basis.
+    function _fund(Vault storage vault, Position storage position, uint128 collateral, uint128 escrow) private {
+        uint256 paidIn = uint256(collateral) + escrow;
+        VaultLedger.pull(vault, 1, msg.sender, paidIn);
+        position.reserve1 += collateral;
+        vault.ledger.reserve1 += collateral;
+        position.escrow += escrow;
+        vault.ledger.escrow += escrow;
+        position.basis += paidIn.toUint128();
+    }
+
+    /// @dev What an entry swap may sell: only what this call adds, in the token sold, as an open of the added size
+    /// alone could. A long sells token1, its release and collateral; a short sells token0, its release.
+    function _sellable(Opening memory opening, bool isLong, uint256 collateral) private pure returns (uint256) {
+        if (isLong) return opening.release1 + collateral;
+        return opening.release0;
     }
 
     /// @dev The entry swap: a long sells token1 for token0, a short token0 for token1, through the vault's pool.
-    function _enter(Vault storage vault, uint256 vaultId, Position storage position, OpenRequest calldata request)
-        private
-    {
-        if (request.entryAmountIn == 0) return;
+    function _enter(
+        Vault storage vault,
+        uint256 vaultId,
+        Position storage position,
+        uint256 amountIn,
+        uint256 minimumOut,
+        uint256 sellable
+    ) private {
+        if (amountIn == 0) return;
         if (vault.parameters.pool == address(0)) revert IMetricLendingVault.InvalidParameters();
-        bool zeroForOne = !request.isLong;
-        uint256 available = zeroForOne ? position.reserve0 : position.reserve1;
-        if (request.entryAmountIn > available) revert IMetricLendingVault.InvalidParameters();
-        (uint256 paid, uint256 received) =
-            MetricVenue.swapExactIn(vault, vaultId, zeroForOne, request.entryAmountIn, request.entryMinimumOut);
+        if (amountIn > sellable) revert IMetricLendingVault.InvalidParameters();
+        bool zeroForOne = !position.isLong;
+        (uint256 paid, uint256 received) = MetricVenue.swapExactIn(vault, vaultId, zeroForOne, amountIn, minimumOut);
         _moveReserves(vault, position, zeroForOne, paid, received);
+    }
+
+    /// @dev The chord on the position as it now stands: an increase checks the combined position, as an open would.
+    function _requireSolvent(Position storage position) private view {
+        if (!VaultMath.chordHolds(position.reserve0, position.reserve1, position.maximum0, position.maximum1)) {
+            revert IMetricLendingVault.Insolvent();
+        }
     }
 
     function _moveReserves(

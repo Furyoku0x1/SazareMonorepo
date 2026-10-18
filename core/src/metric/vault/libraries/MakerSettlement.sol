@@ -96,17 +96,18 @@ library MakerSettlement {
     }
 
     /// @notice Splits a profit share between the treasury, the fee vault and the makers. The makers' part goes to the
-    /// legs' buckets in proportion to the `M1` each leg closed, in whichever tokens were collected.
+    /// legs' buckets by `weights`, the `M1` each leg closed times how long it was out, so a leg an increase appended
+    /// just before the close cannot take the gain the older legs' makers carried; in whichever tokens were collected.
     function payProfitShare(
         VaultStore storage store,
         Vault storage vault,
         uint256 positionId,
-        uint256[8] memory closedMaximum1,
+        uint256[8] memory weights,
         uint256 share0,
         uint256 share1
     ) internal {
         (uint256 makers0, uint256 makers1) = _payProtocolShare(vault, share0, share1);
-        _fundByWeight(store, vault, positionId, closedMaximum1, makers0, makers1);
+        _fundByWeight(store, vault, positionId, weights, makers0, makers1);
     }
 
     // ---------------------------------------------------------------- legs
@@ -222,8 +223,8 @@ library MakerSettlement {
         for (uint256 index = 0; index < legCount; ++index) {
             weightTotal += weights[index];
         }
-        // Every closed leg closed some liquidity, and `debtExtremes` adds a unit, so no weight is zero and nothing taken
-        // is left outside the ledger (Sol's finding).
+        // Every closed leg closed some liquidity, `debtExtremes` adds a unit, and every leg counts at least a second, so
+        // no weight is zero and nothing taken is left outside the ledger (Sol's finding).
         assert(weightTotal != 0);
         uint256 weightBefore;
         // legCount <= MAX_LEGS
