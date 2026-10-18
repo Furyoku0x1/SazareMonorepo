@@ -34,6 +34,21 @@ library VaultLedger {
         IERC20(tokenOf(vault, tokenIndex)).safeTransfer(to, amount);
     }
 
+    /// @notice Sends a close's payout to the position's owner, or keeps it for them to claim when the token refuses the
+    /// transfer, as a token that blocklists the owner does: a refused payout must not block a force close, or lent
+    /// capital would wait on the owner (audit finding X-5).
+    function pushOrKeep(Vault storage vault, uint256 tokenIndex, address to, uint256 amount) internal {
+        if (amount == 0) return;
+        if (to == address(this)) revert IMetricLendingVault.InvalidParameters();
+        debit(vault, tokenIndex, amount);
+        if (IERC20(tokenOf(vault, tokenIndex)).trySafeTransfer(to, amount)) return;
+        credit(vault, tokenIndex, amount);
+        vault.unclaimed[to][tokenIndex] += amount;
+        if (tokenIndex == 0) vault.ledger.unclaimed0 += amount.toUint128();
+        else vault.ledger.unclaimed1 += amount.toUint128();
+        emit IMetricLendingVault.PayoutKept(to, tokenIndex, amount);
+    }
+
     /// @notice Records tokens that arrived for the vault by other means, such as a Metric removal or swap output.
     function credit(Vault storage vault, uint256 tokenIndex, uint256 amount) internal {
         if (tokenIndex == 0) vault.ledger.held0 = (vault.ledger.held0 + amount).toUint128();

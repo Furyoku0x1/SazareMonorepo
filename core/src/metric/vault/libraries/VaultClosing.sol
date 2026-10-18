@@ -36,10 +36,13 @@ library VaultClosing {
         uint256 refund;
         uint256 leftover0;
         uint256 leftover1;
+        /// @dev Premium a force close collects from the leftover, in token1: a wait that would leave the trader no
+        /// more than this protects no one, so the close scales instead (audit finding W-3).
+        uint256 arrears;
     }
 
     /// @notice Closes `fractionWad` of the caller's position, repaying with `repay0` and `repay1` from the closed part
-    /// of the reserves. A partial close must pay all premium and funding owed and leave the rest solvent.
+    /// of the reserves. A partial close must pay all premium owed and leave the rest solvent.
     function close(VaultStore storage store, CloseRequest calldata request)
         external
         returns (uint256 paid0, uint256 paid1)
@@ -58,7 +61,7 @@ library VaultClosing {
         // start a new grace period.
         position.delinquentSince = 0;
         _repay(vault, closing);
-        uint256 share = _takeProfitShare(vault, position, closing, true);
+        uint256 share = _takeProfitShare(vault, position, closing);
         (paid0, paid1) = _payOut(vault, position, closing, msg.sender);
         _shrinkOrDelete(store, vault, request.positionId, position, closing);
         MetricVenue.place(vault, vaultId);
@@ -66,8 +69,11 @@ library VaultClosing {
     }
 
     /// @notice Closes a delinquent position whose grace period has passed, for a reward. Buys only the shortfall
-    /// through Metric for the cheapest repayment at the band's bid; if that fails or the vault has no pool, scales the
-    /// reserves down to the repayment rule, which needs no price and no swap.
+    /// through Metric for the cheapest repayment at the close band's bid, which leaves out the fees the pool admin may
+    /// change (W-1). Scales the reserves down to the repayment rule, which needs no price and no swap, only where that
+    /// costs the trader nothing they would keep: no pool, no price, or a surplus that after buying the deficit would
+    /// leave no more than the arrears (W-3). A swap that could pay but does not fill reverts, to be retried (Sol-2-1).
+    /// The profit share is measured at the bid, as on an owner's close, and before the reward (Sol-1-2).
     function forceClose(VaultStore storage store, uint256 positionId)
         external
         returns (uint256 reward0, uint256 reward1)
@@ -79,11 +85,12 @@ library VaultClosing {
         _requireForceClosable(vault, position);
         Charge memory unpaid = VaultBook.collect(vault, position, true);
         Closing memory closing = _portion(position, WAD);
+        closing.arrears = unpaid.premium;
         _forcedRepayment(vault, position, closing);
         _payArrears(vault, position, closing, unpaid, false);
         _repay(vault, closing);
+        _takeProfitShare(vault, position, closing);
         (reward0, reward1) = _reward(vault, closing);
-        _takeProfitShare(vault, position, closing, false);
         address owner = position.owner;
         _payOut(vault, position, closing, owner);
         _shrinkOrDelete(store, vault, positionId, position, closing);
@@ -103,7 +110,6 @@ library VaultClosing {
         closing.portion1 = VaultMath.portionDown(position.reserve1, fractionWad);
         closing.released0 = VaultMath.portionUp(position.released0, fractionWad);
         closing.released1 = VaultMath.portionUp(position.released1, fractionWad);
-        closing.basis = VaultMath.portionDown(position.basis, fractionWad);
     }
 
     function _requireRepayment(Position storage position, Closing memory closing, uint256 repay0, uint256 repay1)
@@ -155,8 +161,9 @@ library VaultClosing {
         closing.leftover1 = position.reserve1 - closing.repay1;
     }
 
-    /// @dev Repays the range's holdings at the band's bid, plus one unit of each, buying only the token the reserves
-    /// lack. The swap fills in full or not at all; when it does not, the caller scales the untouched reserves.
+    /// @dev Repays the range's holdings at the band's bid, plus one unit of each token held, buying only the token the
+    /// reserves lack. Returns false, with the reserves untouched, where the caller should scale them instead; a pool
+    /// without a price reverts until `VaultPricing.NO_PRICE_WAIT_SECONDS` past the grace period.
     function _repayAtBid(
         Vault storage vault,
         Position storage position,
@@ -165,10 +172,15 @@ library VaultClosing {
         uint160 sqrtUpperX96
     ) private returns (bool) {
         if (vault.parameters.pool == address(0)) return false;
-        (bool ok, uint160 sqrtBidX96) = VaultPricing.tryBid(vault);
-        if (!ok) return false;
+        (bool ok, uint160 sqrtBidX96) = VaultPricing.tryCloseBid(vault);
+        if (!ok) {
+            VaultPricing.requireNoPriceWaitOver(position.delinquentSince, vault.parameters.graceSeconds);
+            return false;
+        }
         (uint256 target0, uint256 target1) = _target(position.liquidity, sqrtLowerX96, sqrtUpperX96, sqrtBidX96);
-        if (!_buyShortfall(vault, position, target0, target1)) return false;
+        // The targets always pass; a failure would be a rounding surprise, and scaling needs no price.
+        if (!VaultMath.repays(target0, target1, position.liquidity, sqrtLowerX96, sqrtUpperX96)) return false;
+        if (!_buyShortfall(vault, position, target0, target1, closing.arrears)) return false;
         closing.repay0 = target0;
         closing.repay1 = target1;
         closing.portion0 = position.reserve0;
@@ -185,14 +197,21 @@ library VaultClosing {
     {
         uint160 inside = sqrtPriceX96 < sqrtLowerX96 ? sqrtLowerX96 : sqrtPriceX96;
         inside = inside > sqrtUpperX96 ? sqrtUpperX96 : inside;
-        target0 = SqrtPriceMath.getAmount0Delta(inside, sqrtUpperX96, liquidity, true) + 1;
-        target1 = SqrtPriceMath.getAmount1Delta(sqrtLowerX96, inside, liquidity, true) + 1;
+        target0 = SqrtPriceMath.getAmount0Delta(inside, sqrtUpperX96, liquidity, true);
+        target1 = SqrtPriceMath.getAmount1Delta(sqrtLowerX96, inside, liquidity, true);
+        // A unit of each token the range holds at this price, for rounding; none of a token it does not hold, so a
+        // position past its range never needs a swap for a unit its debt does not need (as `MakerClosing._legTarget`).
+        if (target0 != 0) target0 += 1;
+        if (target1 != 0) target1 += 1;
     }
 
-    function _buyShortfall(Vault storage vault, Position storage position, uint256 target0, uint256 target1)
-        private
-        returns (bool)
-    {
+    function _buyShortfall(
+        Vault storage vault,
+        Position storage position,
+        uint256 target0,
+        uint256 target1,
+        uint256 arrears
+    ) private returns (bool) {
         uint256 reserve0 = position.reserve0;
         uint256 reserve1 = position.reserve1;
         if (reserve0 >= target0) {
@@ -204,12 +223,40 @@ library VaultClosing {
         bool buyToken0 = reserve0 < target0;
         uint256 deficit = buyToken0 ? target0 - reserve0 : target1 - reserve1;
         uint256 surplus = buyToken0 ? reserve1 - target1 : reserve0 - target0;
-        uint256 maximumIn = VaultPricing.shortfallBudget(vault, buyToken0, deficit, surplus);
+        uint256 maximumIn = _budget(vault, position, buyToken0, deficit, surplus, arrears);
         if (maximumIn == 0) return false;
+        _swapShortfall(vault, position, buyToken0, deficit, maximumIn);
+        return true;
+    }
+
+    /// @dev The shortfall swap's budget, with the arrears as `_payArrears` takes them from the surplus: token1 as it
+    /// is, token0 at the strike.
+    function _budget(
+        Vault storage vault,
+        Position storage position,
+        bool buyToken0,
+        uint256 deficit,
+        uint256 surplus,
+        uint256 arrears
+    ) private returns (uint256) {
+        uint256 arrearsInSurplus = buyToken0 ? arrears : VaultPricing.token0AtStrike(position, arrears);
+        return VaultPricing.shortfallBudget(vault, buyToken0, deficit, surplus, arrearsInSurplus);
+    }
+
+    /// @dev Buys exactly `deficit` through the pool for at most `maximumIn`, or reverts: the reserves could pay at the
+    /// band, so scaling would hand the trader's surplus to lenders, and a paused or thin pool fills later, so the close
+    /// waits for it (audit finding Sol-2-1).
+    function _swapShortfall(
+        Vault storage vault,
+        Position storage position,
+        bool buyToken0,
+        uint256 deficit,
+        uint256 maximumIn
+    ) private {
         (bool filled, uint256 paid, uint256 received) =
             MetricVenue.trySwapExactOut(vault, position.vaultId, !buyToken0, deficit, maximumIn);
+        if (!filled) revert IMetricLendingVault.ShortfallUnfilled();
         _applySwap(vault, position, !buyToken0, paid, received);
-        return filled;
     }
 
     function _applySwap(Vault storage vault, Position storage position, bool zeroForOne, uint256 paid, uint256 received)
@@ -245,7 +292,7 @@ library VaultClosing {
 
     // ---------------------------------------------------------------- settlement
 
-    /// @dev Pays premium and funding the escrow did not cover from the closed part's token1 leftover. A partial close
+    /// @dev Pays premium the escrow did not cover from the closed part's token1 leftover. A partial close
     /// must cover all of it there. A full close then takes token0 at the strike for what remains, keeping the
     /// premium's protocol slice and vesting the rest to lenders, and forgoes anything beyond.
     function _payArrears(
@@ -283,14 +330,15 @@ library VaultClosing {
     }
 
     /// @dev The profit share on a winning close: proceeds (leftovers, and a full close's escrow refund) valued at the
-    /// band's bid, or at the strike for a force close or when the band cannot be read, less the basis closed. Taken
-    /// from token1 first, the leftover then the refund, and from token0 for the rest.
-    function _takeProfitShare(Vault storage vault, Position storage position, Closing memory closing, bool atBid)
+    /// band's bid, or at the strike when the band cannot be read, less the basis closed. Taken from token1 first, the
+    /// leftover then the refund, and from token0 for the rest.
+    function _takeProfitShare(Vault storage vault, Position storage position, Closing memory closing)
         private
         returns (uint256 share)
     {
+        closing.basis = VaultBook.closedBasis(position.basis, position.escrow, closing.fractionWad);
         if (closing.fractionWad == WAD) closing.refund = position.escrow;
-        (bool ok, uint160 sqrtBidX96) = atBid ? VaultPricing.tryBid(vault) : (false, uint160(0));
+        (bool ok, uint160 sqrtBidX96) = VaultPricing.tryCloseBid(vault);
         uint256 value0 = ok
             ? VaultMath.priceTimes(closing.leftover0, sqrtBidX96, false)
             : VaultPricing.atStrike(position, closing.leftover0);
@@ -324,8 +372,8 @@ library VaultClosing {
             position.escrow -= closing.refund.toUint128();
             vault.ledger.escrow -= closing.refund.toUint128();
         }
-        VaultLedger.push(vault, 0, recipient, paid0);
-        VaultLedger.push(vault, 1, recipient, paid1);
+        VaultLedger.pushOrKeep(vault, 0, recipient, paid0);
+        VaultLedger.pushOrKeep(vault, 1, recipient, paid1);
     }
 
     /// @dev A full close deletes the position. A partial close keeps the rest, with extremes recomputed from its own

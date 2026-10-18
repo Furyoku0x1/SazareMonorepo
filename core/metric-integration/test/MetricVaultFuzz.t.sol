@@ -11,6 +11,7 @@ import {CloseRequest, Ledger, OpenRequest, Position, Venue} from "vault/VaultTyp
 import {IMetricLendingVault} from "vault/interfaces/IMetricLendingVault.sol";
 import {MetricPrice} from "vault/libraries/MetricPrice.sol";
 import {DebtTotals, VaultMath} from "vault/libraries/VaultMath.sol";
+import {VaultPricing} from "vault/libraries/VaultPricing.sol";
 import {PoolReads} from "./invariant/MetricVaultHandler.sol";
 import {MetricFixture} from "./utils/MetricFixture.sol";
 
@@ -190,10 +191,11 @@ contract MetricVaultFuzzTest is MetricFixture {
 
     // ---------------------------------------------------------------- (d) force close
 
-    /// @dev A delinquent position is always force closable after its grace period: with the pool live (the shortfall
-    /// swap may fill or not), paused (the swap fails and scaling needs no swap), with the provider failing (no bid, so
-    /// scaling needs no price), or both. Outside trading and a reference move in between put the price anywhere.
-    function testFuzz_forceClose_alwaysSucceedsAfterGrace(
+    /// @dev After its grace period a delinquent position force closes, or waits for a pool that cannot fill its
+    /// shortfall swap: with the pool live or paused the close may wait, changing nothing; with the provider failing
+    /// (no bid) it always closes, since scaling needs no price. Outside trading and a reference move in between put the
+    /// price anywhere.
+    function testFuzz_forceClose_closesOrWaitsForThePool(
         bool isLong,
         uint256 offsetSeed,
         uint256 widthSeed,
@@ -220,21 +222,45 @@ contract MetricVaultFuzzTest is MetricFixture {
             vm.warp(block.timestamp + 1 days);
             if (mode % 2 == 1) pool.setPause(1);
             if ((mode / 2) % 2 == 1) provider.setBroken(true);
-            vm.prank(closer);
-            vault.forceClose(positionId);
-            assertEq(vault.positionOf(positionId).owner, address(0), "closed");
-            _assertNoDebt();
-            assertLedger();
-            _assertAllInsideWindow();
+            _forceCloseOrWait(positionId, (mode / 2) % 2 == 1);
         } catch (bytes memory reason) {
             _requireRefusal(reason);
         }
     }
 
-    /// @dev A short that sold all its base needs base back; with the pool's base bought out, the exact-out swap can
-    /// only fill partially, so the callback refuses it, nothing moves, and force close scales the untouched reserves:
-    /// the lenders take just what repays and the trader keeps the rest.
-    function test_forceClose_shortfallBeyondDepthScales() public {
+    /// @dev A force close after grace closes, or waits, changing nothing: with a price, for a pool that cannot fill its
+    /// shortfall swap (audit finding Sol-2-1); without one, until the wait without a price is over, when it scales.
+    function _forceCloseOrWait(uint256 positionId, bool unpriced) internal {
+        vm.prank(closer);
+        try vault.forceClose(positionId) {
+            assertFalse(unpriced, "a close without a price waits first");
+            _assertForceClosed(positionId);
+        } catch (bytes memory reason) {
+            bytes4 waits = unpriced
+                ? IMetricLendingVault.PriceUnavailable.selector
+                : IMetricLendingVault.ShortfallUnfilled.selector;
+            assertEq(bytes4(reason), waits, "only an unfilled swap or a missing price waits");
+            assertEq(vault.positionOf(positionId).owner, trader, "still open");
+            assertLedger();
+            if (!unpriced) return;
+            vm.warp(block.timestamp + VaultPricing.NO_PRICE_WAIT_SECONDS);
+            vm.prank(closer);
+            vault.forceClose(positionId);
+            _assertForceClosed(positionId);
+        }
+    }
+
+    function _assertForceClosed(uint256 positionId) internal view {
+        assertEq(vault.positionOf(positionId).owner, address(0), "closed");
+        _assertNoDebt();
+        assertLedger();
+        _assertAllInsideWindow();
+    }
+
+    /// @dev A short that sold all its base needs base back. With the pool's base bought out the exact-out swap can
+    /// only fill partially, so the callback refuses it and nothing moves; the close waits rather than scale the
+    /// trader's surplus away (audit finding Sol-2-1). Once the base is sold back, it buys exactly what repays.
+    function test_forceClose_waitsForDepthThenBuys() public {
         deposit(lender, 100e18, 200_000e6);
         (, uint160 sqrtAskX96) = _band();
         int24 lower = TickMath.getTickAtSqrtPrice(sqrtAskX96) + 50;
@@ -252,19 +278,25 @@ contract MetricVaultFuzzTest is MetricFixture {
         uint256 positionId = vault.open(request);
         assertEq(vault.positionOf(positionId).reserve0, 0, "all base sold");
         // Buy out every unit of base the pool has.
+        uint256 outsiderBase = base.balanceOf(address(outsider));
         outsider.swap(pool, false, int128(int256(1e24)));
+        uint256 bought = base.balanceOf(address(outsider)) - outsiderBase;
         assertLt(base.balanceOf(address(pool)), vault.positionOf(positionId).maximum0, "base is short of the debt");
         vm.warp(block.timestamp + 30 days);
         vault.flag(positionId);
         vm.warp(block.timestamp + 1 days);
+        Position memory before = vault.positionOf(positionId);
+        vm.prank(closer);
+        vm.expectRevert(IMetricLendingVault.ShortfallUnfilled.selector);
+        vault.forceClose(positionId);
+        assertEq(vault.positionOf(positionId).reserve1, before.reserve1, "nothing moved");
+        // The depth comes back.
+        outsider.swap(pool, true, int128(int256(bought)));
         uint256 poolBaseBefore = base.balanceOf(address(pool));
-        uint256 traderQuoteBefore = quote.balanceOf(trader);
-        vm.expectCall(address(pool), abi.encodeWithSelector(MetricOmmPool.swap.selector));
         vm.prank(closer);
         vault.forceClose(positionId);
         assertEq(vault.positionOf(positionId).owner, address(0), "closed");
-        assertGe(base.balanceOf(address(pool)), poolBaseBefore, "no base was bought");
-        assertGt(quote.balanceOf(trader), traderQuoteBefore, "scaled: the trader keeps what repayment did not need");
+        assertLt(base.balanceOf(address(pool)), poolBaseBefore, "bought its base");
         _assertNoDebt();
         assertLedger();
         _assertAllInsideWindow();
@@ -272,35 +304,30 @@ contract MetricVaultFuzzTest is MetricFixture {
 
     // ---------------------------------------------------------------- re-centering after a jump
 
-    /// @dev After the cursor jumps far past the window, repeated re-centering catches up by at most four bins a call.
-    /// Every share stays inside the window and the ledger holds at each step, and it ends centered within
-    /// `recenterDistance` of the active bin, or against the pool's edge.
-    function testFuzz_recenter_catchesUpAfterAJump(bool up, uint256 sizeSeed) public {
+    /// @dev Audit finding X-1: however far outside trading pushes the cursor, re-centering never moves the window and
+    /// a deposit waits in the buffer, so the vault's tokens never land on the wrong side of the oracle price. Every
+    /// share stays inside the window and the ledger holds; once the trade is reversed, a deposit places again.
+    function testFuzz_recenter_neverFollowsAPushedCursor(bool up, uint256 sizeSeed) public {
         deposit(lender, 20e18, 40_000e6);
+        Venue memory before = vault.venueOf(vaultId);
+        uint256 outsiderBase = base.balanceOf(address(outsider));
         if (up) outsider.swap(pool, false, int128(int256(bound(sizeSeed, 150_000e6, 800_000e6))));
         else outsider.swap(pool, true, int128(int256(bound(sizeSeed, 75e18, 400e18))));
-        // at most 40 calls; 80 bins at four a call
-        for (uint256 call = 0; call < 40; ++call) {
-            bool moved = vault.recenter(vaultId);
-            _assertAllInsideWindow();
-            assertLedger();
-            if (!moved) break;
+        // ten calls: the old window caught up four bins a call
+        for (uint256 call = 0; call < 10; ++call) {
+            assertFalse(vault.recenter(vaultId), "never moves toward a pushed cursor");
         }
-        Venue memory venue = vault.venueOf(vaultId);
-        uint256 binCount = vault.parametersOf(vaultId).binCount;
-        (, int16 active,,,,,) = PoolStateLibrary._slot0(address(pool));
-        int256 drift = int256(active) - (int256(venue.lowestBin) + int256(binCount / 2));
-        bool atEdge = venue.lowestBin == venue.poolLowestBin
-            || int256(venue.lowestBin) == int256(venue.poolHighestBin) - int256(binCount) + 1;
-        assertTrue(
-            atEdge || (drift < 0 ? uint256(-drift) : uint256(drift)) <= vault.parametersOf(vaultId).recenterDistance,
-            "caught up"
-        );
-        // A deposit after catching up still places.
-        uint256 holdingsBefore = uint256(venue.holdings0) + venue.holdings1;
-        deposit(lender, 5e18, 10_000e6);
-        Venue memory afterwards = vault.venueOf(vaultId);
-        assertGt(uint256(afterwards.holdings0) + afterwards.holdings1, holdingsBefore, "placed");
+        assertEq(vault.venueOf(vaultId).lowestBin, before.lowestBin, "the window held still");
+        uint256 buffer1Before = vault.ledgerOf(vaultId).buffer1;
+        deposit(lender, 0, 10_000e6);
+        assertEq(vault.ledgerOf(vaultId).buffer1, buffer1Before + 10_000e6, "the deposit waits in the buffer");
+        _assertAllInsideWindow();
+        assertLedger();
+        // Reverse the trade: the cursor returns to the reference and the waiting quote is placed.
+        if (up) outsider.swap(pool, true, int128(int256(base.balanceOf(address(outsider)) - outsiderBase)));
+        else outsider.swap(pool, false, -int128(int256(outsiderBase - base.balanceOf(address(outsider)))));
+        deposit(lender, 0, 1_000e6);
+        assertLt(vault.ledgerOf(vaultId).buffer1, buffer1Before + 11_000e6, "placed once back at the reference");
         _assertAllInsideWindow();
         assertLedger();
     }
@@ -389,9 +416,9 @@ contract MetricVaultFuzzTest is MetricFixture {
         assertEq(vault.accrualOf(vaultId).outstanding0, 0, "outstanding0");
         assertEq(vault.accrualOf(vaultId).outstanding1, 0, "outstanding1");
         (DebtTotals memory longDebts, DebtTotals memory shortDebts) = vault.debtsOf(vaultId);
-        assertEq(longDebts.liquidity + longDebts.virtual0 + longDebts.virtual1 + longDebts.maximum0, 0, "long debts");
-        assertEq(longDebts.maximum1 + shortDebts.liquidity + shortDebts.virtual0, 0, "debts");
-        assertEq(shortDebts.virtual1 + shortDebts.maximum0 + shortDebts.maximum1, 0, "short debts");
+        assertEq(longDebts.liquidity + shortDebts.liquidity, 0, "debts");
+        (, uint256 high) = vault.debtValuesAt(vaultId, TickMath.getSqrtPriceAtTick(0));
+        assertEq(high, 0, "nothing left in the debt tree");
     }
 
     function _assertAllInsideWindow() internal view {

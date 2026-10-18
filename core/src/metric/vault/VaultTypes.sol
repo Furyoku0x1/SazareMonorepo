@@ -2,6 +2,7 @@
 pragma solidity 0.8.37;
 
 import {Book, Leg, MakerPosition} from "./MakerTypes.sol";
+import {DebtTree} from "./libraries/DebtValuation.sol";
 import {Curve, DebtTotals} from "./libraries/VaultMath.sol";
 
 /// @notice A vault's settings, fixed when the vault is created.
@@ -26,10 +27,11 @@ struct VaultParameters {
     /// @notice The treasury's and fee vault's parts of a profit share; lenders take the rest.
     uint16 profitTreasuryBps;
     uint16 profitFeeVaultBps;
-    /// @notice A force closer's reward, in basis points of each token left after repayment and arrears.
+    /// @notice A force closer's reward, in basis points of each token left after repayment, arrears and the profit
+    /// share.
     uint16 forceCloseRewardBps;
     /// @notice How far past the band's far edge a force close's shortfall swap may pay, in basis points; beyond it the
-    /// close scales instead of swapping.
+    /// close waits for the pool rather than scale at the trader's loss (audit finding Sol-2-1).
     uint16 forceCloseSlippageBps;
     /// @notice The highest utilization of either token an open may leave.
     uint16 utilizationCeilingBps;
@@ -83,6 +85,9 @@ struct Ledger {
     uint128 treasury1;
     uint128 feeVault0;
     uint128 feeVault1;
+    /// @dev Close payouts a transfer refused, kept for their owners to claim (audit finding X-5).
+    uint128 unclaimed0;
+    uint128 unclaimed1;
 }
 
 /// @notice Lenders' income paid in and not yet released, per token: it vests linearly until its end, so a deposit made
@@ -101,6 +106,12 @@ struct Venue {
     int16 lowestBin;
     /// @dev Whether the window has been set; it is set at the first placement, centered on the active bin.
     bool windowSet;
+    /// @dev Where the oracle reference sits in the pool's fixed grid, recorded when the window is set, since the
+    /// cursor's bin holds it then: the bin containing it, or, when it lies on a bin edge (`referenceOnEdge`), the first
+    /// bin above it. With the pool at the reference, bins above hold only token0 and bins below only token1; premium
+    /// rates anchor on this (audit finding X-3).
+    int16 referenceBin;
+    bool referenceOnEdge;
     /// @dev The pool's scale multipliers, `10^(precision − decimals)`, read once at creation.
     uint64 scale0;
     uint64 scale1;
@@ -113,6 +124,11 @@ struct Venue {
     /// @dev Token amounts of the vault's Metric position at the last read.
     uint128 holdings0;
     uint128 holdings1;
+    /// @dev The same position as it would be with the pool at the reference: bins above the window's center as token0,
+    /// below it as token1. Premium rates and the utilization ceiling read these, so a swap that moves the pool's token
+    /// mix cannot move a rate (audit finding X-3).
+    uint128 rateHoldings0;
+    uint128 rateHoldings1;
 }
 
 struct Vault {
@@ -125,8 +141,12 @@ struct Vault {
     Venue venue;
     DebtTotals longDebts;
     DebtTotals shortDebts;
+    /// @dev Every open debt, long or short, by its range ends: what lenders' shares are priced with.
+    DebtTree debts;
     uint256 totalShares;
     mapping(address lender => uint256) shares;
+    /// @dev Each owner's close payouts a transfer refused, by token index; their sums are `Ledger.unclaimed0/1`.
+    mapping(address owner => uint256[2]) unclaimed;
     /// @dev Limit-order makers' buckets, lent to maker positions; separate from the lenders above.
     Book book;
 }

@@ -7,9 +7,12 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {Vault} from "../VaultTypes.sol";
 import {IMetricLendingVault} from "../interfaces/IMetricLendingVault.sol";
 import {IMetricPool, LiquidityDelta} from "../interfaces/IMetricPool.sol";
+import {MetricPrice} from "./MetricPrice.sol";
 import {MetricState} from "./MetricState.sol";
 import {VaultCallback} from "./VaultCallback.sol";
 import {VaultLedger} from "./VaultLedger.sol";
+import {VaultMath} from "./VaultMath.sol";
+import {VaultPricing} from "./VaultPricing.sol";
 
 /// @notice The vault's idle capital in its Metric pool: placement around the active bin, withdrawal from the edges,
 /// re-centering, and reads of what the position holds.
@@ -28,6 +31,14 @@ library MetricVenue {
     uint256 internal constant BPS = 10_000;
     uint256 internal constant E18 = 1e18;
 
+    /// @dev The vault's Metric position as held and as anchored at the reference; a struct keeps the stack shallow.
+    struct Holdings {
+        uint256 amount0;
+        uint256 amount1;
+        uint256 anchored0;
+        uint256 anchored1;
+    }
+
     struct Plan {
         int256[] bins;
         uint256[] shares;
@@ -36,41 +47,120 @@ library MetricVenue {
         uint256 cost1;
     }
 
-    /// @notice Updates the cached holdings from the pool. A no-op without a pool.
+    /// @notice Updates the cached holdings from the pool, and the holdings premium rates read: the same position as it
+    /// would be with the pool at the reference, converted at the close band's bid, which no swap or pool setting moves.
+    /// A no-op without a pool. Without a quote, including inside a Metric callback where the pool is mid-swap, the
+    /// anchored holdings keep their last value: read as held, a swap's callback could skew them (audit finding X-3).
     function refresh(Vault storage vault, uint256 vaultId) public {
-        if (vault.parameters.pool == address(0)) return;
-        (uint256 amount0, uint256 amount1) = holdings(vault, vaultId);
-        vault.venue.holdings0 = amount0.toUint128();
-        vault.venue.holdings1 = amount1.toUint128();
+        address pool = vault.parameters.pool;
+        if (pool == address(0)) return;
+        (bool priced, uint160 sqrtBidX96) =
+            MetricPrice.peekBidWithoutAdminFees(pool, vault.venue.scale0, vault.venue.scale1);
+        Holdings memory read = _holdings(vault, vaultId, priced, sqrtBidX96);
+        vault.venue.holdings0 = read.amount0.toUint128();
+        vault.venue.holdings1 = read.amount1.toUint128();
+        if (!priced) return;
+        vault.venue.rateHoldings0 = read.anchored0.toUint128();
+        vault.venue.rateHoldings1 = read.anchored1.toUint128();
     }
 
-    /// @notice What the vault's Metric position holds now, in native units, rounded down.
-    function holdings(Vault storage vault, uint256 vaultId) internal view returns (uint256 amount0, uint256 amount1) {
-        if (!vault.venue.windowSet) return (0, 0);
-        address pool = vault.parameters.pool;
+    /// @dev What the vault's Metric position holds now, in native units, rounded down, and the anchored amounts.
+    function _holdings(Vault storage vault, uint256 vaultId, bool priced, uint160 sqrtBidX96)
+        private
+        view
+        returns (Holdings memory read)
+    {
+        if (!vault.venue.windowSet) return read;
         uint256 count = vault.parameters.binCount;
         // count <= MAX_BINS
         for (uint256 offset = 0; offset < count; ++offset) {
-            int16 binIndex = int16(int256(vault.venue.lowestBin) + int256(offset));
-            uint256 ours = MetricState.positionShares(pool, address(this), uint80(vaultId), binIndex);
-            if (ours == 0) continue;
-            MetricState.Bin memory state = MetricState.bin(pool, binIndex);
-            amount0 += FullMath.mulDiv(ours, state.balance0Scaled, state.totalShares) / vault.venue.scale0;
-            amount1 += FullMath.mulDiv(ours, state.balance1Scaled, state.totalShares) / vault.venue.scale1;
+            int256 binIndex = int256(vault.venue.lowestBin) + int256(offset);
+            (uint256 bin0, uint256 bin1) = _binHoldings(vault, vaultId, int16(binIndex));
+            read.amount0 += bin0;
+            read.amount1 += bin1;
+            // Without a price nothing is anchored; the caller keeps the last anchored holdings.
+            if (priced) _anchor(read, _side(vault, binIndex), bin0, bin1, sqrtBidX96);
         }
+    }
+
+    function _binHoldings(Vault storage vault, uint256 vaultId, int16 binIndex)
+        private
+        view
+        returns (uint256 amount0, uint256 amount1)
+    {
+        address pool = vault.parameters.pool;
+        uint256 ours = MetricState.positionShares(pool, address(this), uint80(vaultId), binIndex);
+        if (ours == 0) return (0, 0);
+        MetricState.Bin memory state = MetricState.bin(pool, binIndex);
+        amount0 = FullMath.mulDiv(ours, state.balance0Scaled, state.totalShares) / vault.venue.scale0;
+        amount1 = FullMath.mulDiv(ours, state.balance1Scaled, state.totalShares) / vault.venue.scale1;
+    }
+
+    /// @dev A bin's side of the recorded reference: 1 above it (token0 at the reference), -1 below it (token1), 0 for the
+    /// bin that contains it, which the vault never places in, since it is then the active bin (X-1).
+    function _side(Vault storage vault, int256 binIndex) private view returns (int256) {
+        int256 referenceBin = vault.venue.referenceBin;
+        if (binIndex > referenceBin) return 1;
+        if (binIndex < referenceBin) return -1;
+        return vault.venue.referenceOnEdge ? int256(1) : int256(0);
+    }
+
+    /// @dev Adds a bin to the anchored amounts: with the pool at the reference, a bin above it holds only token0 and a
+    /// bin below only token1, so a push that trades the vault's bins cannot move them (audit finding X-3).
+    function _anchor(Holdings memory read, int256 side, uint256 bin0, uint256 bin1, uint160 sqrtBidX96) private pure {
+        if (side == 0) return _asHeld(read, bin0, bin1);
+        if (side > 0) {
+            read.anchored0 += bin0 + VaultPricing.token0At(sqrtBidX96, bin1);
+            return;
+        }
+        read.anchored1 += bin1 + VaultMath.priceTimes(bin0, sqrtBidX96, false);
+    }
+
+    function _asHeld(Holdings memory read, uint256 bin0, uint256 bin1) private pure {
+        read.anchored0 += bin0;
+        read.anchored1 += bin1;
     }
 
     /// @notice Places the lenders' buffer in the window's bins, first moving the window toward the active bin if it
     /// has drifted (see `recenter`). What a bin cannot take (below Metric's minimum share delta, or past the weight
     /// cap) stays in the buffer. Every action that moves the vault's Metric holdings ends here, so the holdings are
     /// re-read last: the next accrual interval samples them after the action's own swaps and placement.
+    /// @dev Placement and window moves run only while the cursor's bin holds the oracle reference; otherwise the
+    /// tokens wait in the buffer (audit finding X-1, see `_atReference`).
     function place(Vault storage vault, uint256 vaultId) public {
         address pool = vault.parameters.pool;
         if (pool == address(0)) return;
-        int16 activeBin = MetricState.cursor(pool).binIndex;
-        _shift(vault, vaultId, activeBin);
-        _place(vault, vaultId, activeBin);
+        MetricState.Cursor memory current = MetricState.cursor(pool);
+        if (_atReference(pool, current)) {
+            _recordReference(vault, pool, current);
+            _shift(vault, vaultId, current.binIndex);
+            _place(vault, vaultId, current.binIndex);
+        }
         refresh(vault, vaultId);
+    }
+
+    /// @dev Records where the reference lies, once, before the first placement sets the window. Metric's bins never
+    /// move against the reference, so this holds for the pool's life.
+    function _recordReference(Vault storage vault, address pool, MetricState.Cursor memory current) private {
+        if (vault.venue.windowSet) return;
+        int256 lowerEdgeE6 = current.binDistanceE6;
+        int256 upperEdgeE6 = lowerEdgeE6 + int256(uint256(MetricState.bin(pool, current.binIndex).lengthE6));
+        vault.venue.referenceBin = current.binIndex;
+        vault.venue.referenceOnEdge = false;
+        if (lowerEdgeE6 == 0) vault.venue.referenceOnEdge = true;
+        if (upperEdgeE6 != 0) return;
+        vault.venue.referenceBin = current.binIndex + 1;
+        vault.venue.referenceOnEdge = true;
+    }
+
+    /// @dev Whether the cursor's bin holds the reference. Metric prices every bin at a fixed distance from the oracle
+    /// reference, so only then are the bins above the cursor at or above the reference and those below at or below
+    /// it. With the cursor pushed off the reference, placing would put base below the price (or quote above) for the
+    /// pusher to buy back at a discount: a placement sandwich (audit finding X-1).
+    function _atReference(address pool, MetricState.Cursor memory current) private view returns (bool) {
+        if (current.binDistanceE6 > 0) return false;
+        uint256 lengthE6 = MetricState.bin(pool, current.binIndex).lengthE6;
+        return int256(current.binDistanceE6) + int256(lengthE6) >= 0;
     }
 
     /// @dev Never reverts on the pool's account, so placement never blocks the action that calls it, closes included.
@@ -120,18 +210,24 @@ library MetricVenue {
         short1 = _gatherSide(vault, vaultId, activeBin, plan, 1, short1);
         _gatherActive(vault, vaultId, activeBin, plan, short0, short1);
         _remove(vault, vaultId, plan);
+        // An open's escrow check reads rates right after its release: they must count what just left (X-3).
+        refresh(vault, vaultId);
         return vault.ledger.buffer0 >= need0 && vault.ledger.buffer1 >= need1;
     }
 
     /// @notice Moves the window toward the active bin once it has drifted more than `recenterDistance` bins from the
     /// window's center, then places and re-reads the holdings. Every placement does the same move; this lets anyone
-    /// trigger it without another action. Returns whether the window moved.
+    /// trigger it without another action. Returns whether the window moved. Like `place`, it does nothing while the
+    /// cursor is off the reference, so a pushed cursor cannot drag the window (audit finding X-1).
     function recenter(Vault storage vault, uint256 vaultId) public returns (bool moved) {
         address pool = vault.parameters.pool;
         if (pool == address(0)) return false;
-        int16 activeBin = MetricState.cursor(pool).binIndex;
-        moved = _shift(vault, vaultId, activeBin);
-        _place(vault, vaultId, activeBin);
+        MetricState.Cursor memory current = MetricState.cursor(pool);
+        if (_atReference(pool, current)) {
+            _recordReference(vault, pool, current);
+            moved = _shift(vault, vaultId, current.binIndex);
+            _place(vault, vaultId, current.binIndex);
+        }
         refresh(vault, vaultId);
     }
 
@@ -203,7 +299,7 @@ library MetricVenue {
 
     /// @notice Buys exactly `amountOut` of one token, paying at most `maximumIn` of the other, through the pool. Never
     /// reverts on the pool's account: the callback refuses a partial fill, so a swap either fills in full or moves
-    /// nothing and reports `ok = false`, and a force close falls back to scaling on untouched reserves.
+    /// nothing and reports `ok = false`, and the force close decides whether to wait or scale.
     function trySwapExactOut(
         Vault storage vault,
         uint256 vaultId,

@@ -12,7 +12,7 @@ import {VaultMath} from "./VaultMath.sol";
 import {VaultPricing} from "./VaultPricing.sol";
 import {MetricVenue} from "./MetricVenue.sol";
 
-/// @notice Opening positions, topping them up, settling their premium and funding, and flagging delinquent ones.
+/// @notice Opening positions, topping them up, settling their premium, and flagging delinquent ones.
 /// @dev An external library: the singleton delegatecalls it, so `msg.sender` is the trader and token movements are
 /// the singleton's.
 library VaultPositions {
@@ -88,8 +88,25 @@ library VaultPositions {
         emit IMetricLendingVault.CollateralAdded(positionId, amount);
     }
 
-    /// @notice Settles a position's premium and funding from its escrow, if the escrow covers them; otherwise does
-    /// nothing. Anyone may call: it is how funding is collected for receivers between closes.
+    /// @notice Adds token0 to the reserves, so a position that holds token1 and owes token0 can repay in kind with no
+    /// swap, even while the pool cannot fill one (audit finding W-4). The basis counts it at the close band's bid, the
+    /// price a close values returned token0 at, so adding token0 and taking it back leaves the profit share exactly
+    /// where it was; at the ask, a round trip would cut the share by the spread on whatever was added (Sol).
+    function addCollateral0(VaultStore storage store, uint256 positionId, uint256 amount) external {
+        Position storage position = _owned(store, positionId);
+        if (amount == 0) revert IMetricLendingVault.ZeroAmount();
+        Vault storage vault = store.vaults[position.vaultId];
+        (bool priced, uint160 sqrtBidX96) = VaultPricing.tryCloseBid(vault);
+        if (!priced) revert IMetricLendingVault.InvalidBand();
+        VaultLedger.pull(vault, 0, msg.sender, amount);
+        position.reserve0 += amount.toUint128();
+        vault.ledger.reserve0 += amount.toUint128();
+        position.basis += VaultMath.priceTimes(amount, sqrtBidX96, false).toUint128();
+        emit IMetricLendingVault.Collateral0Added(positionId, amount);
+    }
+
+    /// @notice Settles a position's premium from its escrow, if the escrow covers it; otherwise does nothing. Anyone
+    /// may call, so lenders' income need not wait for a close.
     function settle(VaultStore storage store, uint256 positionId) external returns (bool settled) {
         Position storage position = store.positions[positionId];
         if (position.owner == address(0)) revert IMetricLendingVault.UnknownPosition();
@@ -126,8 +143,10 @@ library VaultPositions {
 
     /// @dev Moves the release from the lenders' idle capital to the trader's reserves, within the utilization ceiling.
     function _release(Vault storage vault, uint256 vaultId, Opening memory opening) private {
-        _requireCeiling(vault, vault.accrual.outstanding0, VaultAccrual.idle0(vault), opening.release0);
-        _requireCeiling(vault, vault.accrual.outstanding1, VaultAccrual.idle1(vault), opening.release1);
+        _requireIdle(VaultAccrual.idle0(vault), opening.release0);
+        _requireIdle(VaultAccrual.idle1(vault), opening.release1);
+        _requireCeiling(vault, vault.accrual.outstanding0, VaultAccrual.rateIdle0(vault), opening.release0);
+        _requireCeiling(vault, vault.accrual.outstanding1, VaultAccrual.rateIdle1(vault), opening.release1);
         if (!MetricVenue.gather(vault, vaultId, opening.release0, opening.release1)) {
             revert IMetricLendingVault.InsufficientIdle();
         }
@@ -141,9 +160,14 @@ library VaultPositions {
 
     /// @dev Releasing moves tokens from idle to outstanding, so the supplied total is unchanged: utilization after is
     /// `(outstanding + release) / (outstanding + idle)`.
+    /// @dev The release must be idle in fact, in the token itself.
+    function _requireIdle(uint256 idle, uint256 release) private pure {
+        if (release > idle) revert IMetricLendingVault.InsufficientIdle();
+    }
+
+    /// @dev The ceiling is measured on the anchored idle, so a swap in the same transaction cannot pass it (X-3).
     function _requireCeiling(Vault storage vault, uint256 outstanding, uint256 idle, uint256 release) private view {
         if (release == 0) return;
-        if (release > idle) revert IMetricLendingVault.InsufficientIdle();
         uint256 supplied = outstanding + idle;
         if ((outstanding + release) * BPS > supplied * vault.parameters.utilizationCeilingBps) {
             revert IMetricLendingVault.UtilizationCeiling();

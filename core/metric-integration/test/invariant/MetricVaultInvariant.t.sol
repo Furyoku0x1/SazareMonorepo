@@ -84,10 +84,8 @@ contract MetricVaultInvariantTest is MetricFixture {
             );
             released0 += position.released0;
             released1 += position.released1;
-            _add(
-                position.isLong ? longSum : shortSum,
-                VaultMath.debtTerms(position.liquidity, sqrtLowerX96, sqrtUpperX96)
-            );
+            if (position.isLong) longSum.liquidity += position.liquidity;
+            else shortSum.liquidity += position.liquidity;
         }
         assertEq(open, handler.openCount(), "open positions");
         Accrual memory accrual = vault.accrualOf(vaultId);
@@ -227,19 +225,7 @@ contract MetricVaultInvariantTest is MetricFixture {
         }
     }
 
-    function _add(DebtTotals memory sum, DebtTotals memory terms) internal pure {
-        sum.liquidity += terms.liquidity;
-        sum.virtual0 += terms.virtual0;
-        sum.virtual1 += terms.virtual1;
-        sum.maximum0 += terms.maximum0;
-        sum.maximum1 += terms.maximum1;
-    }
-
     function _assertTotals(DebtTotals memory totals, DebtTotals memory sum, string memory side) internal pure {
         assertEq(totals.liquidity, sum.liquidity, string.concat(side, " liquidity"));
-        assertEq(totals.virtual0, sum.virtual0, string.concat(side, " virtual0"));
-        assertEq(totals.virtual1, sum.virtual1, string.concat(side, " virtual1"));
-        assertEq(totals.maximum0, sum.maximum0, string.concat(side, " maximum0"));
-        assertEq(totals.maximum1, sum.maximum1, string.concat(side, " maximum1"));
     }
 }

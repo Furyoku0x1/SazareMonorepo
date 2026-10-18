@@ -4,7 +4,6 @@ pragma solidity 0.8.37;
 /// @notice Errors and events of the Metric Lending Vault, shared by the contract and its libraries.
 interface IMetricLendingVault {
     error Unauthorized();
-    error Reentrancy();
     error InvalidParameters();
     error UnknownVault();
     error UnknownPosition();
@@ -21,7 +20,7 @@ interface IMetricLendingVault {
     error Insolvent();
     /// @dev The repayment fails the repayment rule, or takes more than the closed part of the reserves.
     error RepaymentShort();
-    /// @dev A partial close must pay all premium and funding owed.
+    /// @dev A partial close must pay all premium owed.
     error PremiumUnpaid();
     error NotDelinquent();
     error GracePeriodRunning();
@@ -30,6 +29,12 @@ interface IMetricLendingVault {
     error InvalidBand();
     /// @notice An open's escrow does not cover its premium over the minimum escrow period.
     error EscrowTooSmall();
+    /// @notice A force close's shortfall swap did not fill though the reserves could pay at the band; retry once the
+    /// pool can fill it, rather than scale at a loss to the trader.
+    error ShortfallUnfilled();
+    /// @notice A force close found no price on its pool; retry once the pool prices again, or once the wait without a
+    /// price is over and the close may scale the reserves instead.
+    error PriceUnavailable();
 
     event VaultCreated(uint256 indexed vaultId, address indexed pool, address token0, address token1);
     event CurvesAppended(uint256 indexed vaultId, uint256 version);
@@ -52,5 +57,9 @@ interface IMetricLendingVault {
     event Settled(uint256 indexed positionId, uint256 premium);
     event EscrowAdded(uint256 indexed positionId, uint256 amount);
     event CollateralAdded(uint256 indexed positionId, uint256 amount);
+    event Collateral0Added(uint256 indexed positionId, uint256 amount);
     event ProtocolPaid(uint256 indexed vaultId, address indexed recipient, uint256 amount0, uint256 amount1);
+    /// @notice A close's payout the token refused to transfer, kept for `owner` to claim.
+    event PayoutKept(address indexed owner, uint256 tokenIndex, uint256 amount);
+    event PayoutClaimed(uint256 indexed vaultId, address indexed owner, uint256 tokenIndex, uint256 amount);
 }

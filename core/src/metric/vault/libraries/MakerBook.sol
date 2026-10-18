@@ -193,7 +193,7 @@ library MakerBook {
 
     /// @dev The income still vesting, at the ask and rounded up. It vests to real shares only, while the deposit is
     /// priced against real and virtual ones, so it is grossed up by `(S + virtual) / S` (Sol). A bucket with no shares
-    /// has nothing vesting (D22).
+    /// has nothing vesting (D22). Premium the legs owe and have not settled is not counted (owner's decision on X-2).
     function _vestingValue(Bucket storage bucket, uint160 sqrtAskX96) private view returns (uint256) {
         uint256 totalShares = bucket.totalShares;
         if (totalShares == 0) return 0;
@@ -218,6 +218,11 @@ library MakerBook {
             if (shares == bucket.totalShares) shares -= 1;
         }
         if (shares == 0) revert IMetricLendingVault.ZeroAmount();
+        // The last shares of an unlent bucket take all it holds: it retires, so it prices exactly instead of leaving
+        // the virtual offset's units behind for the next maker to lose (audit finding Sol-3-2).
+        if (bucket.lent == 0) {
+            if (shares == bucket.totalShares) _retire(book, bucket, bucketId);
+        }
         result = _withdrawal(vault, book, bucket, bucketId, shares);
         _burn(vault, bucket, bucketId, msg.sender, result.burned);
         _subtractBalance(book, bucket, result.amount0, result.amount1);

@@ -107,7 +107,9 @@ contract MetricVenueIntegrationTest is MetricFixture {
         assertLedger();
     }
 
-    function test_forceClose_scalesWhenMetricIsPaused() public {
+    /// @dev While swaps are paused the quote still works, so scaling would hand the trader's surplus to lenders: the
+    /// close waits for the pool instead (audit finding Sol-2-1), and buys its shortfall once swaps resume.
+    function test_forceClose_waitsWhileMetricIsPaused() public {
         deposit(lender, 100e18, 100_000e6);
         // A dollar of escrow: premium alone outruns it well within the warp.
         uint256 positionId = _openLong(10_000e6, 300e6, 10_200e6, 1e6);
@@ -117,8 +119,35 @@ contract MetricVenueIntegrationTest is MetricFixture {
         // The test is the pool's factory, so it can pause swaps; adds and removes still work.
         pool.setPause(1);
         vm.prank(closer);
+        vm.expectRevert(IMetricLendingVault.ShortfallUnfilled.selector);
         vault.forceClose(positionId);
-        assertEq(vault.positionOf(positionId).owner, address(0), "closed by scaling");
+        pool.setPause(0);
+        vm.prank(closer);
+        vault.forceClose(positionId);
+        assertEq(vault.positionOf(positionId).owner, address(0), "closed once swaps resume");
+        assertEq(vault.accrualOf(vaultId).outstanding1, 0, "debt repaid");
+        assertLedger();
+    }
+
+    /// @dev Audit finding W-3: a wait protects only what the trader would keep. With swaps paused for good, the close
+    /// waits while the trader keeps more than the arrears, and once years of premium have taken that stake, it scales
+    /// though the pool is still paused, so lent capital is never stuck for good.
+    function test_forceClose_stopsWaitingOnceArrearsTakeTheTradersStake() public {
+        deposit(lender, 100e18, 100_000e6);
+        // A dollar of escrow: premium alone outruns it well within the warp.
+        uint256 positionId = _openLong(10_000e6, 300e6, 10_200e6, 1e6);
+        vm.warp(block.timestamp + 120 days);
+        vault.flag(positionId);
+        vm.warp(block.timestamp + 1 days + 1);
+        pool.setPause(1);
+        vm.prank(closer);
+        vm.expectRevert(IMetricLendingVault.ShortfallUnfilled.selector);
+        vault.forceClose(positionId);
+        vm.warp(block.timestamp + 20 * 365 days);
+        vm.prank(closer);
+        vault.forceClose(positionId);
+        assertEq(vault.positionOf(positionId).owner, address(0), "closed though still paused");
+        assertEq(vault.accrualOf(vaultId).outstanding1, 0, "debt repaid");
         assertLedger();
     }
 

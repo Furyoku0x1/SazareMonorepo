@@ -12,7 +12,8 @@ import {MetricLendingVault} from "vault/MetricLendingVault.sol";
 import {CloseRequest, Ledger, OpenRequest, Position, Venue} from "vault/VaultTypes.sol";
 import {IMetricLendingVault} from "vault/interfaces/IMetricLendingVault.sol";
 import {MetricPrice} from "vault/libraries/MetricPrice.sol";
-import {DebtTotals, VaultMath} from "vault/libraries/VaultMath.sol";
+import {VaultMath} from "vault/libraries/VaultMath.sol";
+import {VaultPricing} from "vault/libraries/VaultPricing.sol";
 import {IntegrationToken, SettableProvider, Trader} from "../utils/MetricFixture.sol";
 
 /// @notice Reads of the vault's Metric position straight from the pool's storage, through Metric's own
@@ -349,20 +350,35 @@ contract MetricVaultHandler is Test {
             vm.prank(factory);
             pool.setPause(1);
         }
-        if (mode == 2) provider.setBroken(true);
+        if (mode == 2) {
+            provider.setBroken(true);
+            _maybePassTheWaitWithoutAPrice(ready, waitSeed);
+        }
         vm.prank(closer);
         try vault.forceClose(positionId) {
             forceCloses[mode] += 1;
             _forget(index);
         } catch (bytes memory reason) {
-            // An escrow top-up since the flag can cover what was owed.
-            _allow(reason, "forceClose", [IMetricLendingVault.NotDelinquent.selector, NONE, NONE, NONE, NONE, NONE]);
+            // An escrow top-up since the flag can cover what was owed. With a price, a pool that cannot fill the
+            // shortfall makes the close wait (audit finding Sol-2-1); without one, the close waits out
+            // `NO_PRICE_WAIT_SECONDS` and then scales.
+            bytes4 waits = mode == 2
+                ? IMetricLendingVault.PriceUnavailable.selector
+                : IMetricLendingVault.ShortfallUnfilled.selector;
+            _allow(reason, "forceClose", [IMetricLendingVault.NotDelinquent.selector, waits, NONE, NONE, NONE, NONE]);
         }
         if (mode == 1) {
             vm.prank(factory);
             pool.setPause(0);
         }
         if (mode == 2) provider.setBroken(false);
+    }
+
+    /// @dev Half the time, passes the wait without a price, so unpriced force closes scale as well as wait.
+    function _maybePassTheWaitWithoutAPrice(uint256 ready, uint256 waitSeed) internal {
+        if (waitSeed % 2 == 1) return;
+        uint256 scalesFrom = ready + VaultPricing.NO_PRICE_WAIT_SECONDS;
+        if (block.timestamp < scalesFrom) vm.warp(scalesFrom);
     }
 
     // ---------------------------------------------------------------- the market
@@ -431,9 +447,8 @@ contract MetricVaultHandler is Test {
 
     function _lowValue() internal returns (uint256 value, uint256 shares) {
         (uint160 sqrtBidX96, uint256 idle,) = _idleValue();
-        (DebtTotals memory longDebts, DebtTotals memory shortDebts) = vault.debtsOf(vaultId);
-        value =
-            idle + VaultMath.debtValueLower(longDebts, sqrtBidX96) + VaultMath.debtValueLower(shortDebts, sqrtBidX96);
+        (uint256 debtValue,) = vault.debtValuesAt(vaultId, sqrtBidX96);
+        value = idle + debtValue;
         shares = vault.totalSharesOf(vaultId);
     }
 

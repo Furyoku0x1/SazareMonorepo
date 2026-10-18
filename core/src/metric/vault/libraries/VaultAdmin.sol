@@ -80,6 +80,26 @@ library VaultAdmin {
         emit IMetricLendingVault.ProtocolPaid(vaultId, feeVault, feeVault0, feeVault1);
     }
 
+    /// @notice Pays the caller the close payouts in one token that a transfer refused, to the caller's own address
+    /// only, so no one routes a blocklisted owner's funds elsewhere (audit finding X-5). One token at a time, so a token
+    /// that still refuses cannot hold back the other. Reverts while the token refuses.
+    function claimPayout(VaultStore storage store, uint256 vaultId, uint256 tokenIndex)
+        external
+        returns (uint256 amount)
+    {
+        if (vaultId == 0) revert IMetricLendingVault.UnknownVault();
+        if (vaultId > store.vaultCount) revert IMetricLendingVault.UnknownVault();
+        if (tokenIndex > 1) revert IMetricLendingVault.InvalidParameters();
+        Vault storage vault = store.vaults[vaultId];
+        amount = vault.unclaimed[msg.sender][tokenIndex];
+        if (amount == 0) revert IMetricLendingVault.ZeroAmount();
+        vault.unclaimed[msg.sender][tokenIndex] = 0;
+        if (tokenIndex == 0) vault.ledger.unclaimed0 -= amount.toUint128();
+        else vault.ledger.unclaimed1 -= amount.toUint128();
+        VaultLedger.push(vault, tokenIndex, msg.sender, amount);
+        emit IMetricLendingVault.PayoutClaimed(vaultId, msg.sender, tokenIndex, amount);
+    }
+
     function _validate(VaultParameters calldata parameters) private pure {
         if (parameters.token0 == address(0)) revert IMetricLendingVault.InvalidParameters();
         if (parameters.token1 == address(0)) revert IMetricLendingVault.InvalidParameters();

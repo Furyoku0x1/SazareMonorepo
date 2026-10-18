@@ -17,12 +17,17 @@ library MetricState {
         int16 binIndex;
         uint104 positionInBin;
         int24 binDistanceE6;
+        /// @dev The pool-wide notional fee, in 1e-8; Metric's factory may change it.
+        uint24 notionalFeeE8;
     }
 
     struct Bin {
         uint104 balance0Scaled;
         uint104 balance1Scaled;
         uint16 lengthE6;
+        /// @dev The bin's additional fees, in 1e-6; Metric's factory may change them.
+        uint16 addFeeBuyE6;
+        uint16 addFeeSellE6;
         uint256 totalShares;
     }
 
@@ -37,9 +42,10 @@ library MetricState {
         current.binIndex = int16(binIndexWide);
         current.positionInBin = uint104((packed >> 24) & type(uint104).max);
         current.binDistanceE6 = int24(distanceWide);
+        current.notionalFeeE8 = uint24((packed >> 176) & 0xFFFFFF);
     }
 
-    /// @notice A bin's balances, length and total shares, in one storage read call.
+    /// @notice A bin's balances, length, additional fees and total shares, in one storage read call.
     function bin(address pool, int16 binIndex) internal view returns (Bin memory state) {
         bytes32[] memory slots = new bytes32[](2);
         slots[0] = _slot(int256(binIndex), MAPPING_BIN_STATES);
@@ -49,6 +55,8 @@ library MetricState {
         state.balance0Scaled = uint104(packed & type(uint104).max);
         state.balance1Scaled = uint104((packed >> 104) & type(uint104).max);
         state.lengthE6 = uint16((packed >> 208) & 0xFFFF);
+        state.addFeeBuyE6 = uint16((packed >> 224) & 0xFFFF);
+        state.addFeeSellE6 = uint16((packed >> 240) & 0xFFFF);
         state.totalShares = uint256(words[1]);
     }
 

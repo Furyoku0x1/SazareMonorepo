@@ -13,6 +13,14 @@ import {VaultMath} from "./VaultMath.sol";
 /// Nothing else in the vault has a price in scope.
 library VaultPricing {
     uint256 internal constant BPS = 10_000;
+    /// @dev Native units a shortfall swap may pay beyond its cost at the edge: Metric rounds the input up in scaled
+    /// units and again to native units, so even a deep pool can charge one or two more than the edge price (Sol's
+    /// verification finding). Without them, a tiny deficit could fail to fill on every retry.
+    uint256 internal constant ROUNDING_UNITS = 2;
+    /// @dev How long past its grace period a force close waits for its pool to price again before scaling the reserves
+    /// without a price (the owner's decision): pauses are usually brief, and scaling hands lenders whichever tokens the
+    /// reserves hold rather than the debt's holdings at the bid, at a loss to one side or the other.
+    uint256 internal constant NO_PRICE_WAIT_SECONDS = 30 days;
     /// @dev Bands are kept inside the ranges' price bounds, so every valuation stays in VaultMath's exact domain.
     uint160 internal constant MIN_SQRT_X96 = 18446744073709551616; // 2^64, tick -443636
     uint160 internal constant MAX_SQRT_X96 = 340282366920938463463374607431768211455; // just under 2^128
@@ -32,11 +40,22 @@ library VaultPricing {
         if (sqrtAskX96 > MAX_SQRT_X96) revert IMetricLendingVault.InvalidBand();
     }
 
-    /// @notice The band, or none if it cannot be read or fails the bounds `band` enforces.
-    function tryBand(Vault storage vault) internal returns (bool ok, uint160 sqrtBidX96, uint160 sqrtAskX96) {
+    /// @notice Reverts while a force close on a pool without a price must still wait for one: until
+    /// `NO_PRICE_WAIT_SECONDS` past the position's grace period.
+    function requireNoPriceWaitOver(uint256 flaggedAt, uint256 graceSeconds) internal view {
+        if (block.timestamp < flaggedAt + graceSeconds + NO_PRICE_WAIT_SECONDS) {
+            revert IMetricLendingVault.PriceUnavailable();
+        }
+    }
+
+    /// @notice The band a close prices at, or none if it cannot be read or fails the bounds `band` enforces. For a pool,
+    /// it leaves out the fees Metric's factory may change, so the pool admin cannot move a force close or a profit
+    /// share (audit finding W-1).
+    function tryCloseBand(Vault storage vault) internal returns (bool ok, uint160 sqrtBidX96, uint160 sqrtAskX96) {
         address pool = vault.parameters.pool;
         if (pool != address(0)) {
-            (ok, sqrtBidX96, sqrtAskX96) = MetricPrice.tryBand(pool, vault.venue.scale0, vault.venue.scale1);
+            (ok, sqrtBidX96, sqrtAskX96) =
+                MetricPrice.tryBandWithoutAdminFees(pool, vault.venue.scale0, vault.venue.scale1);
         } else {
             (ok, sqrtBidX96, sqrtAskX96) = _trySourceBand(vault);
         }
@@ -48,26 +67,47 @@ library VaultPricing {
     }
 
     /// @notice The most a force close may pay through the pool for `deficit` of the token it lacks: its cost at the
-    /// band's far edge plus the vault's slippage allowance, and never more than `surplus`. Zero when the band cannot
-    /// be read, so the caller scales instead. Bounding it keeps a trade just before the close from taking the
-    /// trader's surplus (audit finding B3).
-    function shortfallBudget(Vault storage vault, bool buyToken0, uint256 deficit, uint256 surplus)
-        internal
-        returns (uint256)
-    {
-        (bool ok, uint160 sqrtBidX96, uint160 sqrtAskX96) = tryBand(vault);
+    /// close band's far edge plus the vault's slippage allowance, and never more than `surplus`. Bounding it keeps a
+    /// trade just before the close from taking the trader's surplus (audit finding B3). Zero, so the caller scales
+    /// instead, only where scaling costs the trader nothing they would otherwise keep: the band cannot be read, the
+    /// deficit is too large for Metric's signed amount (C4), or what the surplus would leave after buying the deficit
+    /// at the edge is within Metric's rounding or no more than `arrearsInSurplus`, the arrears the close then collects
+    /// from it, in the surplus token as the close converts them, so the trader keeps nothing either way (W-3).
+    /// Otherwise an unfilled swap waits for the pool rather than scale (Sol-2-1), and since arrears keep growing, a
+    /// wait ends by itself.
+    function shortfallBudget(
+        Vault storage vault,
+        bool buyToken0,
+        uint256 deficit,
+        uint256 surplus,
+        uint256 arrearsInSurplus
+    ) internal returns (uint256) {
+        if (deficit > uint256(uint128(type(int128).max))) return 0;
+        (bool ok, uint160 sqrtBidX96, uint160 sqrtAskX96) = tryCloseBand(vault);
         if (!ok) return 0;
         uint256 atEdge = buyToken0 ? VaultMath.priceTimes(deficit, sqrtAskX96, true) : token0At(sqrtBidX96, deficit);
-        uint256 budget = FullMath.mulDiv(atEdge, BPS + vault.parameters.forceCloseSlippageBps, BPS);
+        if (!_leavesTraderMore(surplus, atEdge, arrearsInSurplus)) return 0;
+        uint256 budget = FullMath.mulDiv(atEdge, BPS + vault.parameters.forceCloseSlippageBps, BPS) + ROUNDING_UNITS;
         return budget < surplus ? budget : surplus;
     }
 
-    /// @notice The band's bid for valuing a close's leftovers, or none if the band cannot be read. A close must not
-    /// depend on a price, so the caller falls back to the strike.
-    function tryBid(Vault storage vault) internal returns (bool ok, uint160 sqrtBidX96) {
+    /// @dev Whether buying the deficit at the edge would leave the trader more of the surplus than Metric's rounding
+    /// and more than the arrears the close then takes from it. Both are in the surplus token: valuing the kept token0
+    /// at the bid while the close takes arrears in token0 at the strike would scale away what the trader keeps (Sol).
+    function _leavesTraderMore(uint256 surplus, uint256 atEdge, uint256 arrearsInSurplus) private pure returns (bool) {
+        if (surplus < atEdge + ROUNDING_UNITS) return false;
+        return surplus - atEdge > arrearsInSurplus;
+    }
+
+    /// @notice The bid of `tryCloseBand`, for a close's targets and for valuing its leftovers, or none if it cannot be
+    /// read. A close must not depend on a price, so the caller falls back to the strike or to scaling.
+    function tryCloseBid(Vault storage vault) internal returns (bool ok, uint160 sqrtBidX96) {
         address pool = vault.parameters.pool;
-        if (pool != address(0)) (ok, sqrtBidX96) = MetricPrice.tryBid(pool, vault.venue.scale0, vault.venue.scale1);
-        else (ok, sqrtBidX96) = _trySourceBid(vault);
+        if (pool != address(0)) {
+            (ok, sqrtBidX96) = MetricPrice.tryBidWithoutAdminFees(pool, vault.venue.scale0, vault.venue.scale1);
+        } else {
+            (ok, sqrtBidX96) = _trySourceBid(vault);
+        }
         if (!ok) return (false, 0);
         // The bounds `band` enforces: a zero bid would divide by zero where token0 is priced from it.
         if (sqrtBidX96 < MIN_SQRT_X96) return (false, 0);

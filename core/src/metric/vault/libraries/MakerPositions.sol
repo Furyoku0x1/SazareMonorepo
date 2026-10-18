@@ -90,6 +90,22 @@ library MakerPositions {
         emit IMetricLendingVault.CollateralAdded(positionId, amount);
     }
 
+    /// @notice Adds token0 to the reserves, so a position that owes token0 can repay in kind with no swap (audit
+    /// finding W-4). The basis counts it at the close band's bid, the price a close values returned token0 at, so a
+    /// round trip leaves the profit share exactly where it was (Sol).
+    function addCollateral0(VaultStore storage store, uint256 positionId, uint256 amount) external {
+        MakerPosition storage position = _owned(store, positionId);
+        if (amount == 0) revert IMetricLendingVault.ZeroAmount();
+        Vault storage vault = store.vaults[position.vaultId];
+        (bool priced, uint160 sqrtBidX96) = VaultPricing.tryCloseBid(vault);
+        if (!priced) revert IMetricLendingVault.InvalidBand();
+        VaultLedger.pull(vault, 0, msg.sender, amount);
+        position.reserve0 += amount.toUint128();
+        vault.ledger.reserve0 += amount.toUint128();
+        position.basis += VaultMath.priceTimes(amount, sqrtBidX96, false).toUint128();
+        emit IMetricLendingVault.Collateral0Added(positionId, amount);
+    }
+
     /// @notice Settles the position's premium from its escrow if the escrow covers it; otherwise does nothing.
     function settle(VaultStore storage store, uint256 positionId) external returns (bool) {
         MakerPosition storage position = store.makerPositions[positionId];

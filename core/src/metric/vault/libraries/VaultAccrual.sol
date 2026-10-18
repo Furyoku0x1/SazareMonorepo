@@ -47,8 +47,8 @@ library VaultAccrual {
         CurvePair storage curves = vault.curves[vault.curves.length - 1];
         uint256 outstanding0 = vault.accrual.outstanding0;
         uint256 outstanding1 = vault.accrual.outstanding1;
-        rate0Wad = VaultMath.rateWad(curves.token0, outstanding0, outstanding0 + idle0(vault));
-        rate1Wad = VaultMath.rateWad(curves.token1, outstanding1, outstanding1 + idle1(vault));
+        rate0Wad = VaultMath.rateWad(curves.token0, outstanding0, outstanding0 + rateIdle0(vault));
+        rate1Wad = VaultMath.rateWad(curves.token1, outstanding1, outstanding1 + rateIdle1(vault));
     }
 
     /// @notice Lenders' idle token0: the buffer plus the Metric position at its last read.
@@ -58,6 +58,16 @@ library VaultAccrual {
 
     function idle1(Vault storage vault) internal view returns (uint256) {
         return uint256(vault.ledger.buffer1) + vault.venue.holdings1;
+    }
+
+    /// @notice Lenders' idle token0 as premium rates and the utilization ceiling see it: the buffer plus the Metric
+    /// position anchored at the reference, which no swap moves (audit finding X-3). Without a pool, `idle0`.
+    function rateIdle0(Vault storage vault) internal view returns (uint256) {
+        return uint256(vault.ledger.buffer0) + vault.venue.rateHoldings0;
+    }
+
+    function rateIdle1(Vault storage vault) internal view returns (uint256) {
+        return uint256(vault.ledger.buffer1) + vault.venue.rateHoldings1;
     }
 
     /// @notice What the position owes since its snapshots, at the vault's current indices, including the fraction the
@@ -106,6 +116,19 @@ library VaultAccrual {
         vault.stream.vestingEnd1 = uint40(block.timestamp + vault.parameters.vestSeconds);
     }
 
+    /// @notice Sends income still vesting to the treasury once the last lender has left, as the maker book does (D22):
+    /// it would otherwise wait for the next deposit, which pays for it, and vest partly to the virtual shares, which no
+    /// one owns.
+    function forfeitToTreasury(Vault storage vault) internal {
+        // Only once nothing is lent: open debts' repayments and income still belong to the vault's lenders.
+        if (vault.longDebts.liquidity != 0) return;
+        if (vault.shortDebts.liquidity != 0) return;
+        vault.ledger.treasury0 += vault.stream.remaining0;
+        vault.ledger.treasury1 += vault.stream.remaining1;
+        vault.stream.remaining0 = 0;
+        vault.stream.remaining1 = 0;
+    }
+
     /// @notice Releases both streams' vested parts into the lenders' buffer. With no lenders they wait: each vesting
     /// end moves out by the elapsed time.
     function release(Vault storage vault, uint256 elapsedSeconds) internal {
@@ -140,8 +163,8 @@ library VaultAccrual {
         uint256 fromTime = vault.accrual.updatedAt;
         uint256 outstanding0 = vault.accrual.outstanding0;
         uint256 outstanding1 = vault.accrual.outstanding1;
-        uint256 supplied0 = outstanding0 + idle0(vault);
-        uint256 supplied1 = outstanding1 + idle1(vault);
+        uint256 supplied0 = outstanding0 + rateIdle0(vault);
+        uint256 supplied1 = outstanding1 + rateIdle1(vault);
         uint256 growth0Ray;
         uint256 growth1Ray;
         // versions <= MAX_CURVE_VERSIONS

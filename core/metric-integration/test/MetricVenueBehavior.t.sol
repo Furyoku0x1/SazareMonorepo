@@ -5,9 +5,11 @@ import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {MetricOmmPoolDeployer} from "metric/MetricOmmPoolDeployer.sol";
 import {IMetricOmmPoolActions} from "metric/interfaces/IMetricOmmPool/IMetricOmmPoolActions.sol";
-import {OpenRequest, Position, VaultParameters, Venue} from "vault/VaultTypes.sol";
+import {CloseRequest, Ledger, OpenRequest, Position, Stream, VaultParameters, Venue} from "vault/VaultTypes.sol";
 import {IMetricLendingVault} from "vault/interfaces/IMetricLendingVault.sol";
+import {MetricPrice} from "vault/libraries/MetricPrice.sol";
 import {MetricState} from "vault/libraries/MetricState.sol";
+import {VaultMath} from "vault/libraries/VaultMath.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {MetricOmmPool} from "metric/MetricOmmPool.sol";
 import {IMetricOmmSwapCallback} from "metric/interfaces/callbacks/IMetricOmmSwapCallback.sol";
@@ -74,19 +76,17 @@ contract MetricVenueBehaviorTest is MetricFixture {
 
     // ---------------------------------------------------------------- re-centering
 
-    /// @dev After outside trading pushes the cursor well past the window's center, re-centering moves the window
-    /// toward it and keeps every token of the vault's position inside the window.
-    function test_recenter_followsTheCursor() public {
+    /// @dev Audit finding X-1: outside trading that pushes the cursor well past the window's center must not drag the
+    /// window, or the pusher buys the vault's re-placed tokens back at a discount. Re-centering leaves it in place.
+    function test_recenter_doesNotFollowAPushedCursor() public {
         deposit(lender, 20e18, 40_000e6);
         Venue memory before = vault.venueOf(vaultId);
         // Buying 60 base walks the cursor up through six of the outsider's ten-base bins, and the vault's.
         outsider.swap(pool, false, int128(int256(250_000e6)));
         int16 activeBin = MetricState.cursor(address(pool)).binIndex;
         assertGt(activeBin, before.lowestBin + 8 + 3, "cursor beyond the re-centering distance");
-        assertTrue(vault.recenter(vaultId), "window moved");
-        Venue memory afterwards = vault.venueOf(vaultId);
-        assertGt(afterwards.lowestBin, before.lowestBin, "window moved up");
-        assertLe(afterwards.lowestBin - before.lowestBin, 4, "at most four bins per call");
+        assertFalse(vault.recenter(vaultId), "the window holds still");
+        assertEq(vault.venueOf(vaultId).lowestBin, before.lowestBin, "unchanged");
         _assertAllInsideWindow();
         assertLedger();
     }
@@ -154,9 +154,10 @@ contract MetricVenueBehaviorTest is MetricFixture {
     }
 
     /// @dev Audit finding B3: a force close's shortfall swap could spend the trader's whole surplus, so a trade just
-    /// before it could push its price far past the band at the trader's expense. Now it pays at most 1% past the
-    /// band's edge; with the pool pushed further, the close scales instead and swaps nothing.
-    function test_forceClose_doesNotPayAPushedPrice() public {
+    /// before it could push its price far past the band at the trader's expense. It pays at most 1% past the band's
+    /// edge; with the pool pushed further, the close waits rather than scale at the trader's loss (Sol-2-1), and runs
+    /// once the pool is back.
+    function test_forceClose_waitsRatherThanPayAPushedPrice() public {
         deposit(lender, 0, 100_000e6);
         OpenRequest memory request = _longRequest(10_000e6, 300e6);
         request.entryAmountIn = 10_200e6;
@@ -169,13 +170,101 @@ contract MetricVenueBehaviorTest is MetricFixture {
         vm.warp(block.timestamp + 1 days + 1);
         // A trade just before the close sells base, pushing the pool's base price about 2% below the band: past the
         // 1% allowance, but within what the trader's surplus could pay.
+        uint256 baseBefore = base.balanceOf(address(outsider));
         outsider.swap(pool, true, int128(int256(100e18)));
+        Position memory before = vault.positionOf(positionId);
+        vm.prank(closer);
+        vm.expectRevert(IMetricLendingVault.ShortfallUnfilled.selector);
+        vault.forceClose(positionId);
+        assertEq(vault.positionOf(positionId).reserve0, before.reserve0, "nothing swapped or scaled");
+        // The pool comes back: the trade is reversed.
+        outsider.swap(pool, false, -int128(int256(baseBefore - base.balanceOf(address(outsider)))));
         vm.recordLogs();
         vm.prank(closer);
         vault.forceClose(positionId);
-        assertEq(_poolSwaps(vm.getRecordedLogs()), 0, "no swap at the pushed price");
-        assertEq(vault.positionOf(positionId).owner, address(0), "closed by scaling");
+        assertEq(_poolSwaps(vm.getRecordedLogs()), 1, "bought the shortfall");
+        assertEq(vault.positionOf(positionId).owner, address(0), "closed");
         assertLedger();
+    }
+
+    /// @dev Fix-review finding: the passive target added a unit of each token even where the range holds none, so a
+    /// position the price had carried past its range, holding only the token its debt needs, still had to buy a unit
+    /// of the other and waited on a paused pool. A long that spent all its quote, with the price below its range,
+    /// now closes without a swap.
+    function test_forceClose_pastItsRangeNeedsNoSwap() public {
+        deposit(lender, 100e18, 100_000e6);
+        OpenRequest memory request = _longRequest(10_000e6, 300e6);
+        (uint160 sqrtBidX96, uint160 sqrtAskX96) = MetricPrice.band(address(pool), 1, 1e12);
+        (, uint256 release1) = VaultMath.releaseAcrossBand(
+            request.liquidity,
+            TickMath.getSqrtPriceAtTick(request.tickLower),
+            TickMath.getSqrtPriceAtTick(request.tickUpper),
+            sqrtBidX96,
+            sqrtAskX96
+        );
+        request.entryAmountIn = release1 + request.collateral;
+        request.escrow = 1e6;
+        vm.prank(trader);
+        uint256 positionId = vault.open(request);
+        assertEq(vault.positionOf(positionId).reserve1, 0, "all quote spent");
+        // Below the range: the debt is all base, which the reserves hold.
+        provider.set(uint128(1_940 * Q64), HALF_SPREAD_E5);
+        vm.warp(block.timestamp + 120 days);
+        vault.flag(positionId);
+        vm.warp(block.timestamp + 1 days + 1);
+        pool.setPause(1);
+        vm.recordLogs();
+        vm.prank(closer);
+        vault.forceClose(positionId);
+        assertEq(_poolSwaps(vm.getRecordedLogs()), 0, "no swap needed");
+        assertEq(vault.positionOf(positionId).owner, address(0), "closed while paused");
+        assertLedger();
+    }
+
+    /// @dev Audit finding Sol-1-2: a force close valued its base at the strike and took the reward first, so an owner
+    /// force closing their own winning position paid no profit share. It now measures at the bid, before the reward,
+    /// and charges what a normal close charges.
+    function test_forceClose_byItsOwnerPaysTheProfitShare() public {
+        deposit(lender, 100e18, 100_000e6);
+        int24 lower = PRICE_TICK + 100;
+        int24 upper = PRICE_TICK + 200;
+        OpenRequest memory request = _longRequest(10_000e6, 10_010e6);
+        request.isLong = false;
+        request.tickLower = lower;
+        request.tickUpper = upper;
+        request.liquidity = uint128(
+            uint256(10_000e6) * (1 << 96) / (TickMath.getSqrtPriceAtTick(upper) - TickMath.getSqrtPriceAtTick(lower))
+        );
+        request.escrow = 1;
+        vm.prank(trader);
+        uint256 positionId = vault.open(request);
+        // The short holds the base it borrowed and enough quote to repay above the range: a winner as the price rises.
+        provider.set(uint128(2_400 * Q64), HALF_SPREAD_E5);
+        vm.warp(block.timestamp + 30 days);
+        vault.flag(positionId);
+        vm.warp(block.timestamp + 1 days + 1);
+        uint256 snapshot = vm.snapshotState();
+        (uint256 before0, uint256 before1) = _fees();
+        uint128 maximum1 = vault.positionOf(positionId).maximum1;
+        vm.prank(trader);
+        vault.close(CloseRequest({positionId: positionId, fractionWad: 1e18, repay0: 0, repay1: maximum1}));
+        (uint256 normal0, uint256 normal1) = _fees();
+        vm.revertToState(snapshot);
+        vm.prank(trader);
+        vault.forceClose(positionId);
+        (uint256 forced0, uint256 forced1) = _fees();
+        assertGt(normal0 - before0, 0, "a normal close takes a share of the base");
+        assertApproxEqAbs(forced0 - before0, normal0 - before0, 1e9, "the same share in base");
+        assertApproxEqAbs(forced1 - before1, normal1 - before1, 2, "the same share in quote");
+        assertLedger();
+    }
+
+    /// @dev Everything the vault owes the treasury, the fee vault and its lenders' streams, per token.
+    function _fees() internal view returns (uint256 fees0, uint256 fees1) {
+        Ledger memory ledger = vault.ledgerOf(vaultId);
+        Stream memory stream = vault.streamOf(vaultId);
+        fees0 = uint256(ledger.treasury0) + ledger.feeVault0 + stream.remaining0;
+        fees1 = uint256(ledger.treasury1) + ledger.feeVault1 + stream.remaining1;
     }
 
     /// @dev How many swaps the pool emitted. A close's own placement adds liquidity, which is not a swap.

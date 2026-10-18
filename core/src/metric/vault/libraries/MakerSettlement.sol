@@ -10,7 +10,7 @@ import {VaultMath} from "./VaultMath.sol";
 
 /// @notice Premium and income flows between a maker position and its legs' buckets, shared by opening and closing:
 /// collecting what legs owe, arrears from reserves, the profit share, and the shortfall that makes a position
-/// delinquent. Maker flows never touch the passive vault's income, funding or debt totals.
+/// delinquent. Maker flows never touch the passive vault's income or debt totals.
 library MakerSettlement {
     using SafeCast for uint256;
 

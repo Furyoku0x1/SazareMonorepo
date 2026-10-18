@@ -12,7 +12,9 @@ import {
     MakerPosition
 } from "vault/MakerTypes.sol";
 import {IMakerBook} from "vault/interfaces/IMakerBook.sol";
+import {IMetricLendingVault} from "vault/interfaces/IMetricLendingVault.sol";
 import {MakerMath} from "vault/libraries/MakerMath.sol";
+import {VaultPricing} from "vault/libraries/VaultPricing.sol";
 import {Curve, VaultMath} from "vault/libraries/VaultMath.sol";
 import {MetricFixture} from "./utils/MetricFixture.sol";
 
@@ -22,7 +24,7 @@ contract MakerFillsTest is MetricFixture {
     uint24 internal constant LEVEL_TICKS = 100;
     /// @dev About 1,943–1,962: below the 2,000 price.
     int24 internal constant BUY_LEVEL = -2_006;
-    /// @dev About 2,038–2,059: above it.
+    /// @dev About 2,105–2,126: above it.
     int24 internal constant SELL_LEVEL = -1_998;
 
     address internal makerA = makeAddr("makerA");
@@ -180,6 +182,47 @@ contract MakerFillsTest is MetricFixture {
         assertLedger();
     }
 
+    /// @dev A retired generation lends nothing new: a leg naming it is refused, and the level's next generation lends.
+    function test_openMaker_refusesARetiredBucket() public {
+        (uint256 bucketId,) = _deposit(BUY_LEVEL, true, 50_000e6);
+        _setPrice(1_900);
+        vm.prank(keeper);
+        vault.fillBucket(vaultId, bucketId);
+        _setPrice(2_000);
+        uint128 liquidity = _liquidityOn(BUY_LEVEL, 1_000e6);
+        vm.expectRevert(IMakerBook.BucketRetired.selector);
+        _openLong(bucketId, liquidity, 50e6, 2_000e6);
+        (uint256 nextBucketId,) = _deposit(BUY_LEVEL, true, 50_000e6);
+        assertTrue(nextBucketId != bucketId, "next generation");
+        _openLong(nextBucketId, liquidity, 50e6, 2_000e6);
+        assertLedger();
+    }
+
+    /// @dev Audit finding X-4: a fill converts a bucket's waiting token, and its rate used to count only that token as
+    /// supply, so legs still out jumped to full utilization (1.24% to 1,205% a year). A retired bucket counts the
+    /// converted tokens too: its legs' rate barely moves at the fill.
+    function test_fill_doesNotRaiseTheRateOfLegsStillOut() public {
+        (uint256 bucketId,) = _deposit(BUY_LEVEL, true, 50_000e6);
+        uint256 positionId = _openLong(bucketId, _liquidityOn(BUY_LEVEL, 10_000e6), 3_000e6, 2_000e6);
+        uint256 beforeFill = _indexGrowthOverADay(bucketId, positionId);
+        _setPrice(1_900);
+        vm.prank(keeper);
+        vault.fillBucket(vaultId, bucketId);
+        assertTrue(vault.bucketOf(vaultId, bucketId).retired, "retired");
+        uint256 afterFill = _indexGrowthOverADay(bucketId, positionId);
+        assertGt(beforeFill, 0, "the leg pays the curve");
+        assertLe(afterFill, beforeFill * 2, "the fill barely moves the rate");
+        assertLedger();
+    }
+
+    function _indexGrowthOverADay(uint256 bucketId, uint256 positionId) internal returns (uint256) {
+        vault.settleMaker(positionId);
+        uint256 indexBefore = vault.bucketOf(vaultId, bucketId).rateIndexRay;
+        vm.warp(block.timestamp + 1 days);
+        vault.settleMaker(positionId);
+        return vault.bucketOf(vaultId, bucketId).rateIndexRay - indexBefore;
+    }
+
     // ---------------------------------------------------------------- force close through the pool
 
     /// @dev A two-leg long holding only USD, after the price falls through both levels, repays by buying exactly the
@@ -195,7 +238,8 @@ contract MakerFillsTest is MetricFixture {
         request.legs = new LegRequest[](2);
         request.legs[0] = LegRequest({bucketId: ids[0], liquidity: _liquidityOf(ids[0], 5_000e6)});
         request.legs[1] = LegRequest({bucketId: ids[1], liquidity: _liquidityOf(ids[1], 5_000e6)});
-        request.collateral = 300e6;
+        // Enough collateral that the trader keeps more than the arrears, so the close buys rather than scale (W-3).
+        request.collateral = 3_000e6;
         // Two days of these levels' 250% floor prepaid and about a day more: the open's minimum, soon outrun.
         request.escrow = 220e6;
         request.maximumRateBps = type(uint256).max;
@@ -213,6 +257,88 @@ contract MakerFillsTest is MetricFixture {
         assertEq(vault.bucketOf(vaultId, ids[0]).lent, 0);
         assertEq(vault.bucketOf(vaultId, ids[1]).lent, 0);
         assertGt(vault.bucketOf(vaultId, ids[0]).balance0, 0, "repaid in base");
+        assertLedger();
+    }
+
+    /// @dev Audit finding Sol-2-1: while swaps are paused the quote still works, so scaling would hand the trader's
+    /// surplus to makers. The force close waits for the pool, and buys its shortfall once swaps resume.
+    function test_forceCloseMaker_waitsWhileMetricIsPaused() public {
+        (uint256 bucketId,) = _deposit(BUY_LEVEL, true, 30_000e6);
+        // Enough collateral that the trader keeps more than the arrears, so waiting protects them (W-3).
+        uint256 positionId = _openLong(bucketId, _liquidityOn(BUY_LEVEL, 10_000e6), 3_000e6, 220e6);
+        _setPrice(1_900);
+        vm.warp(block.timestamp + 20 days);
+        vault.flagMaker(positionId);
+        vm.warp(block.timestamp + 1 hours + 1);
+        pool.setPause(1);
+        vm.prank(closer);
+        vm.expectRevert(IMetricLendingVault.ShortfallUnfilled.selector);
+        vault.forceCloseMaker(positionId);
+        pool.setPause(0);
+        uint256 poolBaseBefore = base.balanceOf(address(pool));
+        vm.prank(closer);
+        vault.forceCloseMaker(positionId);
+        assertLt(base.balanceOf(address(pool)), poolBaseBefore, "bought base once swaps resumed");
+        assertEq(vault.makerPositionOf(positionId).owner, address(0), "closed");
+        assertLedger();
+    }
+
+    /// @dev The owner's decision on a pool without a price, on the maker book: the close waits `NO_PRICE_WAIT_SECONDS`
+    /// past the book's grace period for the price to return, then scales the reserves without swapping.
+    function test_forceCloseMaker_waitsForAPriceThenScales() public {
+        (uint256 bucketId,) = _deposit(BUY_LEVEL, true, 30_000e6);
+        uint256 positionId = _openLong(bucketId, _liquidityOn(BUY_LEVEL, 10_000e6), 3_000e6, 220e6);
+        _setPrice(1_900);
+        vm.warp(block.timestamp + 20 days);
+        vault.flagMaker(positionId);
+        uint256 scalesFrom = block.timestamp + 1 hours + VaultPricing.NO_PRICE_WAIT_SECONDS;
+        provider.setBroken(true);
+        vm.warp(scalesFrom - 1);
+        vm.prank(closer);
+        vm.expectRevert(IMetricLendingVault.PriceUnavailable.selector);
+        vault.forceCloseMaker(positionId);
+        vm.warp(scalesFrom);
+        uint256 poolBaseBefore = base.balanceOf(address(pool));
+        vm.prank(closer);
+        vault.forceCloseMaker(positionId);
+        assertEq(base.balanceOf(address(pool)), poolBaseBefore, "scaled without a swap");
+        assertEq(vault.makerPositionOf(positionId).owner, address(0), "closed");
+        assertLedger();
+    }
+
+    /// @dev Audit finding Sol-1-2 on the maker book: an owner force closing their own winning position paid no profit
+    /// share. A short holding its borrowed base and the quote to repay, after the price rises past its level, now pays
+    /// the share a normal close pays.
+    function test_forceCloseMaker_byItsOwnerPaysTheProfitShare() public {
+        (uint256 bucketId,) = _deposit(SELL_LEVEL, false, 20e18);
+        MakerOpenRequest memory request;
+        request.vaultId = vaultId;
+        request.isLong = false;
+        request.legs = new LegRequest[](1);
+        request.legs[0] = LegRequest({bucketId: bucketId, liquidity: _liquidityOn(SELL_LEVEL, 10_000e6)});
+        request.collateral = 10_010e6;
+        request.escrow = 220e6;
+        request.maximumRateBps = type(uint256).max;
+        vm.prank(trader);
+        uint256 positionId = vault.openMaker(request);
+        _setPrice(2_400);
+        vm.warp(block.timestamp + 20 days);
+        vault.flagMaker(positionId);
+        vm.warp(block.timestamp + 1 hours + 1);
+        uint256 snapshot = vm.snapshotState();
+        uint256 before = _protocolFees0();
+        uint256[] memory repay0 = new uint256[](1);
+        uint256[] memory repay1 = new uint256[](1);
+        repay1[0] = vault.legOf(positionId, 0).maximum1;
+        vm.prank(trader);
+        vault.closeMaker(_closeRequest(positionId, repay0, repay1));
+        uint256 normal = _protocolFees0() - before;
+        vm.revertToState(snapshot);
+        vm.prank(trader);
+        vault.forceCloseMaker(positionId);
+        uint256 forced = _protocolFees0() - before;
+        assertGt(normal, 0, "a normal close takes a share of the base");
+        assertApproxEqAbs(forced, normal, 1e9, "the same share");
         assertLedger();
     }
 
@@ -273,6 +399,11 @@ contract MakerFillsTest is MetricFixture {
         rows[0] = FloorRow({minimumDistanceBps: 1_500, rateBps: 5_000});
         rows[1] = FloorRow({minimumDistanceBps: 400, rateBps: 14_000});
         rows[2] = FloorRow({minimumDistanceBps: 0, rateBps: 25_000});
+    }
+
+    /// @dev The treasury's and fee vault's base: their parts of profit shares taken in base.
+    function _protocolFees0() internal view returns (uint256) {
+        return uint256(vault.ledgerOf(vaultId).treasury0) + vault.ledgerOf(vaultId).feeVault0;
     }
 
     function _deposit(int24 level, bool isBuy, uint256 amount) internal returns (uint256 bucketId, uint256 shares) {

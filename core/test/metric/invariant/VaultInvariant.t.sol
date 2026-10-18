@@ -22,6 +22,12 @@ contract VaultInvariantTest is VaultFixture {
         uint256 released1;
         DebtTotals longTerms;
         DebtTotals shortTerms;
+        /// @dev The open positions, and their holdings summed one by one at the bid and the ask, each rounded down.
+        uint256 count;
+        uint256 bid0;
+        uint256 bid1;
+        uint256 ask0;
+        uint256 ask1;
     }
 
     TestToken internal secondBase;
@@ -108,7 +114,7 @@ contract VaultInvariantTest is VaultFixture {
         _assertPositionSums(someVaultId, sums);
         _assertDebts(someVaultId, sums);
         _assertShares(someVaultId);
-        _assertValueBounds(someVaultId);
+        _assertValueBounds(someVaultId, sums);
     }
 
     function _assertPositionSums(uint256 someVaultId, PositionSums memory sums) private view {
@@ -130,10 +136,6 @@ contract VaultInvariantTest is VaultFixture {
 
     function _assertTotals(DebtTotals memory totals, DebtTotals memory terms, string memory side) private pure {
         assertEq(totals.liquidity, terms.liquidity, string.concat(side, " debts: liquidity"));
-        assertEq(totals.virtual0, terms.virtual0, string.concat(side, " debts: virtual0"));
-        assertEq(totals.virtual1, terms.virtual1, string.concat(side, " debts: virtual1"));
-        assertEq(totals.maximum0, terms.maximum0, string.concat(side, " debts: maximum0"));
-        assertEq(totals.maximum1, terms.maximum1, string.concat(side, " debts: maximum1"));
     }
 
     function _assertShares(uint256 someVaultId) private view {
@@ -145,27 +147,26 @@ contract VaultInvariantTest is VaultFixture {
         assertEq(vault.totalSharesOf(someVaultId), lenderShares, "total shares vs lenders' shares");
     }
 
-    /// @dev Deposits price debts at the upper bound and withdrawals at the lower; they must never cross.
-    function _assertValueBounds(uint256 someVaultId) private view {
-        (DebtTotals memory longDebts, DebtTotals memory shortDebts) = vault.debtsOf(someVaultId);
+    /// @dev Withdrawals value debts at the bid and deposits at the ask with the debt tree (audit finding H1): each must
+    /// match the open positions' holdings summed one by one, the low value below them and the high above, within the
+    /// tree's rounding slack.
+    function _assertValueBounds(uint256 someVaultId, PositionSums memory sums) private view {
         uint160 sqrtBidX96 = source.sqrtBidX96();
         uint160 sqrtAskX96 = source.sqrtAskX96();
-        assertLe(
-            VaultMath.debtValueLower(longDebts, sqrtBidX96), VaultMath.debtValueUpper(longDebts, sqrtBidX96), "long bid"
-        );
-        assertLe(
-            VaultMath.debtValueLower(longDebts, sqrtAskX96), VaultMath.debtValueUpper(longDebts, sqrtAskX96), "long ask"
-        );
-        assertLe(
-            VaultMath.debtValueLower(shortDebts, sqrtBidX96),
-            VaultMath.debtValueUpper(shortDebts, sqrtBidX96),
-            "short bid"
-        );
-        assertLe(
-            VaultMath.debtValueLower(shortDebts, sqrtAskX96),
-            VaultMath.debtValueUpper(shortDebts, sqrtAskX96),
-            "short ask"
-        );
+        uint256 bidValue = VaultMath.valueInToken1(sums.bid0, sums.bid1, sqrtBidX96, false);
+        // Rounded down in both steps: the sums and their valuation, so it never exceeds the exact value.
+        uint256 askValue = VaultMath.valueInToken1(sums.ask0, sums.ask1, sqrtAskX96, false);
+        (uint256 low,) = vault.debtValuesAt(someVaultId, sqrtBidX96);
+        (, uint256 high) = vault.debtValuesAt(someVaultId, sqrtAskX96);
+        // Each position's holdings round down by under a unit of each token, so the exact value lies between the sums
+        // and the sums plus a unit of each token per position.
+        uint256 bidAbove = sums.count + VaultMath.priceTimes(sums.count, sqrtBidX96, true);
+        uint256 askAbove = sums.count + VaultMath.priceTimes(sums.count, sqrtAskX96, true);
+        assertLe(low, bidValue + bidAbove, "withdrawals value debts at most at their holdings");
+        assertGe(high, askValue, "deposits value debts at least at their holdings");
+        // The tree rounds in 2^-64 units, so each bound is within a few units of the exact value.
+        assertLe(bidValue, low + 3, "withdrawals: exact");
+        assertLe(high, askValue + askAbove + 4, "deposits: exact");
     }
 
     /// @dev Sums the open positions of one vault, and checks each one's solvency on the way: every open position must
@@ -183,11 +184,23 @@ contract VaultInvariantTest is VaultFixture {
             sums.escrow += position.escrow;
             sums.released0 += position.released0;
             sums.released1 += position.released1;
-            (uint160 sqrtLowerX96, uint160 sqrtUpperX96) =
-                VaultMath.rangeSqrtPrices(position.tickLower, position.tickUpper);
-            DebtTotals memory terms = VaultMath.debtTerms(position.liquidity, sqrtLowerX96, sqrtUpperX96);
-            _add(position.isLong ? sums.longTerms : sums.shortTerms, terms);
+            DebtTotals memory side = position.isLong ? sums.longTerms : sums.shortTerms;
+            side.liquidity += position.liquidity;
+            _addHoldings(position, sums);
         }
+    }
+
+    function _addHoldings(Position memory position, PositionSums memory sums) private view {
+        (uint160 sqrtLowerX96, uint160 sqrtUpperX96) = VaultMath.rangeSqrtPrices(position.tickLower, position.tickUpper);
+        (uint256 bid0, uint256 bid1) =
+            VaultMath.holdingsAt(position.liquidity, sqrtLowerX96, sqrtUpperX96, source.sqrtBidX96());
+        (uint256 ask0, uint256 ask1) =
+            VaultMath.holdingsAt(position.liquidity, sqrtLowerX96, sqrtUpperX96, source.sqrtAskX96());
+        sums.count += 1;
+        sums.bid0 += bid0;
+        sums.bid1 += bid1;
+        sums.ask0 += ask0;
+        sums.ask1 += ask1;
     }
 
     function _assertSolvent(Position memory position) private pure {
@@ -200,14 +213,6 @@ contract VaultInvariantTest is VaultFixture {
             VaultMath.repays(position.reserve0, position.reserve1, position.liquidity, sqrtLowerX96, sqrtUpperX96),
             "open position's reserves fail the repayment rule"
         );
-    }
-
-    function _add(DebtTotals memory totals, DebtTotals memory terms) private pure {
-        totals.liquidity += terms.liquidity;
-        totals.virtual0 += terms.virtual0;
-        totals.virtual1 += terms.virtual1;
-        totals.maximum0 += terms.maximum0;
-        totals.maximum1 += terms.maximum1;
     }
 
     function _actions() private view returns (bytes4[] memory selectors) {

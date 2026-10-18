@@ -5,6 +5,7 @@ import {FullMath} from "v4-core/src/libraries/FullMath.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {Vault, VaultStore} from "../VaultTypes.sol";
 import {IMetricLendingVault} from "../interfaces/IMetricLendingVault.sol";
+import {DebtValuation} from "./DebtValuation.sol";
 import {VaultAccrual} from "./VaultAccrual.sol";
 import {VaultLedger} from "./VaultLedger.sol";
 import {VaultMath} from "./VaultMath.sol";
@@ -39,7 +40,8 @@ library VaultLending {
         VaultAccrual.checkpoint(vault, vaultId);
         (uint160 sqrtBidX96, uint160 sqrtAskX96) = VaultPricing.band(vault);
         uint256 valueIn = VaultMath.valueInToken1(amount0, amount1, sqrtBidX96, false);
-        // Income still vesting was earned before this deposit, so the new shares pay for it (audit finding A3).
+        // Income still vesting was earned before this deposit, so the new shares pay for it (audit finding A3). Premium
+        // not yet collected is not counted (owner's decision on X-2): shares are priced on what is in the vault.
         uint256 vesting = VaultMath.valueInToken1(vault.stream.remaining0, vault.stream.remaining1, sqrtAskX96, true);
         uint256 vaultValue = valueHigh(vault, sqrtAskX96) + vesting;
         shares = FullMath.mulDiv(valueIn, vault.totalShares + VIRTUAL_SHARES, vaultValue + VIRTUAL_VALUE);
@@ -79,6 +81,7 @@ library VaultLending {
         vault.ledger.buffer1 -= amount1.toUint128();
         vault.shares[msg.sender] -= burned;
         vault.totalShares -= burned;
+        if (vault.totalShares == 0) VaultAccrual.forfeitToTreasury(vault);
         VaultLedger.push(vault, 0, receiver, amount0);
         VaultLedger.push(vault, 1, receiver, amount1);
         MetricVenue.place(vault, vaultId);
@@ -92,20 +95,18 @@ library VaultLending {
         return MetricVenue.recenter(vault, vaultId);
     }
 
-    /// @notice The vault's value for deposits: idle at the ask plus an upper bound on the debts.
+    /// @notice The vault's value for deposits: idle at the ask plus the debts' holdings at the ask, rounded up.
     function valueHigh(Vault storage vault, uint160 sqrtAskX96) internal view returns (uint256) {
         uint256 idleValue =
             VaultMath.valueInToken1(VaultAccrual.idle0(vault), VaultAccrual.idle1(vault), sqrtAskX96, true);
-        return idleValue + VaultMath.debtValueUpper(vault.longDebts, sqrtAskX96)
-            + VaultMath.debtValueUpper(vault.shortDebts, sqrtAskX96);
+        return idleValue + DebtValuation.valueHigh(vault.debts, sqrtAskX96);
     }
 
-    /// @notice The vault's value for withdrawals: idle at the bid plus a lower bound on the debts.
+    /// @notice The vault's value for withdrawals: idle at the bid plus the debts' holdings at the bid, rounded down.
     function valueLow(Vault storage vault, uint160 sqrtBidX96) internal view returns (uint256) {
         uint256 idleValue =
             VaultMath.valueInToken1(VaultAccrual.idle0(vault), VaultAccrual.idle1(vault), sqrtBidX96, false);
-        return idleValue + VaultMath.debtValueLower(vault.longDebts, sqrtBidX96)
-            + VaultMath.debtValueLower(vault.shortDebts, sqrtBidX96);
+        return idleValue + DebtValuation.valueLow(vault.debts, sqrtBidX96);
     }
 
     /// @dev What `shares` take from the idle basket and the shares that burns: the entitled fraction of each token, as

@@ -5,6 +5,7 @@ import {FullMath} from "v4-core/src/libraries/FullMath.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {Position, Vault} from "../VaultTypes.sol";
 import {Charge, VaultAccrual} from "./VaultAccrual.sol";
+import {DebtValuation} from "./DebtValuation.sol";
 import {DebtTotals, VaultMath} from "./VaultMath.sol";
 
 /// @notice The bookkeeping shared by opening and closing: debt totals, collecting premium, and the profit share.
@@ -15,25 +16,17 @@ library VaultBook {
 
     /// @notice Adds a debt of `liquidity` on the position's range to the vault's totals.
     function addDebt(Vault storage vault, Position storage position, uint128 liquidity) internal {
-        DebtTotals memory terms = _terms(position, liquidity);
         DebtTotals storage totals = position.isLong ? vault.longDebts : vault.shortDebts;
-        totals.liquidity += terms.liquidity;
-        totals.virtual0 += terms.virtual0;
-        totals.virtual1 += terms.virtual1;
-        totals.maximum0 += terms.maximum0;
-        totals.maximum1 += terms.maximum1;
+        totals.liquidity += liquidity;
+        DebtValuation.add(vault.debts, liquidity, position.tickLower, position.tickUpper);
     }
 
-    /// @notice Removes a debt previously added with the same liquidity; terms are deterministic, so this subtracts
+    /// @notice Removes a debt previously added with the same liquidity; its terms are deterministic, so this subtracts
     /// exactly what `addDebt` added.
     function removeDebt(Vault storage vault, Position storage position, uint128 liquidity) internal {
-        DebtTotals memory terms = _terms(position, liquidity);
         DebtTotals storage totals = position.isLong ? vault.longDebts : vault.shortDebts;
-        totals.liquidity -= terms.liquidity;
-        totals.virtual0 -= terms.virtual0;
-        totals.virtual1 -= terms.virtual1;
-        totals.maximum0 -= terms.maximum0;
-        totals.maximum1 -= terms.maximum1;
+        totals.liquidity -= liquidity;
+        DebtValuation.remove(vault.debts, liquidity, position.tickLower, position.tickUpper);
     }
 
     /// @notice The premium the position owes beyond its escrow, rounded up. Does not change state.
@@ -105,9 +98,13 @@ library VaultBook {
         return proceeds > basisClosed ? proceeds - basisClosed : 0;
     }
 
-    function _terms(Position storage position, uint128 liquidity) private view returns (DebtTotals memory) {
-        (uint160 sqrtLowerX96, uint160 sqrtUpperX96) = VaultMath.rangeSqrtPrices(position.tickLower, position.tickUpper);
-        return VaultMath.debtTerms(liquidity, sqrtLowerX96, sqrtUpperX96);
+    /// @notice The basis a close takes. The escrow stays with the position until its final close refunds it, so a
+    /// partial close takes its fraction of the rest only; taking the escrow's part early would tax its refund as profit
+    /// (audit finding Sol-1-1). Call after premium is collected, when `escrow` is what remains.
+    function closedBasis(uint256 basis, uint256 escrow, uint256 fractionWad) internal pure returns (uint256) {
+        if (fractionWad == VaultMath.WAD) return basis;
+        uint256 withoutEscrow = basis > escrow ? basis - escrow : 0;
+        return VaultMath.portionDown(withoutEscrow, fractionWad);
     }
 
     /// @dev Pays `paid` token1 of the premium owed. Returns the part of `owed` still unpaid.

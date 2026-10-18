@@ -105,9 +105,28 @@ library MakerAccounting {
         uint160 sqrtLowerX96,
         uint160 sqrtUpperX96
     ) internal view returns (uint256) {
+        uint256 supplied = rateSupplied(book, bucket, isBuy, sqrtLowerX96, sqrtUpperX96);
+        return VaultMath.rateWad(book.curves[book.curves.length - 1].curve, bucket.lent, supplied);
+    }
+
+    /// @notice The supply a bucket's rate is priced on: its loans plus its waiting token as range liquidity. A retired
+    /// bucket's fill converted that token, so it counts the converted one too, and never less than the utilization
+    /// ceiling allows: a fill cannot raise its loans' rate past the ceiling rate, the most makers could impose on an
+    /// active bucket by withdrawing (audit finding X-4).
+    function rateSupplied(
+        Book storage book,
+        Bucket storage bucket,
+        bool isBuy,
+        uint160 sqrtLowerX96,
+        uint160 sqrtUpperX96
+    ) internal view returns (uint256 supplied) {
         uint256 borrowed = bucket.lent;
-        uint256 supplied = borrowed + lendable(bucket, isBuy, sqrtLowerX96, sqrtUpperX96);
-        return VaultMath.rateWad(book.curves[book.curves.length - 1].curve, borrowed, supplied);
+        supplied = borrowed + lendable(bucket, isBuy, sqrtLowerX96, sqrtUpperX96);
+        if (!bucket.retired) return supplied;
+        uint256 converted = isBuy ? bucket.balance0 : bucket.balance1;
+        supplied += MakerMath.liquidityFor(!isBuy, converted, sqrtLowerX96, sqrtUpperX96);
+        uint256 atCeiling = FullMath.mulDivRoundingUp(borrowed, MakerMath.BPS, book.settings.utilizationCeilingBps);
+        if (supplied < atCeiling) supplied = atCeiling;
     }
 
     /// @notice Requires the bucket's loans to stay within the ceiling of its capacity.
@@ -132,7 +151,7 @@ library MakerAccounting {
         (, bool isBuy,) = MakerMath.decode(bucketId);
         (uint160 sqrtLowerX96, uint160 sqrtUpperX96) = range(book, bucketId);
         uint256 borrowed = bucket.lent;
-        uint256 supplied = borrowed + lendable(bucket, isBuy, sqrtLowerX96, sqrtUpperX96);
+        uint256 supplied = rateSupplied(book, bucket, isBuy, sqrtLowerX96, sqrtUpperX96);
         uint256 versions = book.curves.length;
         uint256 fromTime = bucket.updatedAt;
         uint256 growthRay;

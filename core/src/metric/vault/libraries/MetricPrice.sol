@@ -14,6 +14,8 @@ import {MetricState} from "./MetricState.sol";
 /// in. A trade can move `d` within a transaction, so it is divided out; fees stay in and only widen the band.
 library MetricPrice {
     uint256 internal constant E6 = 1e6;
+    /// @dev Metric adds its fees in 1e-8: a bin's additional fee (1e-6) times 100, plus the notional fee (1e-8).
+    uint256 internal constant E8 = 1e8;
     /// @dev Metric floors each bin bound and then the interpolated marginal, so its marginal can sit up to this many Q64
     /// units below the exact `reference · m`.
     uint256 internal constant MARGINAL_FLOOR_UNITS = 3;
@@ -77,16 +79,68 @@ library MetricPrice {
         return (true, sqrtBidX96, sqrtAskX96);
     }
 
-    /// @notice The band's bid, or none if the pool cannot quote.
-    function tryBid(address pool, uint256 scale0, uint256 scale1) internal returns (bool ok, uint160 sqrtBidX96) {
-        try IMetricPool(pool).getSellAndBuyPrices() returns (uint128 sellX64, uint128) {
-            if (sellX64 == 0) return (false, 0);
-            (uint256 numerator, uint256 denominator) = deviation(pool);
-            return toSqrtX96(FullMath.mulDiv(sellX64, denominator, numerator), scale0, scale1, false);
+    /// @notice The band without the fees Metric's factory may change at any time (the active bin's additional fees
+    /// and the notional fee), or none if the pool cannot quote. Force closes and profit shares price at it, so the pool
+    /// admin cannot move them (audit finding W-1); lender valuations keep `band`, where a wider band only protects the
+    /// lenders who stay. Metric adds the oracle's base fee and these fees, so restoring the admin part leaves a bid at
+    /// or above the admin-free one and an ask at or below it, by a factor of at most the product of the two fees.
+    function tryBandWithoutAdminFees(address pool, uint256 scale0, uint256 scale1)
+        internal
+        returns (bool ok, uint160 sqrtBidX96, uint160 sqrtAskX96)
+    {
+        try IMetricPool(pool).getSellAndBuyPrices() returns (uint128 sellX64, uint128 buyX64) {
+            // Checked after the pool call: the singleton's reentrancy lock is held and no callback is expected.
+            if (sellX64 == 0) return (false, 0, 0);
+            (uint256 sellFeeE8, uint256 buyFeeE8) = adminFeesE8(pool);
+            uint256 bidX64 = FullMath.mulDiv(sellX64, E8 + sellFeeE8, E8);
+            uint256 askX64 = FullMath.mulDiv(buyX64, E8, E8 + buyFeeE8);
+            return _toBand(pool, bidX64, askX64, scale0, scale1);
         } catch (bytes memory reason) {
             _rethrowIfLocked(reason);
+            return (false, 0, 0);
+        }
+    }
+
+    /// @notice The bid of `tryBandWithoutAdminFees`, or none if the pool cannot quote.
+    function tryBidWithoutAdminFees(address pool, uint256 scale0, uint256 scale1)
+        internal
+        returns (bool ok, uint160 sqrtBidX96)
+    {
+        return _bidWithoutAdminFees(pool, scale0, scale1, true);
+    }
+
+    /// @notice As `tryBidWithoutAdminFees`, but a quote refused under Metric's lock is no price either, for a cached
+    /// read whose caller keeps its last value rather than revert or read the pool mid-swap.
+    function peekBidWithoutAdminFees(address pool, uint256 scale0, uint256 scale1)
+        internal
+        returns (bool ok, uint160 sqrtBidX96)
+    {
+        return _bidWithoutAdminFees(pool, scale0, scale1, false);
+    }
+
+    function _bidWithoutAdminFees(address pool, uint256 scale0, uint256 scale1, bool rethrowLock)
+        private
+        returns (bool ok, uint160 sqrtBidX96)
+    {
+        try IMetricPool(pool).getSellAndBuyPrices() returns (uint128 sellX64, uint128) {
+            if (sellX64 == 0) return (false, 0);
+            (uint256 sellFeeE8,) = adminFeesE8(pool);
+            uint256 bidX64 = FullMath.mulDiv(sellX64, E8 + sellFeeE8, E8);
+            (uint256 numerator, uint256 denominator) = deviation(pool);
+            return toSqrtX96(FullMath.mulDiv(bidX64, denominator, numerator), scale0, scale1, false);
+        } catch (bytes memory reason) {
+            if (rethrowLock) _rethrowIfLocked(reason);
             return (false, 0);
         }
+    }
+
+    /// @notice The part of the active bin's sell and buy fees that Metric's factory sets, in 1e-8: the bin's additional
+    /// fee plus the notional fee, as Metric's `FeeMath.binTotalFeeX64` adds them.
+    function adminFeesE8(address pool) internal view returns (uint256 sellFeeE8, uint256 buyFeeE8) {
+        MetricState.Cursor memory current = MetricState.cursor(pool);
+        MetricState.Bin memory state = MetricState.bin(pool, current.binIndex);
+        sellFeeE8 = uint256(state.addFeeSellE6) * (E8 / E6) + current.notionalFeeE8;
+        buyFeeE8 = uint256(state.addFeeBuyE6) * (E8 / E6) + current.notionalFeeE8;
     }
 
     /// @dev `buy = ceil(marginal · (1 + fee))` with `marginal ≥ reference · m − 3`, so

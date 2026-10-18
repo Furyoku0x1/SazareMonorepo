@@ -38,6 +38,7 @@ import {MakerBook} from "./libraries/MakerBook.sol";
 import {MakerClosing} from "./libraries/MakerClosing.sol";
 import {MakerMath} from "./libraries/MakerMath.sol";
 import {MakerPositions} from "./libraries/MakerPositions.sol";
+import {DebtValuation} from "./libraries/DebtValuation.sol";
 import {Curve, DebtTotals} from "./libraries/VaultMath.sol";
 import {VaultAdmin} from "./libraries/VaultAdmin.sol";
 import {VaultCallback} from "./libraries/VaultCallback.sol";
@@ -100,6 +101,10 @@ contract MetricLendingVault is
         VaultAdmin.payProtocol(_store, vaultId, treasury, feeVault);
     }
 
+    function claimPayout(uint256 vaultId, uint256 tokenIndex) external nonReentrant returns (uint256 amount) {
+        return VaultAdmin.claimPayout(_store, vaultId, tokenIndex);
+    }
+
     // ---------------------------------------------------------------- lenders
 
     function deposit(uint256 vaultId, uint256 amount0, uint256 amount1, uint256 minimumShares, address receiver)
@@ -134,6 +139,10 @@ contract MetricLendingVault is
 
     function addCollateral(uint256 positionId, uint256 amount) external nonReentrant {
         VaultPositions.addCollateral(_store, positionId, amount);
+    }
+
+    function addCollateral0(uint256 positionId, uint256 amount) external nonReentrant {
+        VaultPositions.addCollateral0(_store, positionId, amount);
     }
 
     function settle(uint256 positionId) external nonReentrant returns (bool) {
@@ -218,6 +227,10 @@ contract MetricLendingVault is
 
     function addMakerCollateral(uint256 positionId, uint256 amount) external nonReentrant {
         MakerPositions.addCollateral(_store, positionId, amount);
+    }
+
+    function addMakerCollateral0(uint256 positionId, uint256 amount) external nonReentrant {
+        MakerPositions.addCollateral0(_store, positionId, amount);
     }
 
     function settleMaker(uint256 positionId) external nonReentrant returns (bool) {
@@ -314,8 +327,20 @@ contract MetricLendingVault is
         return (vault.longDebts, vault.shortDebts);
     }
 
+    /// @notice The open debts' value in token1 at a price, as withdrawals (`low`) and deposits (`high`) price it.
+    function debtValuesAt(uint256 vaultId, uint160 sqrtPriceX96) external view returns (uint256 low, uint256 high) {
+        Vault storage vault = _store.vaults[vaultId];
+        low = DebtValuation.valueLow(vault.debts, sqrtPriceX96);
+        high = DebtValuation.valueHigh(vault.debts, sqrtPriceX96);
+    }
+
     function totalSharesOf(uint256 vaultId) external view returns (uint256) {
         return _store.vaults[vaultId].totalShares;
+    }
+
+    function unclaimedOf(uint256 vaultId, address owner) external view returns (uint256 amount0, uint256 amount1) {
+        uint256[2] storage held = _store.vaults[vaultId].unclaimed[owner];
+        return (held[0], held[1]);
     }
 
     function sharesOf(uint256 vaultId, address lender) external view returns (uint256) {

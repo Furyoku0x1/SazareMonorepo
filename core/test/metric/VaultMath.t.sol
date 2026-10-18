@@ -2,10 +2,9 @@
 pragma solidity 0.8.37;
 
 import {Test} from "forge-std/Test.sol";
-import {FixedPoint96} from "v4-core/src/libraries/FixedPoint96.sol";
 import {SqrtPriceMath} from "v4-core/src/libraries/SqrtPriceMath.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
-import {Curve, DebtTotals, VaultMath} from "../../src/metric/vault/libraries/VaultMath.sol";
+import {Curve, VaultMath} from "../../src/metric/vault/libraries/VaultMath.sol";
 
 /// @notice Exposes the library's reverting functions so tests can expect their errors.
 contract VaultMathHarness {
@@ -181,49 +180,6 @@ contract VaultMathTest is Test {
         harness.scaleToRepay(1, 1, 1e24, -600, 600);
     }
 
-    // ---- Debt value bounds ----
-
-    /// @dev For up to three debts at any price: lower ≤ value ≤ upper.
-    function testFuzz_debtValueBounds(uint256[9] memory seeds, uint256 priceSeed) public pure {
-        DebtTotals memory totals;
-        uint256 valueLow;
-        uint256 valueHigh;
-        uint160 sqrtPriceX96 = uint160(
-            bound(priceSeed, TickMath.getSqrtPriceAtTick(-TICK_BOUND), TickMath.getSqrtPriceAtTick(TICK_BOUND))
-        );
-        // three debts, three seeds each
-        for (uint256 debt = 0; debt < 3; ++debt) {
-            (uint160 sqrtLowerX96, uint160 sqrtUpperX96, uint128 liquidity) = _range(
-                int24(int256(seeds[3 * debt] % 2 ** 23)), uint24(seeds[3 * debt + 1]), uint128(seeds[3 * debt + 2])
-            );
-            _add(totals, VaultMath.debtTerms(liquidity, sqrtLowerX96, sqrtUpperX96));
-            (uint256 hold0, uint256 hold1) = VaultMath.holdingsAt(liquidity, sqrtLowerX96, sqrtUpperX96, sqrtPriceX96);
-            valueLow += VaultMath.valueInToken1(hold0, hold1, sqrtPriceX96, false);
-            uint256 up0 = sqrtPriceX96 >= sqrtUpperX96
-                ? 0
-                : SqrtPriceMath.getAmount0Delta(_max(sqrtPriceX96, sqrtLowerX96), sqrtUpperX96, liquidity, true);
-            uint256 up1 = sqrtPriceX96 <= sqrtLowerX96
-                ? 0
-                : SqrtPriceMath.getAmount1Delta(sqrtLowerX96, _min(sqrtPriceX96, sqrtUpperX96), liquidity, true);
-            valueHigh += VaultMath.valueInToken1(up0, up1, sqrtPriceX96, true);
-        }
-        assertLe(VaultMath.debtValueLower(totals, sqrtPriceX96), valueHigh);
-        assertGe(VaultMath.debtValueUpper(totals, sqrtPriceX96), valueLow);
-    }
-
-    /// @dev The lower bound is exact, up to rounding, when every range contains the price.
-    function test_debtValueLower_exactInRange() public pure {
-        (uint160 sqrtLowerX96, uint160 sqrtUpperX96) = VaultMath.rangeSqrtPrices(-6000, 6000);
-        uint128 liquidity = 1e24;
-        DebtTotals memory totals = VaultMath.debtTerms(liquidity, sqrtLowerX96, sqrtUpperX96);
-        uint160 sqrtPriceX96 = TickMath.getSqrtPriceAtTick(1234);
-        (uint256 hold0, uint256 hold1) = VaultMath.holdingsAt(liquidity, sqrtLowerX96, sqrtUpperX96, sqrtPriceX96);
-        uint256 value = VaultMath.valueInToken1(hold0, hold1, sqrtPriceX96, false);
-        uint256 lower = VaultMath.debtValueLower(totals, sqrtPriceX96);
-        assertLe(lower, value + 2);
-        assertGe(lower + 4, value);
-    }
-
     // ---- Rates and splits ----
 
     function test_rateWad_twoSlopes() public pure {
@@ -278,22 +234,6 @@ contract VaultMathTest is Test {
         uint256 part0 = VaultMath.portionUp(reserve0, fractionWad);
         uint256 part1 = VaultMath.portionUp(reserve1, fractionWad);
         return VaultMath.repays(part0, part1, liquidity, sqrtLowerX96, sqrtUpperX96);
-    }
-
-    function _add(DebtTotals memory totals, DebtTotals memory terms) internal pure {
-        totals.liquidity += terms.liquidity;
-        totals.virtual0 += terms.virtual0;
-        totals.virtual1 += terms.virtual1;
-        totals.maximum0 += terms.maximum0;
-        totals.maximum1 += terms.maximum1;
-    }
-
-    function _max(uint160 left, uint160 right) internal pure returns (uint160) {
-        return left > right ? left : right;
-    }
-
-    function _min(uint160 left, uint160 right) internal pure returns (uint160) {
-        return left < right ? left : right;
     }
 
     /// @dev Sol's verification finding: a payout of 10 wei against a claim the buffer could fill only 1% of rounded the

@@ -15,19 +15,13 @@ struct Curve {
     uint64 slope2Wad;
 }
 
-/// @notice Sums over a set of open debts, enough to bound their combined value at any price without a loop.
-/// @dev Amounts are in raw token units. `virtual0` is Σ L/√b (token0) and `virtual1` is Σ L·√a (token1), the offsets
-/// of each range's Uniswap v3 virtual reserves.
+/// @notice The liquidity of one side's open debts. `DebtValuation` values them.
 struct DebtTotals {
     uint256 liquidity;
-    uint256 virtual0;
-    uint256 virtual1;
-    uint256 maximum0;
-    uint256 maximum1;
 }
 
 /// @notice Pure math of the Metric Lending Vault: the solvency chord, the repayment rule, the force-close scale, the
-/// two-slope rate, and bounds on the value of open debts.
+/// two-slope rate, and the value of an amount of token0 in token1.
 /// @dev `chordHolds`, `rateWad`, `indexGrowthRay`, `portionDown`, `portionUp` and `splitShare` are copied from
 /// `hooks/src/libraries/LeverageMath.sol` at commit a8bc03f, which the Leverage audit reviewed and fuzzed. A debt is
 /// Uniswap v3 liquidity `L` on `[a, b]`; prices are raw token1 per raw token0, as v4 sqrt prices in Q96.
@@ -193,38 +187,6 @@ library VaultMath {
         }
         uint256 halfDown = FullMath.mulDiv(amount0, sqrtPriceX96, FixedPoint96.Q96);
         return FullMath.mulDiv(halfDown, sqrtPriceX96, FixedPoint96.Q96);
-    }
-
-    /// @notice Adds or removes one debt from a set of totals. Terms round up, which keeps `debtValueLower` a lower
-    /// bound and `debtValueUpper` an upper bound.
-    function debtTerms(uint128 liquidity, uint160 sqrtLowerX96, uint160 sqrtUpperX96)
-        internal
-        pure
-        returns (DebtTotals memory terms)
-    {
-        terms.liquidity = liquidity;
-        terms.virtual0 = FullMath.mulDivRoundingUp(liquidity, FixedPoint96.Q96, sqrtUpperX96);
-        terms.virtual1 = FullMath.mulDivRoundingUp(liquidity, sqrtLowerX96, FixedPoint96.Q96);
-        (terms.maximum0, terms.maximum1) = debtExtremes(liquidity, sqrtLowerX96, sqrtUpperX96);
-    }
-
-    /// @notice A lower bound, in token1, on the combined value of the debts at a price.
-    /// @dev Applies the in-range value `2·L·√P − L·√a − P·L/√b` to every debt. It is exact for a range containing
-    /// the price and below the true value otherwise, by `(L/√b)(√P − √b)²` above the range and `(L/√a)(√a − √P)²`
-    /// below it. Floored at zero.
-    function debtValueLower(DebtTotals memory totals, uint160 sqrtPriceX96) internal pure returns (uint256) {
-        uint256 gross = 2 * FullMath.mulDiv(totals.liquidity, sqrtPriceX96, FixedPoint96.Q96);
-        uint256 cost = totals.virtual1 + priceTimes(totals.virtual0, sqrtPriceX96, true);
-        if (gross <= cost) return 0;
-        return gross - cost;
-    }
-
-    /// @notice An upper bound, in token1, on the combined value of the debts at a price: `min(ΣM1, P·ΣM0)`.
-    /// @dev Each debt is worth at most `min(M1, P·M0)`, and a sum of minimums is at most the minimum of the sums.
-    function debtValueUpper(DebtTotals memory totals, uint160 sqrtPriceX96) internal pure returns (uint256) {
-        uint256 allToken0Value = priceTimes(totals.maximum0, sqrtPriceX96, true);
-        if (allToken0Value < totals.maximum1) return allToken0Value;
-        return totals.maximum1;
     }
 
     /// @notice The yearly rate at utilization `borrowed / supplied`, in WAD.

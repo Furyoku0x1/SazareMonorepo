@@ -179,14 +179,14 @@ abstract contract MetricFixture is Test {
         assertEq(uint256(ledger.held1), quote.balanceOf(address(vault)), "held1 vs balance");
         assertEq(
             uint256(ledger.held0),
-            uint256(ledger.buffer0) + ledger.reserve0 + ledger.treasury0 + ledger.feeVault0
+            uint256(ledger.buffer0) + ledger.reserve0 + ledger.treasury0 + ledger.feeVault0 + ledger.unclaimed0
                 + vault.streamOf(vaultId).remaining0 + book0 + income0,
             "held0 parts"
         );
         assertEq(
             uint256(ledger.held1),
             uint256(ledger.buffer1) + ledger.reserve1 + ledger.escrow + ledger.treasury1 + ledger.feeVault1
-                + vault.streamOf(vaultId).remaining1 + book1 + income1,
+                + ledger.unclaimed1 + vault.streamOf(vaultId).remaining1 + book1 + income1,
             "held1 parts"
         );
     }

@@ -236,14 +236,14 @@ abstract contract VaultFixture is Test {
         Stream memory stream = vault.streamOf(someVaultId);
         assertEq(
             uint256(ledger.held0),
-            uint256(ledger.buffer0) + ledger.reserve0 + ledger.treasury0 + ledger.feeVault0 + stream.remaining0
-                + _bookPart(someVaultId, 0),
+            uint256(ledger.buffer0) + ledger.reserve0 + ledger.treasury0 + ledger.feeVault0 + ledger.unclaimed0
+                + stream.remaining0 + _bookPart(someVaultId, 0),
             "held0 parts"
         );
         assertEq(
             uint256(ledger.held1),
             uint256(ledger.buffer1) + ledger.reserve1 + ledger.escrow + ledger.treasury1 + ledger.feeVault1
-                + stream.remaining1 + _bookPart(someVaultId, 1),
+                + ledger.unclaimed1 + stream.remaining1 + _bookPart(someVaultId, 1),
             "held1 parts"
         );
     }

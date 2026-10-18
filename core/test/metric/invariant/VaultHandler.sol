@@ -455,9 +455,8 @@ contract VaultHandler is VaultFixture {
     /// @dev `VaultLending.valueLow` for a vault without a pool, whose idle capital is its buffer.
     function _valueLow(uint256 someVaultId, uint160 sqrtBidX96) private view returns (uint256) {
         Ledger memory ledger = vault.ledgerOf(someVaultId);
-        (DebtTotals memory longDebts, DebtTotals memory shortDebts) = vault.debtsOf(someVaultId);
-        return VaultMath.valueInToken1(ledger.buffer0, ledger.buffer1, sqrtBidX96, false)
-            + VaultMath.debtValueLower(longDebts, sqrtBidX96) + VaultMath.debtValueLower(shortDebts, sqrtBidX96);
+        (uint256 debtValue,) = vault.debtValuesAt(someVaultId, sqrtBidX96);
+        return VaultMath.valueInToken1(ledger.buffer0, ledger.buffer1, sqrtBidX96, false) + debtValue;
     }
 
     /// @dev The closer's reward is a share of what is left after repayment, so it can never exceed that share of the
