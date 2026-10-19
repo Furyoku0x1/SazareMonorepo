@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.37;
 
+import {FullMath} from "v4-core/src/libraries/FullMath.sol";
 import {SqrtPriceMath} from "v4-core/src/libraries/SqrtPriceMath.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {PositionIndex} from "./PositionIndex.sol";
-import {CloseRequest, ExitSwap, Position, Vault, VaultStore} from "../VaultTypes.sol";
+import {ChargeStart, CloseRequest, ExitSwap, Position, Vault, VaultStore} from "../VaultTypes.sol";
 import {IMetricLendingVault} from "../interfaces/IMetricLendingVault.sol";
 import {Charge, VaultAccrual} from "./VaultAccrual.sol";
 import {VaultBook} from "./VaultBook.sol";
@@ -12,11 +13,15 @@ import {VaultLedger} from "./VaultLedger.sol";
 import {VaultMath} from "./VaultMath.sol";
 import {VaultPricing} from "./VaultPricing.sol";
 import {MetricVenue} from "./MetricVenue.sol";
+import {MakerMath} from "./MakerMath.sol";
+import {RealizedCharge} from "./RealizedCharge.sol";
 
 /// @notice Closing positions: by their owner, in full or in part, and by anyone once a delinquent position's grace
-/// period has passed.
+/// period has passed. A close charges the realized charge from the last price point to now for the part it closes,
+/// and swaps that part's repayment back toward the tokens it released.
 /// @dev An external library: the singleton delegatecalls it. Repayment needs no price; the profit share values the
-/// leftovers at the band's bid, or at the strike when the band cannot be read.
+/// leftovers at the band's bid, or at the strike when the band cannot be read; without a price, a close charges no
+/// stub and restores nothing.
 library VaultClosing {
     using SafeCast for uint256;
 
@@ -80,12 +85,15 @@ library VaultClosing {
         Closing memory closing = _portion(position, request.fractionWad);
         _exitSwap(vault, vaultId, position, closing, exit);
         _requireRepayment(position, closing, request.repay0, request.repay1);
-        Charge memory unpaid = VaultBook.collect(vault, position, true);
+        ChargeStart storage start = store.chargeStarts[request.positionId];
+        uint256 stubWad = _closeStubWad(vault, position, start, closing.fractionWad);
+        Charge memory unpaid = VaultBook.collect(vault, position, start, true, stubWad);
         _payArrears(vault, position, closing, unpaid, closing.fractionWad != WAD);
         // Every charge is now paid (a partial close requires it), so the rest is not delinquent: a later lapse must
         // start a new grace period.
         position.delinquentSince = 0;
         _repay(vault, closing);
+        _restore(vault, vaultId, closing);
         uint256 share = _takeProfitShare(vault, position, closing);
         (paid0, paid1) = _payOut(vault, position, closing, msg.sender);
         _shrinkOrDelete(store, vault, request.positionId, position, closing);
@@ -124,8 +132,10 @@ library VaultClosing {
         if (position.owner == address(0)) revert IMetricLendingVault.UnknownPosition();
         uint256 vaultId = position.vaultId;
         Vault storage vault = store.vaults[vaultId];
-        _requireForceClosable(vault, position);
-        Charge memory unpaid = VaultBook.collect(vault, position, true);
+        ChargeStart storage start = store.chargeStarts[positionId];
+        _requireForceClosable(vault, position, start);
+        Charge memory unpaid =
+            VaultBook.collect(vault, position, start, true, _closeStubWad(vault, position, start, WAD));
         Closing memory closing = _portion(position, WAD);
         closing.arrears = unpaid.premium;
         closing.venue = venue;
@@ -133,6 +143,7 @@ library VaultClosing {
         _forcedRepayment(vault, position, closing);
         _payArrears(vault, position, closing, unpaid, false);
         _repay(vault, closing);
+        _restore(vault, vaultId, closing);
         _takeProfitShare(vault, position, closing);
         (reward0, reward1) = _reward(vault, closing);
         address owner = position.owner;
@@ -193,14 +204,14 @@ library VaultClosing {
 
     // ---------------------------------------------------------------- force closing
 
-    function _requireForceClosable(Vault storage vault, Position storage position) private {
+    function _requireForceClosable(Vault storage vault, Position storage position, ChargeStart storage start) private {
         uint256 flaggedAt = position.delinquentSince;
         if (flaggedAt == 0) revert IMetricLendingVault.NotDelinquent();
         if (block.timestamp < flaggedAt + vault.parameters.graceSeconds) {
             revert IMetricLendingVault.GracePeriodRunning();
         }
         VaultAccrual.checkpoint(vault, position.vaultId);
-        if (VaultBook.shortfall(vault, position) == 0) revert IMetricLendingVault.NotDelinquent();
+        if (VaultBook.shortfall(vault, position, start) == 0) revert IMetricLendingVault.NotDelinquent();
     }
 
     /// @dev Sets the repayment and leftovers of a full force close.
@@ -357,6 +368,64 @@ library VaultClosing {
         VaultLedger.push(vault, 1, msg.sender, reward1);
     }
 
+    // ---------------------------------------------------------------- the realized charge's stub and the restore
+
+    /// @dev The closed fraction's realized charge from where the settlement leaves its start to the band's mid now; the
+    /// rest of a partial close keeps its start and pays its own stub later. None without a price. A close may read it
+    /// after the trader's exit swap: the band moves only with the oracle reference, and the singleton's reentrancy lock
+    /// is held, so that swap cannot move it.
+    function _closeStubWad(
+        Vault storage vault,
+        Position storage position,
+        ChargeStart storage start,
+        uint256 fractionWad
+    ) private returns (uint256) {
+        (bool priced, uint160 sqrtMidX96) = RealizedCharge.mid(vault);
+        if (!priced) return 0;
+        return VaultMath.portionUp(RealizedCharge.stubWad(vault, position, start, sqrtMidX96), fractionWad);
+    }
+
+    /// @dev Swaps the closed part's repayment back toward the tokens it released (owner, 2026-10-19): a range lent in
+    /// token1 comes back in token1 even when the price crossed it, so lenders keep their token amounts rather than the
+    /// transformation, which the realized charge and the transformation rate have paid for. Best-effort, from lenders'
+    /// buffer, through the pool within `forceCloseSlippageBps` of the close band: a close never fails or waits on it.
+    function _restore(Vault storage vault, uint256 vaultId, Closing memory closing) private {
+        if (vault.parameters.pool == address(0)) return;
+        if (closing.repay0 == closing.released0) return;
+        (bool priced, uint160 sqrtBidX96, uint160 sqrtAskX96) = VaultPricing.tryCloseBand(vault);
+        if (!priced) return;
+        if (closing.repay0 > closing.released0) {
+            uint256 excess0 = _min(closing.repay0 - closing.released0, vault.ledger.buffer0);
+            _restoreSwap(vault, vaultId, true, excess0, sqrtBidX96);
+            return;
+        }
+        uint256 cost1 = VaultMath.priceTimes(closing.released0 - closing.repay0, sqrtAskX96, false);
+        _restoreSwap(vault, vaultId, false, _min(cost1, vault.ledger.buffer1), sqrtAskX96);
+    }
+
+    /// @dev Sells `amountIn` of lenders' buffer, stopping at the band's edge less the slippage allowance for a sell of
+    /// token0, or more for a buy; partial fills stand.
+    function _restoreSwap(Vault storage vault, uint256 vaultId, bool zeroForOne, uint256 amountIn, uint160 sqrtEdgeX96)
+        private
+    {
+        if (amountIn == 0) return;
+        uint256 slippageBps = vault.parameters.forceCloseSlippageBps;
+        // Rounded toward the stricter limit: the floor up, the ceiling down, as the maker book's fills.
+        uint256 edgeX64 = MakerMath.toPriceX64(sqrtEdgeX96, vault.venue.scale0, vault.venue.scale1, zeroForOne);
+        uint256 limitX64 = zeroForOne
+            ? FullMath.mulDivRoundingUp(edgeX64, BPS - slippageBps, BPS)
+            : _min(edgeX64 * (BPS + slippageBps) / BPS, type(uint128).max);
+        (uint256 paid, uint256 received) =
+            MetricVenue.trySwapExactInToLimit(vault, vaultId, zeroForOne, amountIn, limitX64.toUint128());
+        if (zeroForOne) {
+            vault.ledger.buffer0 -= paid.toUint128();
+            vault.ledger.buffer1 += received.toUint128();
+            return;
+        }
+        vault.ledger.buffer1 -= paid.toUint128();
+        vault.ledger.buffer0 += received.toUint128();
+    }
+
     // ---------------------------------------------------------------- settlement
 
     /// @dev Pays premium the escrow did not cover from the closed part's token1 leftover. A partial close
@@ -456,6 +525,7 @@ library VaultClosing {
         if (closing.fractionWad == WAD) {
             PositionIndex.remove(store.passivePositionIds[position.owner], store.indexInOwnerList, positionId);
             delete store.positions[positionId];
+            delete store.chargeStarts[positionId];
             return;
         }
         uint128 remaining = position.liquidity - closing.liquidity;

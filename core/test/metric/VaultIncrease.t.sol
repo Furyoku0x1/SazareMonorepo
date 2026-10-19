@@ -60,6 +60,9 @@ contract VaultIncreaseTest is VaultFixture {
         Position memory merged = vault.positionOf(first);
 
         vm.revertToState(state);
+        // The increase charges the old liquidity's realized charge to now; a price point now does the same for the
+        // first position's later settle.
+        vault.recordPrice(vaultId);
         uint256 second = open(openRequest(true, STRADDLE_LOWER, STRADDLE_UPPER, added, 9_000e6));
         vm.warp(block.timestamp + 30 days);
         vault.settle(first);

@@ -17,17 +17,22 @@ import {VaultMath} from "./VaultMath.sol";
 import {VaultPricing} from "./VaultPricing.sol";
 import {VenueSwap} from "./VenueSwap.sol";
 
-/// @notice The vault's idle capital in its Metric pool: placement around the active bin, withdrawal from the edges,
-/// and reads of what the position holds.
+/// @notice The vault's idle capital in its Metric pool: placement around the oracle reference, twice as much in the
+/// nearest bin on each side as in the others, withdrawal from the edges, and reads of what the position holds.
 /// @dev A linked library: its public functions are delegatecalled from the vault's other libraries, so they run in the
-/// singleton's context and keep the callers small. Every bin the vault holds lies in its window. Deposits go to the window's bins on the side of the cursor that
-/// holds each token, never to the active bin, since Metric picks a deposit's token by the bin's side of the cursor at
-/// the moment of the add. Withdrawals take the farthest bins first and leave the active bin to last.
+/// singleton's context and keep the callers small. Every bin the vault holds lies in its window: the `binCount / 2`
+/// bins on each side of the bin holding the reference. Token0 goes only to bins above both the reference and the
+/// cursor, token1 only to bins below both, since Metric picks a deposit's token by the bin's side of the cursor at the
+/// moment of the add. The active bin, when it lies in the window, takes its weight in both tokens, in the bin's own
+/// ratio (owner, 2026-10-19). Withdrawals take the farthest bins first and leave the active bin to last.
 library MetricVenue {
     using SafeCast for uint256;
     using SafeCast for int256;
 
-    /// @dev Bounds every loop over the window. Fits the uint8 `binCount`.
+    /// @dev The most bins `binCount` may name; fits its uint8. The window holds at most `MAX_BINS + 1` bins, since the
+    /// bin holding the reference is an extra middle bin, which bounds every loop over it. The first placement's search
+    /// for the reference also stops after `MAX_BINS` bins: a reference farther from the cursor leaves the window unset
+    /// and the buffer unplaced until a later action finds it.
     uint256 internal constant MAX_BINS = 32;
     uint256 internal constant BPS = 10_000;
     uint256 internal constant E18 = 1e18;
@@ -72,8 +77,8 @@ library MetricVenue {
         returns (Holdings memory read)
     {
         if (!vault.venue.windowSet) return read;
-        uint256 count = vault.parameters.binCount;
-        // count <= MAX_BINS
+        uint256 count = _windowBins(vault);
+        // count <= MAX_BINS + 1
         for (uint256 offset = 0; offset < count; ++offset) {
             int256 binIndex = int256(vault.venue.lowestBin) + int256(offset);
             (uint256 bin0, uint256 bin1) = _binHoldings(vault, vaultId, int16(binIndex));
@@ -98,7 +103,7 @@ library MetricVenue {
     }
 
     /// @dev A bin's side of the recorded reference: 1 above it (token0 at the reference), -1 below it (token1), 0 for the
-    /// bin that contains it, which the vault never places in, since it is then the active bin (X-1).
+    /// bin that contains it, which straddles the price and takes nothing.
     function _side(Vault storage vault, int256 binIndex) private view returns (int256) {
         int256 referenceBin = vault.venue.referenceBin;
         if (binIndex > referenceBin) return 1;
@@ -126,49 +131,85 @@ library MetricVenue {
     /// delta, or past the weight cap) stays in the buffer. Every action that moves the vault's Metric holdings ends
     /// here, so the holdings are re-read last: the next accrual interval samples them after the action's own swaps and
     /// placement.
-    /// @dev Placement runs only while the cursor's bin holds the oracle reference; otherwise the tokens wait in the
-    /// buffer until the next action that places (audit finding X-1, see `_atReference`). The window never needs to
-    /// move: it is set once, centered on the reference bin, and Metric's bins keep their distance from the reference,
-    /// so the window follows the oracle by itself.
+    /// @dev Places whatever the cursor's position: token0 only above both the reference and the cursor, token1 only
+    /// below both, so a pushed cursor can never make the vault place base below the oracle price or quote above it
+    /// (audit finding X-1). The window never needs to move: it is set once around the bin holding the reference, and
+    /// Metric's bins keep their distance from the reference, so the window follows the oracle by itself.
     function place(Vault storage vault, uint256 vaultId) public {
         address pool = vault.parameters.pool;
         if (pool == address(0)) return;
         MetricState.Cursor memory current = MetricState.cursor(pool);
-        if (_atReference(pool, current)) {
-            _recordReference(vault, pool, current);
-            _place(vault, vaultId, current.binIndex);
-        }
+        _ensureWindow(vault, pool, current);
+        if (vault.venue.windowSet) _place(vault, vaultId, current.binIndex);
         refresh(vault, vaultId);
     }
 
-    /// @dev Records where the reference lies, once, before the first placement sets the window. Metric's bins never
-    /// move against the reference, so this holds for the pool's life.
-    function _recordReference(Vault storage vault, address pool, MetricState.Cursor memory current) private {
+    /// @dev Records where the reference lies and sets the window around it, once. Metric's bins never move against the
+    /// reference, so both hold for the pool's life. The window is cut at the pool's bins, never shifted, so each bin
+    /// keeps its distance from the reference.
+    function _ensureWindow(Vault storage vault, address pool, MetricState.Cursor memory current) private {
         if (vault.venue.windowSet) return;
-        int256 lowerEdgeE6 = current.binDistanceE6;
-        int256 upperEdgeE6 = lowerEdgeE6 + int256(uint256(MetricState.bin(pool, current.binIndex).lengthE6));
-        vault.venue.referenceBin = current.binIndex;
-        vault.venue.referenceOnEdge = false;
-        if (lowerEdgeE6 == 0) vault.venue.referenceOnEdge = true;
-        if (upperEdgeE6 != 0) return;
-        vault.venue.referenceBin = current.binIndex + 1;
-        vault.venue.referenceOnEdge = true;
+        (bool found, int256 referenceBin, bool onEdge) = _findReference(vault, pool, current);
+        if (!found) return;
+        int256 half = int256(uint256(vault.parameters.binCount / 2));
+        // With the reference inside a bin, that bin is the window's empty middle; on an edge, there is none.
+        int256 highest = onEdge ? referenceBin + half - 1 : referenceBin + half;
+        vault.venue.referenceBin = int16(referenceBin);
+        vault.venue.referenceOnEdge = onEdge;
+        vault.venue.lowestBin = int16(_maxSigned(referenceBin - half, vault.venue.poolLowestBin));
+        vault.venue.highestBin = int16(_minSigned(highest, vault.venue.poolHighestBin));
+        vault.venue.windowSet = true;
     }
 
-    /// @dev Whether the cursor's bin holds the reference. Metric prices every bin at a fixed distance from the oracle
-    /// reference, so only then are the bins above the cursor at or above the reference and those below at or below
-    /// it. With the cursor pushed off the reference, placing would put base below the price (or quote above) for the
-    /// pusher to buy back at a discount: a placement sandwich (audit finding X-1).
-    function _atReference(address pool, MetricState.Cursor memory current) private view returns (bool) {
-        if (current.binDistanceE6 > 0) return false;
-        uint256 lengthE6 = MetricState.bin(pool, current.binIndex).lengthE6;
-        return int256(current.binDistanceE6) + int256(lengthE6) >= 0;
+    /// @dev The bin holding the oracle reference, found from the cursor's bin by summing bin lengths: Metric prices
+    /// every bin at a fixed distance from the reference, so the reference lies where the distance crosses zero. When it
+    /// lies on a bin edge, the first bin above it, `onEdge`. Not found more than `MAX_BINS` bins away, or past the
+    /// pool's bins.
+    function _findReference(Vault storage vault, address pool, MetricState.Cursor memory current)
+        private
+        view
+        returns (bool, int256, bool)
+    {
+        if (current.binDistanceE6 > 0) return _walkDown(vault, pool, current.binIndex, current.binDistanceE6);
+        return _walkUp(vault, pool, current.binIndex, current.binDistanceE6);
+    }
+
+    /// @dev From a bin whose lower edge is at or below the reference, up to the bin holding it.
+    function _walkUp(Vault storage vault, address pool, int256 binIndex, int256 lowerEdgeE6)
+        private
+        view
+        returns (bool, int256, bool)
+    {
+        // step < MAX_BINS
+        for (uint256 step = 0; step < MAX_BINS; ++step) {
+            if (binIndex > vault.venue.poolHighestBin) return (false, 0, false);
+            int256 upperEdgeE6 = lowerEdgeE6 + int256(uint256(MetricState.bin(pool, int16(binIndex)).lengthE6));
+            if (upperEdgeE6 > 0) return (true, binIndex, lowerEdgeE6 == 0);
+            binIndex += 1;
+            lowerEdgeE6 = upperEdgeE6;
+        }
+        return (false, 0, false);
+    }
+
+    /// @dev From a bin whose lower edge is above the reference, down to the bin holding it.
+    function _walkDown(Vault storage vault, address pool, int256 binIndex, int256 lowerEdgeE6)
+        private
+        view
+        returns (bool, int256, bool)
+    {
+        // step < MAX_BINS
+        for (uint256 step = 0; step < MAX_BINS; ++step) {
+            binIndex -= 1;
+            if (binIndex < vault.venue.poolLowestBin) return (false, 0, false);
+            lowerEdgeE6 -= int256(uint256(MetricState.bin(pool, int16(binIndex)).lengthE6));
+            if (lowerEdgeE6 <= 0) return (true, binIndex, lowerEdgeE6 == 0);
+        }
+        return (false, 0, false);
     }
 
     /// @dev Never reverts on the pool's account, so placement never blocks the action that calls it, closes included.
     function _place(Vault storage vault, uint256 vaultId, int16 activeBin) private {
         address pool = vault.parameters.pool;
-        _ensureWindow(vault, activeBin);
         Plan memory plan = _plan(vault, vaultId, activeBin);
         if (plan.count == 0) return;
         _trim(plan);
@@ -217,9 +258,15 @@ library MetricVenue {
         return vault.ledger.buffer0 >= need0 && vault.ledger.buffer1 >= need1;
     }
 
-    function _inWindow(int256 binIndex, int256 lowest, uint256 count) private pure returns (bool) {
-        if (binIndex < lowest) return false;
-        return binIndex < lowest + int256(count);
+    function _inWindow(Vault storage vault, int256 binIndex) private view returns (bool) {
+        if (binIndex < vault.venue.lowestBin) return false;
+        return binIndex <= vault.venue.highestBin;
+    }
+
+    /// @dev The window's bins: `binCount` with the reference on a bin edge, one more with it inside a bin, fewer where
+    /// the pool's bins end.
+    function _windowBins(Vault storage vault) private view returns (uint256) {
+        return uint256(int256(vault.venue.highestBin) - vault.venue.lowestBin + 1);
     }
 
     // ---------------------------------------------------------------- swaps
@@ -259,6 +306,31 @@ library MetricVenue {
         IMetricPool(pool).swap(address(this), zeroForOne, amountIn.toInt256().toInt128(), limitX64, "", "");
         VaultCallback.clear();
         (paid, received) = _settleSwap(vault, zeroForOne, before0, before1);
+    }
+
+    /// @notice As `swapExactInToLimit`, but never reverts on the pool's account: a swap the pool refuses moves nothing
+    /// and returns zeros. For best-effort trades, such as a close's restore, that must not hold the close up.
+    function trySwapExactInToLimit(
+        Vault storage vault,
+        uint256 vaultId,
+        bool zeroForOne,
+        uint256 amountIn,
+        uint128 limitX64
+    ) public returns (uint256 paid, uint256 received) {
+        // Too large for Metric's signed amount: nothing is traded rather than revert (audit finding C4).
+        if (amountIn > uint256(uint128(type(int128).max))) return (0, 0);
+        address pool = vault.parameters.pool;
+        VaultCallback.expect(pool, vaultId, zeroForOne ? amountIn : 0, zeroForOne ? 0 : amountIn);
+        (uint256 before0, uint256 before1) = _balances(vault);
+        try IMetricPool(pool).swap(address(this), zeroForOne, int128(int256(amountIn)), limitX64, "", "") returns (
+            int128, int128
+        ) {
+            VaultCallback.clear();
+            return _settleSwap(vault, zeroForOne, before0, before1);
+        } catch {
+            VaultCallback.clear();
+            return (0, 0);
+        }
     }
 
     /// @notice Buys exactly `amountOut` of one token, paying at most `maximumIn` of the other, through the pool. Never
@@ -513,47 +585,92 @@ library MetricVenue {
 
     // ---------------------------------------------------------------- placement
 
-    function _ensureWindow(Vault storage vault, int16 activeBin) private {
-        if (vault.venue.windowSet) return;
-        int256 lowest = int256(activeBin) - int256(uint256(vault.parameters.binCount / 2));
-        vault.venue.lowestBin = int16(_clampWindow(vault, lowest));
-        vault.venue.windowSet = true;
-    }
-
-    function _clampWindow(Vault storage vault, int256 lowest) private view returns (int256) {
-        int256 highestStart = int256(vault.venue.poolHighestBin) - int256(uint256(vault.parameters.binCount)) + 1;
-        if (lowest > highestStart) lowest = highestStart;
-        if (lowest < vault.venue.poolLowestBin) lowest = vault.venue.poolLowestBin;
-        return lowest;
-    }
-
-    /// @dev Token0 goes to the window's bins above the active bin, token1 to those below, each in a linear taper that
-    /// gives the bin next to the price the most.
+    /// @dev Token0 goes to the window's bins above the reference, token1 to those below, the bin next to the reference
+    /// taking twice what each other bin takes. Bins on the wrong side of the cursor take nothing, and their share goes
+    /// to the side's other bins, so the whole buffer is placed. The active bin also needs the other token, so its side
+    /// is planned first and the other side gets what that leaves.
     function _plan(Vault storage vault, uint256 vaultId, int16 activeBin) private view returns (Plan memory plan) {
         plan = _emptyPlan();
-        _planSide(vault, vaultId, activeBin, plan, 0, vault.ledger.buffer0);
-        _planSide(vault, vaultId, activeBin, plan, 1, vault.ledger.buffer1);
+        uint256 buffer0 = vault.ledger.buffer0;
+        uint256 buffer1 = vault.ledger.buffer1;
+        if (_side(vault, activeBin) < 0) {
+            _planSide(vault, vaultId, activeBin, plan, 1, buffer1, buffer0);
+            _planSide(vault, vaultId, activeBin, plan, 0, buffer0 - plan.cost0, 0);
+            return plan;
+        }
+        _planSide(vault, vaultId, activeBin, plan, 0, buffer0, buffer1);
+        _planSide(vault, vaultId, activeBin, plan, 1, buffer1 - plan.cost1, 0);
     }
 
+    /// @dev Places `amount` of one token across its side; `otherBudget` is what the active bin may take of the other.
     function _planSide(
         Vault storage vault,
         uint256 vaultId,
         int16 activeBin,
         Plan memory plan,
         uint256 tokenIndex,
-        uint256 amount
+        uint256 amount,
+        uint256 otherBudget
     ) private view {
         if (amount == 0) return;
         uint256 totalWeight = _sideWeight(vault, activeBin, tokenIndex);
         if (totalWeight == 0) return;
-        uint256 count = vault.parameters.binCount;
-        // count <= MAX_BINS
+        uint256 count = _windowBins(vault);
+        // count <= MAX_BINS + 1
         for (uint256 offset = 0; offset < count; ++offset) {
             int16 binIndex = int16(int256(vault.venue.lowestBin) + int256(offset));
             uint256 weight = _weight(vault, activeBin, binIndex, tokenIndex);
             if (weight == 0) continue;
-            _planBin(vault, vaultId, plan, binIndex, tokenIndex, amount * weight / totalWeight);
+            uint256 part = amount * weight / totalWeight;
+            if (binIndex == activeBin) _planActive(vault, vaultId, plan, binIndex, tokenIndex, part, otherBudget);
+            else _planBin(vault, vaultId, plan, binIndex, tokenIndex, part);
         }
+    }
+
+    /// @dev The active bin holds both tokens, and Metric takes both in the bin's ratio. The shares are sized by
+    /// `amount` of the side's token and limited by `otherBudget` of the other. Costs round up and shares down, so
+    /// neither cost exceeds its budget. Skipped when the bin is empty, since Metric then splits by the cursor's
+    /// position, or holds none of the side's token, since the vault would then place only the other token, on the
+    /// wrong side.
+    function _planActive(
+        Vault storage vault,
+        uint256 vaultId,
+        Plan memory plan,
+        int16 binIndex,
+        uint256 tokenIndex,
+        uint256 amount,
+        uint256 otherBudget
+    ) private view {
+        MetricState.Bin memory state = MetricState.bin(vault.parameters.pool, binIndex);
+        if (state.totalShares == 0) return;
+        (uint256 balanceScaled, uint256 otherBalanceScaled) = tokenIndex == 0
+            ? (state.balance0Scaled, state.balance1Scaled)
+            : (state.balance1Scaled, state.balance0Scaled);
+        if (balanceScaled == 0) return;
+        (uint256 scale, uint256 otherScale) =
+            tokenIndex == 0 ? (vault.venue.scale0, vault.venue.scale1) : (vault.venue.scale1, vault.venue.scale0);
+        uint256 shares = FullMath.mulDiv(amount * scale, state.totalShares, balanceScaled);
+        if (otherBalanceScaled > 0) {
+            shares = _min(shares, FullMath.mulDiv(otherBudget * otherScale, state.totalShares, otherBalanceScaled));
+        }
+        shares = _capped(vault, vaultId, binIndex, state.totalShares, shares);
+        if (shares < vault.venue.minimumShares) return;
+        _push(plan, binIndex, shares);
+        uint256 cost = _costOf(balanceScaled, shares, state.totalShares, scale);
+        uint256 otherCost = _costOf(otherBalanceScaled, shares, state.totalShares, otherScale);
+        (uint256 cost0, uint256 cost1) = tokenIndex == 0 ? (cost, otherCost) : (otherCost, cost);
+        plan.cost0 += cost0;
+        plan.cost1 += cost1;
+    }
+
+    /// @dev What `shares` of a bin holding `balanceScaled` cost in token units, rounded up as Metric rounds an add.
+    function _costOf(uint256 balanceScaled, uint256 shares, uint256 totalShares, uint256 scale)
+        private
+        pure
+        returns (uint256)
+    {
+        uint256 costScaled = FullMath.mulDivRoundingUp(balanceScaled, shares, totalShares);
+        return (costScaled + scale - 1) / scale;
     }
 
     function _planBin(
@@ -607,25 +724,48 @@ library MetricVenue {
         view
         returns (uint256 total)
     {
-        uint256 count = vault.parameters.binCount;
-        // count <= MAX_BINS
+        uint256 count = _windowBins(vault);
+        // count <= MAX_BINS + 1
         for (uint256 offset = 0; offset < count; ++offset) {
             int16 binIndex = int16(int256(vault.venue.lowestBin) + int256(offset));
             total += _weight(vault, activeBin, binIndex, tokenIndex);
         }
     }
 
-    /// @dev Token0 bins lie above the active bin and token1 bins below; the active bin takes neither. A bin at
-    /// distance `k` weighs `half + 1 − k`, at least one.
+    /// @dev A bin's placement weight for a token: 2 for the bin next to the reference on the token's side and 1 for
+    /// the side's other bins, so four bins a side split a side 40/20/20/20 (owner, 2026-10-19, replacing a 4:3:2:1
+    /// pyramid). The active bin counts on its side of the reference. Zero for the bin holding the reference, which
+    /// straddles the price, and for any other bin Metric would not give this token, on the wrong side of the cursor.
     function _weight(Vault storage vault, int16 activeBin, int16 binIndex, uint256 tokenIndex)
         private
         view
         returns (uint256)
     {
-        int256 distance = tokenIndex == 0 ? int256(binIndex) - activeBin : int256(activeBin) - binIndex;
-        if (distance <= 0) return 0;
-        int256 weight = int256(uint256(vault.parameters.binCount / 2)) + 1 - distance;
-        return weight < 1 ? 1 : uint256(weight);
+        if (binIndex != activeBin) {
+            if (!_holds(activeBin, binIndex, tokenIndex)) return 0;
+        }
+        int256 side = _side(vault, binIndex);
+        if (side == 0) return 0;
+        bool tokenSide = tokenIndex == 0 ? side > 0 : side < 0;
+        if (!tokenSide) return 0;
+        uint256 distance = _referenceDistance(vault, binIndex);
+        if (distance > vault.parameters.binCount / 2) return 0;
+        return distance == 1 ? 2 : 1;
+    }
+
+    /// @dev Whether Metric holds this token in a bin: token0 above the cursor's bin, token1 below it.
+    function _holds(int16 activeBin, int16 binIndex, uint256 tokenIndex) private pure returns (bool) {
+        if (tokenIndex == 0) return binIndex > activeBin;
+        return binIndex < activeBin;
+    }
+
+    /// @dev How many bins from the reference a bin lies on its side: 1 for the nearest bin each side, 0 for the bin
+    /// holding the reference.
+    function _referenceDistance(Vault storage vault, int16 binIndex) private view returns (uint256) {
+        int256 referenceBin = vault.venue.referenceBin;
+        if (binIndex < referenceBin) return uint256(referenceBin - binIndex);
+        if (vault.venue.referenceOnEdge) return uint256(int256(binIndex) - referenceBin) + 1;
+        return uint256(int256(binIndex) - referenceBin);
     }
 
     // ---------------------------------------------------------------- removal
@@ -640,14 +780,15 @@ library MetricVenue {
         uint256 tokenIndex,
         uint256 short
     ) private view returns (uint256) {
-        uint256 count = vault.parameters.binCount;
-        // count <= MAX_BINS
+        uint256 count = _windowBins(vault);
+        // count <= MAX_BINS + 1
         for (uint256 step = 0; step < count; ++step) {
             if (short == 0) return 0;
-            // Token0 bins are above the active bin, so walk down from the top; token1 bins walk up from the bottom.
+            // Token0 bins are above the active bin, so walk down from the top; token1 bins walk up from the bottom. A
+            // bin is read by what Metric holds there now, whatever the vault placed in it.
             uint256 offset = tokenIndex == 0 ? count - 1 - step : step;
             int16 binIndex = int16(int256(vault.venue.lowestBin) + int256(offset));
-            if (_weight(vault, activeBin, binIndex, tokenIndex) == 0) continue;
+            if (!_holds(activeBin, binIndex, tokenIndex)) continue;
             short = _takeFromBin(vault, vaultId, plan, binIndex, tokenIndex, short, false);
         }
         return short;
@@ -666,7 +807,7 @@ library MetricVenue {
         if (short0 == 0) {
             if (short1 == 0) return;
         }
-        if (!_inWindow(activeBin, vault.venue.lowestBin, vault.parameters.binCount)) return;
+        if (!_inWindow(vault, activeBin)) return;
         uint256 ours = MetricState.positionShares(vault.parameters.pool, address(this), uint80(vaultId), activeBin);
         if (ours == 0) return;
         MetricState.Bin memory state = MetricState.bin(vault.parameters.pool, activeBin);
@@ -786,6 +927,14 @@ library MetricVenue {
             mstore(bins, count)
             mstore(shares, count)
         }
+    }
+
+    function _maxSigned(int256 left, int256 right) private pure returns (int256) {
+        return left > right ? left : right;
+    }
+
+    function _minSigned(int256 left, int256 right) private pure returns (int256) {
+        return left < right ? left : right;
     }
 
     function _min(uint256 left, uint256 right) private pure returns (uint256) {

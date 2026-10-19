@@ -3,9 +3,10 @@ pragma solidity 0.8.37;
 
 import {FullMath} from "v4-core/src/libraries/FullMath.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
-import {CurvePair, Position, Vault} from "../VaultTypes.sol";
+import {ChargeStart, CurvePair, Position, Vault} from "../VaultTypes.sol";
 import {VaultMath} from "./VaultMath.sol";
 import {MetricVenue} from "./MetricVenue.sol";
+import {RealizedCharge} from "./RealizedCharge.sol";
 
 /// @notice What a position owes since its last settlement, in token1.
 struct Charge {
@@ -14,7 +15,9 @@ struct Charge {
     uint256 premiumFractionWad;
 }
 
-/// @notice Premium indices, the lenders' income stream, and what each position owes.
+/// @notice Premium indices, the lenders' income stream, and what each position owes: the utilization curves on `M1`,
+/// plus the realized charge and the transformation rate (`RealizedCharge`) with any surcharge, grossed up so the
+/// protocol's tenth comes on top of them and lenders receive all of it.
 /// @dev Utilization changes only at checkpoints, so each index grows by an exact integral of a constant rate over the
 /// interval. v1 has no funding between longs and shorts: the audit found its pay-as-collected design let a trader's
 /// own long and short draw funding never paid (finding A1), and the owner removed it.
@@ -23,6 +26,7 @@ library VaultAccrual {
 
     uint256 internal constant WAD = 1e18;
     uint256 internal constant RAY = 1e27;
+    uint256 internal constant BPS = 10_000;
     uint256 internal constant YEAR_SECONDS = 365 days;
     /// @dev Bounds the rate-index loop: a vault untouched across every change evaluates one rate per version. Fits
     /// the uint16 `Accrual.curveVersion`.
@@ -70,24 +74,41 @@ library VaultAccrual {
         return uint256(vault.ledger.buffer1) + vault.venue.rateHoldings1;
     }
 
-    /// @notice What the position owes since its snapshots, at the vault's current indices, including the fraction the
-    /// last settlement carried. The vault must be checkpointed first.
+    /// @notice What the position owes since its snapshots, at the vault's current indices and through the vault's last
+    /// price point, including the fraction the last settlement carried and `stubWad`, a close's or increase's charge
+    /// from there to now (zero elsewhere). The vault must be checkpointed first.
     /// @dev Rounds up when `roundUp`, as closes and delinquency checks need; otherwise down, leaving the rest in the
     /// fraction, so anyone settling often cannot charge more than one settlement would (Sol's finding on the maker
     /// book, which applies here too).
-    function charge(Vault storage vault, Position storage position, bool roundUp)
-        internal
-        view
-        returns (Charge memory owed)
-    {
+    function charge(
+        Vault storage vault,
+        Position storage position,
+        ChargeStart storage start,
+        bool roundUp,
+        uint256 stubWad
+    ) internal view returns (Charge memory owed) {
         uint256 maximum1 = position.maximum1;
         uint256 weight0Wad = position.weight0Wad;
         uint256 delta0Ray = vault.accrual.rateIndex0Ray - position.rateIndex0Ray;
         uint256 delta1Ray = vault.accrual.rateIndex1Ray - position.rateIndex1Ray;
         uint256 blendedRay = FullMath.mulDivRoundingUp(delta0Ray, weight0Wad, WAD)
             + FullMath.mulDivRoundingUp(delta1Ray, WAD - weight0Wad, WAD);
-        uint256 premiumWad = FullMath.mulDiv(maximum1, blendedRay, RAY / WAD) + position.premiumFractionWad;
+        uint256 realizedWad = RealizedCharge.owedWad(vault, position, start) + stubWad;
+        uint256 premiumWad = FullMath.mulDiv(maximum1, blendedRay, RAY / WAD) + position.premiumFractionWad
+            + _grossUpWad(vault, start, realizedWad);
         (owed.premium, owed.premiumFractionWad) = _units(premiumWad, roundUp);
+    }
+
+    /// @dev The realized charge and the transformation rate with the position's surcharge, divided by what lenders keep
+    /// of premium, so the protocol's tenth comes on top and lenders receive the whole charge (owner, 2026-10-19).
+    function _grossUpWad(Vault storage vault, ChargeStart storage start, uint256 amountWad)
+        private
+        view
+        returns (uint256)
+    {
+        if (amountWad == 0) return 0;
+        uint256 surchargeBps = start.highLeverage ? vault.parameters.highLeverageSurchargeBps : 0;
+        return FullMath.mulDivRoundingUp(amountWad, BPS + surchargeBps, BPS - vault.parameters.premiumProtocolBps);
     }
 
     /// @dev Whole units of an amount in WAD of a unit, and the fraction left: rounded up with none left, or down.

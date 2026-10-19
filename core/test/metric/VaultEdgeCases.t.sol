@@ -5,6 +5,7 @@ import {Accrual, CloseRequest, OpenRequest, Position, VaultParameters} from "../
 import {Leg, MakerCloseRequest, MakerOpenRequest, MakerPosition} from "../../src/metric/vault/MakerTypes.sol";
 import {IMakerBook} from "../../src/metric/vault/interfaces/IMakerBook.sol";
 import {IMetricLendingVault} from "../../src/metric/vault/interfaces/IMetricLendingVault.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {MakerFixture} from "./utils/MakerFixture.sol";
 import {TestToken} from "./utils/VaultFixture.sol";
 
@@ -505,12 +506,21 @@ contract VaultEdgeCasesTest is MakerFixture {
         uint256 basis = vault.positionOf(positionId).basis;
         assertGt(basis, opened.basis + 9_000e6, "the base enters the basis at the bid");
         uint256 quoteBefore = quote.balanceOf(trader);
+        uint256 incomeBefore = _income1();
+        vm.recordLogs();
         vm.prank(trader);
         vault.close(CloseRequest({positionId: positionId, fractionWad: WAD, repay0: opened.maximum0, repay1: 0}));
         assertEq(vault.positionOf(positionId).owner, address(0), "closed in kind");
-        uint256 proceeds = uint256(opened.reserve1) + opened.escrow;
-        uint256 profitShare = (proceeds - basis) * vault.parametersOf(vaultId).profitShareBps / 10_000;
-        assertApproxEqAbs(quote.balanceOf(trader) - quoteBefore, proceeds - profitShare, 1, "its quote, less the share");
+        // The crossing's realized charge comes out of the escrow; what lenders and the protocol took is that charge
+        // and the profit share.
+        uint256 share = _closedShare(vm.getRecordedLogs());
+        uint256 premium = _income1() - incomeBefore - share;
+        assertGt(premium, 0, "the crossing pays its realized charge");
+        uint256 proceeds = uint256(opened.reserve1) + opened.escrow - premium;
+        uint256 profit = proceeds > basis ? proceeds - basis : 0;
+        uint256 profitShare = profit * vault.parametersOf(vaultId).profitShareBps / 10_000;
+        assertApproxEqAbs(share, profitShare, 1, "the share of the proceeds");
+        assertApproxEqAbs(quote.balanceOf(trader) - quoteBefore, proceeds - share, 1, "its quote, less the share");
         assertLedger();
     }
 
@@ -694,5 +704,20 @@ contract VaultEdgeCasesTest is MakerFixture {
         vm.expectRevert(IMetricLendingVault.UnknownVault.selector);
         vault.createBook(unknownVaultId, defaultBookSettings(), defaultBookCurve(), defaultFloorRows());
         vm.stopPrank();
+    }
+
+    /// @dev Token1 the lenders' stream, the treasury and the fee vault have taken in so far.
+    function _income1() internal view returns (uint256) {
+        return uint256(vault.streamOf(vaultId).remaining1) + vault.ledgerOf(vaultId).treasury1
+            + vault.ledgerOf(vaultId).feeVault1;
+    }
+
+    /// @dev The profit share a close's `Closed` event reports.
+    function _closedShare(Vm.Log[] memory logs) internal pure returns (uint256 share) {
+        // logs.length is bounded by the close's events
+        for (uint256 index = 0; index < logs.length; ++index) {
+            if (logs[index].topics[0] != IMetricLendingVault.Closed.selector) continue;
+            (,,, share) = abi.decode(logs[index].data, (uint256, uint256, uint256, uint256));
+        }
     }
 }

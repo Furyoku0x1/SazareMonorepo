@@ -120,6 +120,7 @@ contract MetricVaultHandler is Test {
     uint256 public closesAtBid;
     uint256 public closesWhole;
     uint256 public settles;
+    uint256 public pricePoints;
     uint256 public flags;
     uint256[3] public forceCloses;
     uint256 public outsideSwaps;
@@ -475,6 +476,11 @@ contract MetricVaultHandler is Test {
                 ]
             );
         }
+    }
+
+    /// @dev A keeper's hourly price point, which the vault refuses under an hour after the last.
+    function recordPrice() external {
+        if (vault.recordPrice(vaultId)) pricePoints += 1;
     }
 
     function settle(uint256 pick) external {

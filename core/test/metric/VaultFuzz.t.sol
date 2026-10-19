@@ -179,9 +179,10 @@ contract VaultFuzzTest is VaultFixture {
         int256 moveTicks
     ) public {
         Shape memory shape = _shape(isLong, distanceTicks, widthTicks, bound(notional, 2_000e6, MAX_NOTIONAL));
-        // A 1% margin over the chord absorbs the rest's rounded-up extremes.
+        // A 1% margin over the chord absorbs the rest's rounded-up extremes. An escrow of the whole notional pays any
+        // realized charge the move costs, so the partial close is never refused for its premium.
         uint256 collateral = minimumCollateral(shape.tickLower, shape.tickUpper, shape.liquidity) + shape.notional / 100;
-        uint256 positionId = _open(shape, collateral, 100e6);
+        uint256 positionId = _open(shape, collateral, shape.notional);
         setPrice(PRICE_TICK + int24(bound(moveTicks, -5_000, 5_000)), 1);
         // At most 90% closed keeps the rest's notional above the 100e6 minimum borrow.
         fractionWad = bound(fractionWad, 0.01e18, 0.9e18);
@@ -222,8 +223,14 @@ contract VaultFuzzTest is VaultFixture {
         OpenRequest memory request = openRequest(false, lower, upper, liquidity, uint128(maximum1 + extra1));
         request.escrow = uint128(bound(escrowSeed, 500e6, 5_000e6));
         uint256 shortId = open(request);
-        // The price rises through the range: it repays all in token1 and the trader keeps its token0.
+        // The price rises through the range: it repays all in token1 and the trader keeps its token0. Hourly points
+        // at the range's top and at the end, as a keeper records them, so the realized charge is the crossing's alone.
+        setPrice(upper, 1);
+        vm.warp(block.timestamp + 1 hours);
+        vault.recordPrice(vaultId);
         setPrice(PRICE_TICK + int24(int256(bound(moveSeed, 1_000, 5_000))), 1);
+        vm.warp(block.timestamp + 1 hours);
+        vault.recordPrice(vaultId);
         uint256 basis = vault.positionOf(shortId).basis;
         vm.recordLogs();
         (uint256 paid0, uint256 paid1) = closeFull(shortId, 0, maximum1);

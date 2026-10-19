@@ -10,6 +10,7 @@ import {IMetricOmmPoolActions} from "metric/interfaces/IMetricOmmPool/IMetricOmm
 import {CloseRequest, Ledger, OpenRequest, Position, Venue} from "vault/VaultTypes.sol";
 import {IMetricLendingVault} from "vault/interfaces/IMetricLendingVault.sol";
 import {MetricPrice} from "vault/libraries/MetricPrice.sol";
+import {MetricState} from "vault/libraries/MetricState.sol";
 import {DebtTotals, VaultMath} from "vault/libraries/VaultMath.sol";
 import {VaultPricing} from "vault/libraries/VaultPricing.sol";
 import {PoolReads} from "./invariant/MetricVaultHandler.sol";
@@ -304,31 +305,47 @@ contract MetricVaultFuzzTest is MetricFixture {
 
     // ---------------------------------------------------------------- placement after a jump
 
-    /// @dev Audit finding X-1: however far outside trading pushes the cursor, a deposit waits in the buffer and the
-    /// window holds still, so the vault's tokens never land on the wrong side of the oracle price. Every
-    /// share stays inside the window and the ledger holds; once the trade is reversed, a deposit places again.
-    function testFuzz_pushedCursor_depositWaitsForTheReference(bool up, uint256 sizeSeed) public {
+    /// @dev Audit finding X-1: however far outside trading pushes the cursor, a deposit places quote only below both
+    /// the reference and the cursor, and the window holds still, so the vault's tokens never land on the wrong side of
+    /// the oracle price. Every share stays inside the window and the ledger holds; the deposit is placed at once, not
+    /// held back, and one after the trade is reversed is placed too.
+    function testFuzz_pushedCursor_placesOnlyOnTheReferenceSides(bool up, uint256 sizeSeed) public {
         deposit(lender, 20e18, 40_000e6);
         Venue memory before = vault.venueOf(vaultId);
         uint256 outsiderBase = base.balanceOf(address(outsider));
         if (up) outsider.swap(pool, false, int128(int256(bound(sizeSeed, 150_000e6, 800_000e6))));
         else outsider.swap(pool, true, int128(int256(bound(sizeSeed, 75e18, 400e18))));
         uint256 buffer1Before = vault.ledgerOf(vaultId).buffer1;
+        uint256 quoteAboveBefore = _quoteAtOrAbove(0);
         deposit(lender, 0, 10_000e6);
-        assertEq(vault.ledgerOf(vaultId).buffer1, buffer1Before + 10_000e6, "the deposit waits in the buffer");
+        assertEq(_quoteAtOrAbove(0), quoteAboveBefore, "no quote placed above the reference");
         assertEq(vault.venueOf(vaultId).lowestBin, before.lowestBin, "the window held still");
         _assertAllInsideWindow();
         assertLedger();
-        // Reverse the trade: the cursor returns to the reference and the waiting quote is placed.
+        // Reverse the trade: the cursor comes back near the reference, and a deposit there is placed as well.
         if (up) outsider.swap(pool, true, int128(int256(base.balanceOf(address(outsider)) - outsiderBase)));
         else outsider.swap(pool, false, -int128(int256(outsiderBase - base.balanceOf(address(outsider)))));
         deposit(lender, 0, 1_000e6);
-        assertLt(vault.ledgerOf(vaultId).buffer1, buffer1Before + 11_000e6, "placed once back at the reference");
+        assertLt(vault.ledgerOf(vaultId).buffer1, buffer1Before + 11_000e6, "placed back near the reference");
         _assertAllInsideWindow();
         assertLedger();
     }
 
     // ---------------------------------------------------------------- helpers
+
+    /// @dev The vault's quote, in Metric's scaled units, in bins from `fromBin` up: the fixture's reference lies on the
+    /// edge below bin 0, so bins from 0 up are above it.
+    function _quoteAtOrAbove(int256 fromBin) internal view returns (uint256 amount1) {
+        Venue memory venue = vault.venueOf(vaultId);
+        // every pool bin from `fromBin` up
+        for (int256 binIndex = fromBin; binIndex <= venue.poolHighestBin; ++binIndex) {
+            uint256 ours =
+                PoolStateLibrary._positionBinShares(address(pool), address(vault), uint80(vaultId), int16(binIndex));
+            if (ours == 0) continue;
+            MetricState.Bin memory state = MetricState.bin(address(pool), int16(binIndex));
+            amount1 += ours * state.balance1Scaled / state.totalShares;
+        }
+    }
 
     function _band() internal returns (uint160, uint160) {
         return MetricPrice.band(address(pool), 1, 1e12);
@@ -400,7 +417,7 @@ contract MetricVaultFuzzTest is MetricFixture {
             address(vault),
             vaultId,
             venue.lowestBin,
-            vault.parametersOf(vaultId).binCount,
+            uint256(int256(venue.highestBin) - venue.lowestBin + 1),
             venue.scale0,
             venue.scale1
         );
@@ -419,14 +436,13 @@ contract MetricVaultFuzzTest is MetricFixture {
 
     function _assertAllInsideWindow() internal view {
         Venue memory venue = vault.venueOf(vaultId);
-        uint256 binCount = vault.parametersOf(vaultId).binCount;
         // every pool bin
         for (int256 binIndex = venue.poolLowestBin; binIndex <= venue.poolHighestBin; ++binIndex) {
             uint256 ours =
                 PoolStateLibrary._positionBinShares(address(pool), address(vault), uint80(vaultId), int16(binIndex));
             if (ours == 0) continue;
             assertGe(binIndex, venue.lowestBin, "inside window, low side");
-            assertLt(binIndex, int256(venue.lowestBin) + int256(binCount), "inside window, high side");
+            assertLe(binIndex, venue.highestBin, "inside window, high side");
         }
     }
 }

@@ -653,32 +653,33 @@ contract GapDecimalsAndGasTest is MetricFixture {
         );
     }
 
-    /// @dev The window's 31 bins other than the active one each hold the vault's shares: the most a window holds.
+    /// @dev Every bin of the window except the active one holds the vault's shares: the most a window holds. With the
+    /// reference inside a bin that bin is the active one, the window's empty middle; on an edge, it is one of the two
+    /// nearest bins, which Metric will not take single-sided.
     function _assertWindowFull(Market memory market) internal view {
         Venue memory venue = vault.venueOf(market.vaultId);
+        uint256 windowBins = uint256(int256(venue.highestBin) - venue.lowestBin + 1);
         uint256 heldBins;
-        // binCount <= MetricVenue.MAX_BINS == 32
-        for (uint256 offset = 0; offset < market.configuration.binCount; ++offset) {
+        // windowBins <= MetricVenue.MAX_BINS + 1
+        for (uint256 offset = 0; offset < windowBins; ++offset) {
             int16 binIndex = int16(int256(venue.lowestBin) + int256(offset));
             uint256 ours =
                 MetricState.positionShares(address(market.pool), address(vault), uint80(market.vaultId), binIndex);
             if (ours != 0) ++heldBins;
         }
-        assertGe(heldBins, uint256(market.configuration.binCount) - 1, "every bin but the active one holds shares");
+        assertGe(heldBins, windowBins - 1, "every bin but the active one holds shares");
     }
 
     function _assertInsideWindow(Market memory market) internal view {
-        int256 lowestBin = vault.venueOf(market.vaultId).lowestBin;
+        Venue memory venue = vault.venueOf(market.vaultId);
         // every pool bin: 40 per side
         for (int256 binIndex = -40; binIndex < 40; ++binIndex) {
             uint256 ours = MetricState.positionShares(
                 address(market.pool), address(vault), uint80(market.vaultId), int16(binIndex)
             );
             if (ours == 0) continue;
-            assertGe(binIndex, lowestBin, "inside the window, low side");
-            assertLt(
-                binIndex, lowestBin + int256(uint256(market.configuration.binCount)), "inside the window, high side"
-            );
+            assertGe(binIndex, venue.lowestBin, "inside the window, low side");
+            assertLe(binIndex, venue.highestBin, "inside the window, high side");
         }
     }
 

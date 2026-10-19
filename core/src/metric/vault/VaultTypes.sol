@@ -43,6 +43,17 @@ struct VaultParameters {
     uint8 binCount;
     /// @notice The most of a bin's shares the vault may hold, where others hold some; 10,000 for no cap.
     uint16 weightCapBps;
+    /// @notice An open or increase must escrow at least this share of the position's `M1`, as well as
+    /// `minimumEscrowSeconds` of premium. The realized charge is zero at open, so a time-based minimum alone would
+    /// leave the escrow empty when the range starts to cost (owner, 2026-10-19: 5%). Zero for none.
+    uint16 minimumEscrowBps;
+    /// @notice The transformation rate's multiple of volatility, in basis points: a range fully past the price, all in
+    /// the token lenders did not lend, pays `k·σ` a year on its `M1` (owner, 2026-10-19: k = 2, 20,000). Zero for none.
+    uint16 transformationRateBps;
+    /// @notice Added to the realized charge and the transformation rate of a position whose leverage at its open or
+    /// last increase was at least `RealizedCharge.MIN_SURCHARGE_LEVERAGE`, in basis points (owner, 2026-10-19:
+    /// ×1.03–1.05). Zero for none.
+    uint16 highLeverageSurchargeBps;
 }
 
 /// @notice One version of the two premium curves and the time it took effect. Rate indices integrate each version over
@@ -51,6 +62,56 @@ struct CurvePair {
     Curve token0;
     Curve token1;
     uint40 startedAt;
+}
+
+/// @notice One price point: the admin-free band's geometric mid, the time it was read, and the transformation rate in
+/// force from it until the next point.
+struct PricePoint {
+    uint160 sqrtPriceX96;
+    uint40 recordedAt;
+    /// @dev `k·σ` a year in basis points, from the volatility oracle as this point left it.
+    uint32 rentRateBps;
+}
+
+/// @notice One Fenwick node of the price trees: sums over the intervals that start at a price whose tick is in the
+/// node's span. Each interval runs from one point to the next and is keyed by the tick of its first point.
+struct ChargeNode {
+    /// @dev Σ ΔP/√P, in units of 2^-96.
+    int256 perRootX96;
+    /// @dev Σ ΔP, in units of 2^-96.
+    int256 perMoveX96;
+    /// @dev Σ rentRateBps · Δt.
+    int256 rentBpsSeconds;
+}
+
+/// @notice The vault's price points, its volatility oracle, and the trees the realized charge reads.
+struct PriceRecord {
+    /// @dev Points recorded so far; the last is `count − 1`.
+    uint32 count;
+    /// @dev The volatility oracle: yearly variances of the price's returns, in WAD, averaged over about a day (fast)
+    /// and about thirty days (slow).
+    uint112 varianceFastWad;
+    uint112 varianceSlowWad;
+    /// @dev The rent terms of every interval, so the sum above a tick is this less the prefix below it.
+    int256 rentTotalBpsSeconds;
+    mapping(uint256 index => PricePoint) points;
+    mapping(uint256 index => ChargeNode) nodes;
+}
+
+/// @notice Where a position's realized charge was last measured to, and the tree sums there.
+struct ChargeStart {
+    uint160 sqrtPriceX96;
+    /// @dev The last point at or before `startedAt`.
+    uint32 point;
+    uint40 startedAt;
+    /// @dev Leverage at least `RealizedCharge.MIN_SURCHARGE_LEVERAGE` at the open or the last increase.
+    bool highLeverage;
+    /// @dev The trees' sums, at the start, over the intervals starting inside the range and below it, and the rent
+    /// over the intervals starting past it.
+    int256 rootInsideX96;
+    int256 moveInsideX96;
+    int256 moveBelowX96;
+    int256 rentPastBpsSeconds;
 }
 
 /// @notice The premium rate indices and the released amounts they are computed on.
@@ -100,9 +161,11 @@ struct Stream {
 }
 
 /// @notice The vault's liquidity in its Metric pool.
-/// @dev All of it lies in the window `[lowestBin, lowestBin + binCount)`, fixed at the first placement.
+/// @dev All of it lies in the window `[lowestBin, highestBin]`: the `binCount / 2` bins on each side of the bin holding
+/// the reference, and that bin when the reference lies inside it, cut at the pool's bins. Fixed at the first placement.
 struct Venue {
     int16 lowestBin;
+    int16 highestBin;
     /// @dev Whether the window has been set; it is set at the first placement, centered on the active bin.
     bool windowSet;
     /// @dev Where the oracle reference sits in the pool's fixed grid, recorded when the window is set, since the
@@ -148,6 +211,8 @@ struct Vault {
     mapping(address owner => uint256[2]) unclaimed;
     /// @dev Limit-order makers' buckets, lent to maker positions; separate from the lenders above.
     Book book;
+    /// @dev Hourly price points for the realized charge and the transformation rate (owner, 2026-10-19).
+    PriceRecord prices;
 }
 
 struct Position {
@@ -194,6 +259,9 @@ struct VaultStore {
     mapping(address owner => uint256[] positionIds) makerPositionIds;
     /// @dev Each open position's index in its owner's list for its book.
     mapping(uint256 positionId => uint256 index) indexInOwnerList;
+    /// @dev Where each passive position's realized charge was last measured to. Kept beside `positions` rather than in
+    /// it, so `positionOf` keeps the singleton within the size limit.
+    mapping(uint256 positionId => ChargeStart) chargeStarts;
 }
 
 struct OpenRequest {

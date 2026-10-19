@@ -357,7 +357,7 @@ contract MetricVenueBehaviorTest is MetricFixture {
             uint256 ours = MetricState.positionShares(address(pool), address(vault), uint80(vaultId), int16(binIndex));
             if (ours == 0) continue;
             assertGe(binIndex, venue.lowestBin, "inside window, low side");
-            assertLt(binIndex, int256(venue.lowestBin) + 16, "inside window, high side");
+            assertLe(binIndex, venue.highestBin, "inside window, high side");
         }
     }
 }

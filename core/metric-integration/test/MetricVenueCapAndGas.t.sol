@@ -33,8 +33,9 @@ contract MetricVenueCapAndGasTest is MetricFixture {
         vm.prank(lender);
         vault.deposit(cappedId, 100e18, 200_000e6, 0, lender);
         Venue memory venue = vault.venueOf(cappedId);
-        // window bins
-        for (uint256 offset = 0; offset < 16; ++offset) {
+        uint256 windowBins = uint256(int256(venue.highestBin) - venue.lowestBin + 1);
+        // windowBins <= MetricVenue.MAX_BINS + 1
+        for (uint256 offset = 0; offset < windowBins; ++offset) {
             int16 binIndex = int16(int256(venue.lowestBin) + int256(offset));
             uint256 ours = MetricState.positionShares(address(capped), address(vault), uint80(cappedId), binIndex);
             uint256 total = MetricState.bin(address(capped), binIndex).totalShares;

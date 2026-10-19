@@ -3,10 +3,11 @@ pragma solidity 0.8.37;
 
 import {FullMath} from "v4-core/src/libraries/FullMath.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
-import {Position, Vault} from "../VaultTypes.sol";
+import {ChargeStart, Position, Vault} from "../VaultTypes.sol";
 import {Charge, VaultAccrual} from "./VaultAccrual.sol";
 import {DebtValuation} from "./DebtValuation.sol";
 import {DebtTotals, VaultMath} from "./VaultMath.sol";
+import {RealizedCharge} from "./RealizedCharge.sol";
 
 /// @notice The bookkeeping shared by opening and closing: debt totals, collecting premium, and the profit share.
 library VaultBook {
@@ -29,22 +30,32 @@ library VaultBook {
         DebtValuation.remove(vault.debts, liquidity, position.tickLower, position.tickUpper);
     }
 
-    /// @notice The premium the position owes beyond its escrow, rounded up. Does not change state.
-    function shortfall(Vault storage vault, Position storage position) internal view returns (uint256) {
-        uint256 due = VaultAccrual.charge(vault, position, true).premium;
+    /// @notice The premium the position owes beyond its escrow, rounded up, through the last price point. Does not
+    /// change state.
+    function shortfall(Vault storage vault, Position storage position, ChargeStart storage start)
+        internal
+        view
+        returns (uint256)
+    {
+        uint256 due = VaultAccrual.charge(vault, position, start, true, 0).premium;
         uint256 escrow = position.escrow;
         return due > escrow ? due - escrow : 0;
     }
 
-    /// @notice Settles the position's premium from its escrow. Returns what is still unpaid; the caller decides whether
-    /// that is allowed. Moves the snapshots: anything unpaid is either collected by the caller or forgone. Closes round
-    /// what is owed up once (`roundUp`); settlements anyone may call round down and carry the rest.
-    function collect(Vault storage vault, Position storage position, bool roundUp)
-        internal
-        returns (Charge memory unpaid)
-    {
-        Charge memory owed = VaultAccrual.charge(vault, position, roundUp);
+    /// @notice Settles the position's premium from its escrow, with `stubWad` from the last price point to now where a
+    /// close or increase charges it. Returns what is still unpaid; the caller decides whether that is allowed. Moves
+    /// the snapshots and the realized charge's start: anything unpaid is either collected by the caller or forgone.
+    /// Closes round what is owed up once (`roundUp`); settlements anyone may call round down and carry the rest.
+    function collect(
+        Vault storage vault,
+        Position storage position,
+        ChargeStart storage start,
+        bool roundUp,
+        uint256 stubWad
+    ) internal returns (Charge memory unpaid) {
+        Charge memory owed = VaultAccrual.charge(vault, position, start, roundUp, stubWad);
         VaultAccrual.snapshot(vault, position);
+        RealizedCharge.restart(vault, position, start);
         position.premiumFractionWad = owed.premiumFractionWad.toUint64();
         uint256 due = owed.premium;
         uint256 fromEscrow = due < position.escrow ? due : position.escrow;

@@ -13,6 +13,7 @@ import {
     Ledger,
     OpenRequest,
     Position,
+    PricePoint,
     Stream,
     Vault,
     VaultParameters,
@@ -157,6 +158,12 @@ contract MetricLendingVault is
 
     function settle(uint256 positionId) external nonReentrant returns (bool) {
         return VaultPositions.settle(_store, positionId);
+    }
+
+    /// @notice Records a price point for the realized charge and the transformation rate, once an hour has passed since
+    /// the last. Anyone may call; a keeper is expected to, hourly. Returns whether it recorded.
+    function recordPrice(uint256 vaultId) external nonReentrant returns (bool) {
+        return VaultAdmin.recordPrice(_store, vaultId);
     }
 
     function flag(uint256 positionId) external nonReentrant {
@@ -400,6 +407,15 @@ contract MetricLendingVault is
 
     function positionOf(uint256 positionId) external view returns (Position memory) {
         return _store.positions[positionId];
+    }
+
+    /// @notice The vault's price point count, the oracle's σ in WAD, and the point at `index`.
+    function priceOf(uint256 vaultId, uint256 index)
+        external
+        view
+        returns (uint256 count, uint256 sigmaWad, PricePoint memory point)
+    {
+        return VaultAdmin.priceOf(_store, vaultId, index);
     }
 
     /// @notice The owner's open position ids in each book, in no fixed order: a full close moves the list's last id

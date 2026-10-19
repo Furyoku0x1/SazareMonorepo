@@ -21,7 +21,7 @@ contract MetricVaultInvariantTest is MetricFixture {
         deposit(lender, 20e18, 40_000e6);
         handler = new MetricVaultHandler(vault, vaultId, pool, provider, base, quote, outsider, address(this));
         targetContract(address(handler));
-        bytes4[] memory selectors = new bytes4[](15);
+        bytes4[] memory selectors = new bytes4[](16);
         selectors[0] = MetricVaultHandler.deposit.selector;
         selectors[1] = MetricVaultHandler.withdraw.selector;
         selectors[2] = MetricVaultHandler.open.selector;
@@ -37,6 +37,7 @@ contract MetricVaultInvariantTest is MetricFixture {
         selectors[12] = MetricVaultHandler.openThroughVenue.selector;
         selectors[13] = MetricVaultHandler.closeThroughVenue.selector;
         selectors[14] = MetricVaultHandler.withdrawThroughVenue.selector;
+        selectors[15] = MetricVaultHandler.recordPrice.selector;
         targetSelector(StdInvariant.FuzzSelector({addr: address(handler), selectors: selectors}));
     }
 
@@ -48,7 +49,6 @@ contract MetricVaultInvariantTest is MetricFixture {
     /// @dev Every bin where the vault holds shares, across the whole pool, lies in its window.
     function invariant_sharesInsideWindow() public view {
         Venue memory venue = vault.venueOf(vaultId);
-        uint256 binCount = vault.parametersOf(vaultId).binCount;
         // every pool bin
         for (int256 binIndex = venue.poolLowestBin; binIndex <= venue.poolHighestBin; ++binIndex) {
             uint256 ours =
@@ -56,7 +56,7 @@ contract MetricVaultInvariantTest is MetricFixture {
             if (ours == 0) continue;
             assertTrue(venue.windowSet, "shares before a window");
             assertGe(binIndex, venue.lowestBin, "below the window");
-            assertLt(binIndex, int256(venue.lowestBin) + int256(binCount), "above the window");
+            assertLe(binIndex, venue.highestBin, "above the window");
         }
     }
 
@@ -186,6 +186,7 @@ contract MetricVaultInvariantTest is MetricFixture {
         emit log_named_uint("force closes, pool paused", paused);
         emit log_named_uint("force closes, provider failing", unpriced);
         emit log_named_uint("settles", handler.settles());
+        emit log_named_uint("price points", handler.pricePoints());
         emit log_named_uint("flags", handler.flags());
         emit log_named_uint("outside swaps", handler.outsideSwaps());
         emit log_named_uint("open positions", handler.openCount());
@@ -215,7 +216,7 @@ contract MetricVaultInvariantTest is MetricFixture {
     function probeHoldings() external {
         deposit(lender, 0, 1e6);
         Venue memory venue = vault.venueOf(vaultId);
-        uint256 binCount = vault.parametersOf(vaultId).binCount;
+        uint256 binCount = uint256(int256(venue.highestBin) - venue.lowestBin + 1);
         (uint256 read0, uint256 read1) = PoolReads.holdings(
             address(pool), address(vault), vaultId, venue.lowestBin, binCount, venue.scale0, venue.scale1
         );

@@ -22,13 +22,16 @@ contract LimitSwapper is IMetricOmmSwapCallback {
 
 /// @notice Audit finding X-1: anyone could push Metric's cursor off the oracle reference, trigger a vault placement
 /// (a deposit or a close), and trade back, buying the vault's newly placed base below the reference (or its quote
-/// above). On a 400,000 USD vault a 5% push took 3.8% of lender value. The vault now places only while the cursor's bin
-/// holds the reference.
+/// above). On a 400,000 USD vault a 5% push took 3.8% of lender value. The vault now places token0 only above both the
+/// reference and the cursor, and token1 only below both.
 contract PlacementSandwichTest is MetricFixture {
     /// @dev The fixture's reference price, in whole quote per whole base.
     uint256 internal constant REFERENCE_PRICE = 2_000;
     /// @dev Inside the outsider's ±4% of depth, and ten bins of 0.2% off the reference.
     uint256 internal constant PUSH_BPS = 200;
+    /// @dev Six bins off the reference: inside the fixture's window of eight bins a side, so the cursor's bin is one
+    /// the vault places in.
+    uint256 internal constant INSIDE_PUSH_BPS = 120;
 
     LimitSwapper internal swapper;
     address internal secondLender = makeAddr("lender2");
@@ -47,10 +50,10 @@ contract PlacementSandwichTest is MetricFixture {
         deposit(lender, 100e18, 200_000e6);
     }
 
-    /// @dev Pushed down, a lender's base deposit waits in the buffer, so it puts no more base below the reference than
-    /// the push itself sold into the vault's quote bins (bought cheaply, which is harmless); the round trip only costs
-    /// the swapper the pool's fees. A deposit placed around the pushed cursor would put base below the reference for
-    /// the swapper to buy back cheaply, the X-1 sandwich.
+    /// @dev Pushed down, a lender's base deposit is placed only above both the reference and the cursor, so it puts no
+    /// more base below the reference than the push itself sold into the vault's quote bins (bought cheaply, which is
+    /// harmless); the round trip only costs the swapper the pool's fees. A deposit placed around the pushed cursor
+    /// would put base below the reference for the swapper to buy back cheaply, the X-1 sandwich.
     function test_pushDownThenDeposit_placesNoBaseBelowTheReference() public {
         uint256 walletBefore = _walletValue();
         _push(true);
@@ -58,16 +61,16 @@ contract PlacementSandwichTest is MetricFixture {
         uint256 buffer0Before = vault.ledgerOf(vaultId).buffer0;
         vm.prank(secondLender);
         vault.deposit(vaultId, 1e18, 0, 0, secondLender);
-        assertEq(vault.ledgerOf(vaultId).buffer0, buffer0Before + 1e18, "the deposit waits in the buffer");
+        assertLt(vault.ledgerOf(vaultId).buffer0, buffer0Before + 1e18, "the deposit is placed");
         assertEq(_baseBelowReference(), belowAfterPush, "no base moved below the reference");
         _reverse(true);
         assertLe(_walletValue(), walletBefore, "the sandwich does not pay");
         assertLedger();
     }
 
-    /// @dev Pushed up, an honest lender's deposit waits in the buffer rather than put quote above the reference, and
-    /// is placed once the price is back. A deposit placed around the pushed cursor would put quote above the
-    /// reference for the swapper to sell into dearly, the X-1 sandwich run through a deposit.
+    /// @dev Pushed up, an honest lender's deposit is placed only below both the reference and the cursor rather than
+    /// put quote above the reference. A deposit placed around the pushed cursor would put quote above the reference for
+    /// the swapper to sell into dearly, the X-1 sandwich run through a deposit.
     function test_pushUpThenDeposit_placesNoQuoteAboveTheReference() public {
         uint256 walletBefore = _walletValue();
         _push(false);
@@ -75,23 +78,61 @@ contract PlacementSandwichTest is MetricFixture {
         uint256 buffer1Before = vault.ledgerOf(vaultId).buffer1;
         vm.prank(secondLender);
         vault.deposit(vaultId, 0, 1_000e6, 0, secondLender);
-        assertEq(vault.ledgerOf(vaultId).buffer1, buffer1Before + 1_000e6, "the deposit waits in the buffer");
+        assertLt(vault.ledgerOf(vaultId).buffer1, buffer1Before + 1_000e6, "the deposit is placed");
         assertEq(_quoteAboveReference(), aboveAfterPush, "no quote moved above the reference");
         _reverse(false);
         assertLe(_walletValue(), walletBefore, "the sandwich does not pay");
-        // Back at the reference, the next placement puts the waiting quote to work.
+        assertLedger();
+    }
+
+    /// @dev Pushed down inside the window, a deposit of both tokens places both in the active bin (owner, 2026-10-19),
+    /// so base goes below the reference there and the swapper buys it back cheaply: X-1's sandwich, kept to that one
+    /// bin. On these 0.2% bins with 5 bp half-spreads it pays; the swapper takes no more than that base's discount to
+    /// the reference at the bin's far edge. On Robinhood's 1 bp bins the window reaches about 4 bp, near the band.
+    function test_pushDownInsideTheWindow_sandwichTakesOnlyTheActiveBinsDiscount() public {
+        uint256 walletBefore = _walletValue();
+        _pushBy(true, INSIDE_PUSH_BPS);
+        int16 active = MetricState.cursor(address(pool)).binIndex;
+        uint256 activeBase = _vaultPart(active, true);
         vm.prank(secondLender);
-        vault.deposit(vaultId, 0, 1_000e6, 0, secondLender);
-        assertLt(vault.ledgerOf(vaultId).buffer1, buffer1Before + 2_000e6, "placed once back at the reference");
+        vault.deposit(vaultId, 50e18, 100_000e6, 0, secondLender);
+        uint256 addedBase = _vaultPart(active, true) - activeBase;
+        assertGt(addedBase, 0, "the active bin takes base below the reference");
+        _reverse(true);
+        uint256 farEdgeBps = uint256(int256(-active)) * BIN_LENGTH_E6 / 100;
+        uint256 discount = addedBase * REFERENCE_PRICE / 1e12 * farEdgeBps / 10_000;
+        assertLe(_walletValue(), walletBefore + discount, "no more than the active bin's discount");
+        assertLedger();
+    }
+
+    /// @dev The same pushed up: the active bin takes quote above the reference, which the swapper sells base into
+    /// dearly, by no more than that quote's premium over the reference at the bin's far edge.
+    function test_pushUpInsideTheWindow_sandwichTakesOnlyTheActiveBinsPremium() public {
+        uint256 walletBefore = _walletValue();
+        _pushBy(false, INSIDE_PUSH_BPS);
+        int16 active = MetricState.cursor(address(pool)).binIndex;
+        uint256 activeQuote = _vaultPart(active, false);
+        vm.prank(secondLender);
+        vault.deposit(vaultId, 50e18, 100_000e6, 0, secondLender);
+        uint256 addedQuote = _vaultPart(active, false) - activeQuote;
+        assertGt(addedQuote, 0, "the active bin takes quote above the reference");
+        _reverse(false);
+        uint256 farEdgeBps = uint256(int256(active) + 1) * BIN_LENGTH_E6 / 100;
+        uint256 premium = addedQuote / 1e12 * farEdgeBps / 10_000;
+        assertLe(_walletValue(), walletBefore + premium, "no more than the active bin's premium");
         assertLedger();
     }
 
     function _push(bool down) internal {
+        _pushBy(down, PUSH_BPS);
+    }
+
+    function _pushBy(bool down, uint256 pushBps) internal {
         if (down) {
-            swapper.swapToLimit(pool, true, int128(int256(10_000e18)), _limitX64(10_000 - PUSH_BPS));
+            swapper.swapToLimit(pool, true, int128(int256(10_000e18)), _limitX64(10_000 - pushBps));
             return;
         }
-        swapper.swapToLimit(pool, false, int128(int256(100_000_000e6)), _limitX64(10_000 + PUSH_BPS));
+        swapper.swapToLimit(pool, false, int128(int256(100_000_000e6)), _limitX64(10_000 + pushBps));
     }
 
     function _reverse(bool down) internal {

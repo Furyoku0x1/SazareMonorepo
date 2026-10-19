@@ -58,7 +58,8 @@ contract RateAnchoringTest is MetricFixture {
         vm.prank(lender);
         vault.deposit(clampedVault, 50e18, 100_000e6, 0, lender);
         Venue memory venue = vault.venueOf(clampedVault);
-        assertEq(venue.lowestBin, -4, "the window is clamped");
+        assertEq(venue.lowestBin, -4, "the window is cut at the pool's lowest bin");
+        assertEq(venue.highestBin, 7, "not shifted up to make room");
         assertApproxEqRel(venue.rateHoldings0, venue.holdings0, 0.01e18, "base counted as base");
         assertApproxEqRel(venue.rateHoldings1, venue.holdings1, 0.01e18, "quote counted as quote");
         uint256 shortPositionId = _openShortIn(clampedVault, 30e18);

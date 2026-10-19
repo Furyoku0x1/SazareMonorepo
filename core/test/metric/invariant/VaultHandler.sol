@@ -72,6 +72,7 @@ contract VaultHandler is VaultFixture {
     uint256 public increases;
     uint256 public venueOpens;
     uint256 public venueCloses;
+    uint256 public pricePoints;
 
     constructor(
         MetricLendingVault sharedVault,
@@ -423,6 +424,11 @@ contract VaultHandler is VaultFixture {
     }
 
     // ---------------------------------------------------------------- environment
+
+    /// @dev A keeper's price point on one vault, which the vault refuses under an hour after the last.
+    function actRecordPrice(uint256 vaultChoice) external {
+        if (vault.recordPrice(vaultIds[vaultChoice % VAULT_COUNT])) pricePoints += 1;
+    }
 
     function actWarp(uint256 elapsedSeconds) external {
         vm.warp(block.timestamp + bound(elapsedSeconds, 1, MAX_WARP_SECONDS));

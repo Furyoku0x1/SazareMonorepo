@@ -4,7 +4,7 @@ pragma solidity 0.8.37;
 import {FullMath} from "v4-core/src/libraries/FullMath.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {PositionIndex} from "./PositionIndex.sol";
-import {IncreaseRequest, OpenRequest, Position, Vault, VaultStore} from "../VaultTypes.sol";
+import {ChargeStart, IncreaseRequest, OpenRequest, Position, Vault, VaultStore} from "../VaultTypes.sol";
 import {IMetricLendingVault} from "../interfaces/IMetricLendingVault.sol";
 import {Charge, VaultAccrual} from "./VaultAccrual.sol";
 import {VaultBook} from "./VaultBook.sol";
@@ -12,6 +12,7 @@ import {VaultLedger} from "./VaultLedger.sol";
 import {VaultMath} from "./VaultMath.sol";
 import {VaultPricing} from "./VaultPricing.sol";
 import {MetricVenue} from "./MetricVenue.sol";
+import {RealizedCharge} from "./RealizedCharge.sol";
 import {VenueSwap} from "./VenueSwap.sol";
 
 /// @notice Opening positions, topping them up, settling their premium, and flagging delinquent ones.
@@ -42,10 +43,13 @@ library VaultPositions {
         if (request.liquidity == 0) revert IMetricLendingVault.ZeroAmount();
         VaultAccrual.checkpoint(vault, request.vaultId);
         Opening memory opening = _price(vault, request.tickLower, request.tickUpper, request.liquidity);
+        // Read before the release gathers from the pool, in the same state as the band the open priced at.
+        uint160 sqrtMidX96 = _mid(vault);
         _release(vault, request.vaultId, opening);
         positionId = ++store.lastPositionId;
         Position storage position = store.positions[positionId];
         _record(vault, position, request, opening);
+        RealizedCharge.start(vault, position, store.chargeStarts[positionId], sqrtMidX96);
         PositionIndex.add(store.passivePositionIds[position.owner], store.indexInOwnerList, positionId);
         _fund(vault, position, request.collateral, request.escrow);
         uint256 sellable = _sellable(opening, request.isLong, request.collateral);
@@ -79,10 +83,14 @@ library VaultPositions {
         // Settled at the old size first, so the added liquidity pays nothing for the time before it was borrowed. A
         // flagged position always has a shortfall (only a settlement clears the flag), so this refuses it too; the
         // trader cures it with `addEscrow`.
-        if (!_trySettle(vault, request.positionId, position)) revert IMetricLendingVault.PremiumUnpaid();
+        ChargeStart storage start = store.chargeStarts[request.positionId];
+        if (!_trySettle(vault, request.positionId, position, start)) revert IMetricLendingVault.PremiumUnpaid();
+        uint160 sqrtMidX96 = _mid(vault);
+        _payStub(vault, position, start, sqrtMidX96);
         Opening memory opening = _price(vault, position.tickLower, position.tickUpper, request.liquidity);
         _release(vault, vaultId, opening);
         _merge(vault, position, request.liquidity, opening);
+        RealizedCharge.start(vault, position, start, sqrtMidX96);
         _fund(vault, position, request.collateral, request.escrow);
         uint256 sellable = _sellable(opening, position.isLong, request.collateral);
         VenueSwap.Trade memory trade =
@@ -104,7 +112,7 @@ library VaultPositions {
         vault.ledger.escrow += amount.toUint128();
         position.basis += amount.toUint128();
         emit IMetricLendingVault.EscrowAdded(positionId, amount);
-        _trySettle(vault, positionId, position);
+        _trySettle(vault, positionId, position, store.chargeStarts[positionId]);
     }
 
     /// @notice Adds token1 collateral to the reserves.
@@ -142,7 +150,7 @@ library VaultPositions {
         Position storage position = store.positions[positionId];
         if (position.owner == address(0)) revert IMetricLendingVault.UnknownPosition();
         Vault storage vault = store.vaults[position.vaultId];
-        return _trySettle(vault, positionId, position);
+        return _trySettle(vault, positionId, position, store.chargeStarts[positionId]);
     }
 
     /// @notice Starts a delinquent position's grace period. Anyone may flag; the clock does not restart while the
@@ -152,7 +160,9 @@ library VaultPositions {
         if (position.owner == address(0)) revert IMetricLendingVault.UnknownPosition();
         Vault storage vault = store.vaults[position.vaultId];
         VaultAccrual.checkpoint(vault, position.vaultId);
-        if (VaultBook.shortfall(vault, position) == 0) revert IMetricLendingVault.NotDelinquent();
+        if (VaultBook.shortfall(vault, position, store.chargeStarts[positionId]) == 0) {
+            revert IMetricLendingVault.NotDelinquent();
+        }
         if (position.delinquentSince != 0) return;
         position.delinquentSince = uint40(block.timestamp);
         emit IMetricLendingVault.Flagged(positionId);
@@ -358,11 +368,14 @@ library VaultPositions {
 
     // ---------------------------------------------------------------- settling
 
-    function _trySettle(Vault storage vault, uint256 positionId, Position storage position) private returns (bool) {
+    function _trySettle(Vault storage vault, uint256 positionId, Position storage position, ChargeStart storage start)
+        private
+        returns (bool)
+    {
         VaultAccrual.checkpoint(vault, position.vaultId);
-        if (VaultBook.shortfall(vault, position) != 0) return false;
-        Charge memory owed = VaultAccrual.charge(vault, position, false);
-        Charge memory unpaid = VaultBook.collect(vault, position, false);
+        if (VaultBook.shortfall(vault, position, start) != 0) return false;
+        Charge memory owed = VaultAccrual.charge(vault, position, start, false, 0);
+        Charge memory unpaid = VaultBook.collect(vault, position, start, false, 0);
         // The shortfall, rounded up, was zero, so the escrow covered everything.
         assert(VaultBook.total(unpaid) == 0);
         position.delinquentSince = 0;
@@ -370,9 +383,30 @@ library VaultPositions {
         return true;
     }
 
+    /// @dev The band's mid an open or increase starts the realized charge at; both already need a price.
+    function _mid(Vault storage vault) private returns (uint160 sqrtMidX96) {
+        bool priced;
+        (priced, sqrtMidX96) = RealizedCharge.mid(vault);
+        if (!priced) revert IMetricLendingVault.InvalidBand();
+    }
+
+    /// @dev Charges the old liquidity from where the settlement left its start to the price now, before the increase
+    /// restarts the charge there. Paid from the escrow; an escrow that cannot pay it refuses the increase, as a
+    /// shortfall does.
+    function _payStub(Vault storage vault, Position storage position, ChargeStart storage start, uint160 sqrtMidX96)
+        private
+    {
+        uint256 stubWad = RealizedCharge.stubWad(vault, position, start, sqrtMidX96);
+        Charge memory unpaid = VaultBook.collect(vault, position, start, true, stubWad);
+        if (VaultBook.total(unpaid) != 0) revert IMetricLendingVault.PremiumUnpaid();
+    }
+
     /// @dev The escrow must cover the premium over `minimumEscrowSeconds` at the rates the borrow left, blended by the
-    /// position's weights as its premium is, and rounded up as settlement rounds a close.
+    /// position's weights as its premium is, and rounded up as settlement rounds a close; and `minimumEscrowBps` of
+    /// `M1`, since the realized charge is zero at the open and only a share of the notional can stand for it.
     function _requireEscrow(Vault storage vault, Position storage position) private view {
+        uint256 notionalShare = FullMath.mulDivRoundingUp(position.maximum1, vault.parameters.minimumEscrowBps, BPS);
+        if (position.escrow < notionalShare) revert IMetricLendingVault.EscrowTooSmall();
         (uint256 rate0Wad, uint256 rate1Wad) = VaultAccrual.currentRates(vault);
         uint256 weight0Wad = position.weight0Wad;
         uint256 wad = VaultAccrual.WAD;

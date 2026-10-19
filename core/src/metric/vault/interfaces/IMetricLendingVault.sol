@@ -68,4 +68,6 @@ interface IMetricLendingVault {
     /// @notice A close's payout the token refused to transfer, kept for `owner` to claim.
     event PayoutKept(address indexed owner, uint256 tokenIndex, uint256 amount);
     event PayoutClaimed(uint256 indexed vaultId, address indexed owner, uint256 tokenIndex, uint256 amount);
+    /// @notice A price point for the realized charge: its index, the band's mid, and the oracle's σ after it.
+    event PriceRecorded(uint256 indexed vaultId, uint256 index, uint160 sqrtPriceX96, uint256 sigmaWad);
 }

@@ -260,9 +260,9 @@ contract GapMakerFillsTest is MetricFixture {
     /// @dev The passive vault's shares in each bin of its window, read from the pool.
     function _windowShares() internal view returns (uint256[] memory shares) {
         Venue memory venue = vault.venueOf(vaultId);
-        uint256 count = vault.parametersOf(vaultId).binCount;
+        uint256 count = uint256(int256(venue.highestBin) - venue.lowestBin + 1);
         shares = new uint256[](count);
-        // count <= MetricVenue.MAX_BINS
+        // count <= MetricVenue.MAX_BINS + 1
         for (uint256 offset = 0; offset < count; ++offset) {
             int16 binIndex = int16(int256(venue.lowestBin) + int256(offset));
             shares[offset] = MetricState.positionShares(address(pool), address(vault), uint80(vaultId), binIndex);
@@ -272,8 +272,8 @@ contract GapMakerFillsTest is MetricFixture {
     /// @dev What the passive vault's pool position holds, from its shares and each bin's balances, in native units.
     function _poolHoldings() internal view returns (uint256 amount0, uint256 amount1) {
         Venue memory venue = vault.venueOf(vaultId);
-        uint256 count = vault.parametersOf(vaultId).binCount;
-        // count <= MetricVenue.MAX_BINS
+        uint256 count = uint256(int256(venue.highestBin) - venue.lowestBin + 1);
+        // count <= MetricVenue.MAX_BINS + 1
         for (uint256 offset = 0; offset < count; ++offset) {
             int16 binIndex = int16(int256(venue.lowestBin) + int256(offset));
             uint256 ours = MetricState.positionShares(address(pool), address(vault), uint80(vaultId), binIndex);

@@ -19,6 +19,11 @@ contract BoundedWaitTest is MetricFixture {
     uint256 internal constant HORIZON_DAYS = 400 * 365;
     /// @dev The wait may outlast the point of zero payout by the swap's real cost over the edge price, a few days here.
     uint256 internal constant TOLERANCE_DAYS = 5;
+    /// @dev The fixture's starting price, in whole quote per whole base.
+    uint256 internal constant START_PRICE = 2_000;
+    /// @dev Hourly steps from the start to the test's price, each recorded as a keeper would: the realized charge then
+    /// costs the path's small hourly moves, not one jump across the range.
+    uint256 internal constant PRICE_STEPS = 100;
 
     /// @dev A long that bought base, with the price risen above its range: the bid is above the strike.
     function test_waitEndsWhenTheTraderKeepsNothing_bidAboveTheStrike() public {
@@ -99,6 +104,18 @@ contract BoundedWaitTest is MetricFixture {
         vm.revertToState(snapshot);
     }
 
+    /// @dev Moves the price to `wholePrice` in `PRICE_STEPS` even hourly steps, recording a point at each.
+    function _walkPrice(uint256 wholePrice) internal {
+        // PRICE_STEPS steps
+        for (uint256 step = 1; step <= PRICE_STEPS; ++step) {
+            uint256 priceX64 = (START_PRICE * (PRICE_STEPS - step) + wholePrice * step) * Q64 / PRICE_STEPS;
+            provider.set(uint128(priceX64), HALF_SPREAD_E5);
+            // via_ir may reuse one read of `block.timestamp` across warps; the cheatcode reads the current one.
+            vm.warp(vm.getBlockTimestamp() + 1 hours);
+            assertTrue(vault.recordPrice(vaultId), "an hourly point");
+        }
+    }
+
     /// @dev A 10,000 USD long from `lower` to a percent below the price that spent its quote on base, flagged and past
     /// grace at the given price.
     function _openBaseLong(int24 lower, uint128 collateral, uint256 entryAmountIn, uint256 wholePrice)
@@ -120,7 +137,7 @@ contract BoundedWaitTest is MetricFixture {
         request.entryAmountIn = entryAmountIn;
         vm.prank(trader);
         positionId = vault.open(request);
-        provider.set(uint128(wholePrice * Q64), HALF_SPREAD_E5);
+        _walkPrice(wholePrice);
         vm.warp(block.timestamp + 120 days);
         vault.flag(positionId);
         vm.warp(block.timestamp + 1 days + 1);

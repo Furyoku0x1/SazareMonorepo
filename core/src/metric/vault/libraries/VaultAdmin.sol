@@ -2,13 +2,14 @@
 pragma solidity 0.8.37;
 
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
-import {CurvePair, Vault, VaultParameters, VaultStore} from "../VaultTypes.sol";
+import {CurvePair, PricePoint, Vault, VaultParameters, VaultStore} from "../VaultTypes.sol";
 import {IMetricLendingVault} from "../interfaces/IMetricLendingVault.sol";
 import {IMetricPool, IMetricPoolFactory, PoolImmutables} from "../interfaces/IMetricPool.sol";
 import {VaultAccrual} from "./VaultAccrual.sol";
 import {VaultLedger} from "./VaultLedger.sol";
 import {Curve, VaultMath} from "./VaultMath.sol";
 import {MetricVenue} from "./MetricVenue.sol";
+import {RealizedCharge} from "./RealizedCharge.sol";
 
 /// @notice Creating vaults, versioning their premium curves, and paying the protocol its share.
 /// @dev An external library: the singleton delegatecalls it, after checking the caller where needed.
@@ -100,6 +101,23 @@ library VaultAdmin {
         emit IMetricLendingVault.PayoutClaimed(vaultId, msg.sender, tokenIndex, amount);
     }
 
+    /// @notice Records a price point for the vault; see `RealizedCharge.record`.
+    function recordPrice(VaultStore storage store, uint256 vaultId) external returns (bool) {
+        if (vaultId == 0) revert IMetricLendingVault.UnknownVault();
+        if (vaultId > store.vaultCount) revert IMetricLendingVault.UnknownVault();
+        return RealizedCharge.record(store.vaults[vaultId], vaultId);
+    }
+
+    /// @notice The vault's price point count, the oracle's σ, and the point at `index`.
+    function priceOf(VaultStore storage store, uint256 vaultId, uint256 index)
+        external
+        view
+        returns (uint256 count, uint256 sigmaWad, PricePoint memory point)
+    {
+        Vault storage vault = store.vaults[vaultId];
+        return (vault.prices.count, RealizedCharge.sigmaWad(vault), vault.prices.points[index]);
+    }
+
     function _validate(VaultParameters calldata parameters) private pure {
         if (parameters.token0 == address(0)) revert IMetricLendingVault.InvalidParameters();
         if (parameters.token1 == address(0)) revert IMetricLendingVault.InvalidParameters();
@@ -108,7 +126,10 @@ library VaultAdmin {
         if (parameters.vestSeconds > MAX_PERIOD_SECONDS) revert IMetricLendingVault.InvalidParameters();
         if (parameters.graceSeconds > MAX_PERIOD_SECONDS) revert IMetricLendingVault.InvalidParameters();
         if (parameters.minimumEscrowSeconds > MAX_PERIOD_SECONDS) revert IMetricLendingVault.InvalidParameters();
-        if (parameters.premiumProtocolBps > BPS) revert IMetricLendingVault.InvalidParameters();
+        // Under all of it: the realized charge is grossed up by what lenders keep of premium.
+        if (parameters.premiumProtocolBps >= BPS) revert IMetricLendingVault.InvalidParameters();
+        if (parameters.minimumEscrowBps > BPS) revert IMetricLendingVault.InvalidParameters();
+        if (parameters.highLeverageSurchargeBps > BPS) revert IMetricLendingVault.InvalidParameters();
         if (parameters.profitShareBps > BPS) revert IMetricLendingVault.InvalidParameters();
         if (uint256(parameters.profitTreasuryBps) + parameters.profitFeeVaultBps > BPS) {
             revert IMetricLendingVault.InvalidParameters();

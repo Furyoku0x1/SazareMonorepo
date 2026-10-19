@@ -39,6 +39,9 @@ contract VaultInvariantTest is VaultFixture {
         secondBase = new TestToken("BASE2", 18);
         VaultParameters memory parameters = defaultParameters();
         parameters.token0 = address(secondBase);
+        // The second vault runs the transformation rate (k = 2) and the high-leverage surcharge.
+        parameters.transformationRateBps = 20_000;
+        parameters.highLeverageSurchargeBps = 500;
         vm.prank(owner);
         secondVaultId = vault.createVault(parameters, defaultCurves());
         handler = new VaultHandler(vault, base, secondBase, quote, source, vaultId, secondVaultId);
@@ -82,6 +85,9 @@ contract VaultInvariantTest is VaultFixture {
         handler.actCloseThroughVenue(3, 99);
         assertEq(handler.venueCloses(), 1, "closed through a venue");
         handler.actWarp(1 days);
+        handler.actRecordPrice(0);
+        handler.actRecordPrice(1);
+        assertEq(handler.pricePoints(), 2, "a point in each vault");
         handler.actFlag(1);
         handler.actWarp(2 days);
         handler.actForceClose(1);
@@ -228,7 +234,7 @@ contract VaultInvariantTest is VaultFixture {
     }
 
     function _actions() private view returns (bytes4[] memory selectors) {
-        selectors = new bytes4[](17);
+        selectors = new bytes4[](18);
         selectors[0] = handler.actDeposit.selector;
         selectors[1] = handler.actWithdraw.selector;
         selectors[2] = handler.actPayProtocol.selector;
@@ -246,6 +252,7 @@ contract VaultInvariantTest is VaultFixture {
         selectors[14] = handler.actIncrease.selector;
         selectors[15] = handler.actOpenThroughVenue.selector;
         selectors[16] = handler.actCloseThroughVenue.selector;
+        selectors[17] = handler.actRecordPrice.selector;
     }
 
     /// @dev Each owner's listed passive positions are exactly their open ones (`positionsOf`): opens list them, increases
