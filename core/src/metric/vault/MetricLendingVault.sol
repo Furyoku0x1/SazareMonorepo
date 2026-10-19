@@ -3,13 +3,12 @@ pragma solidity 0.8.37;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {
     Accrual,
     CloseRequest,
     CurvePair,
+    ExitSwap,
     IncreaseRequest,
     Ledger,
     OpenRequest,
@@ -37,13 +36,13 @@ import {IMakerBook} from "./interfaces/IMakerBook.sol";
 import {IMetricLendingVault} from "./interfaces/IMetricLendingVault.sol";
 import {IMetricLiquidityCallback, IMetricSwapCallback} from "./interfaces/IMetricPool.sol";
 import {MakerBook} from "./libraries/MakerBook.sol";
+import {MetricVenue} from "./libraries/MetricVenue.sol";
 import {MakerClosing} from "./libraries/MakerClosing.sol";
 import {MakerMath} from "./libraries/MakerMath.sol";
 import {MakerPositions} from "./libraries/MakerPositions.sol";
 import {DebtValuation} from "./libraries/DebtValuation.sol";
 import {Curve, DebtTotals} from "./libraries/VaultMath.sol";
 import {VaultAdmin} from "./libraries/VaultAdmin.sol";
-import {VaultCallback} from "./libraries/VaultCallback.sol";
 import {VaultClosing} from "./libraries/VaultClosing.sol";
 import {VaultLending} from "./libraries/VaultLending.sol";
 import {VaultPositions} from "./libraries/VaultPositions.sol";
@@ -62,8 +61,6 @@ contract MetricLendingVault is
     Ownable2Step,
     ReentrancyGuardTransient
 {
-    using SafeERC20 for IERC20;
-
     /// @notice Receives the protocol's slice of premium and part of each profit share.
     address public immutable treasury;
     /// @notice Receives the fee vault's part of each profit share.
@@ -125,6 +122,17 @@ contract MetricLendingVault is
         return VaultLending.withdraw(_store, vaultId, shares, minimum0, minimum1, receiver);
     }
 
+    function withdrawAfterSwap(
+        uint256 vaultId,
+        uint256 shares,
+        uint256 minimum0,
+        uint256 minimum1,
+        address receiver,
+        ExitSwap calldata swap
+    ) external nonReentrant returns (uint256 amount0, uint256 amount1, uint256 burned) {
+        return VaultLending.withdrawAfterSwap(_store, vaultId, shares, minimum0, minimum1, receiver, swap);
+    }
+
     function recenter(uint256 vaultId) external nonReentrant returns (bool) {
         return VaultLending.recenter(_store, vaultId);
     }
@@ -163,8 +171,24 @@ contract MetricLendingVault is
         return VaultClosing.close(_store, request);
     }
 
+    function closeAfterSwap(CloseRequest calldata request, ExitSwap calldata exit)
+        external
+        nonReentrant
+        returns (uint256 paid0, uint256 paid1)
+    {
+        return VaultClosing.closeAfterSwap(_store, request, exit);
+    }
+
     function forceClose(uint256 positionId) external nonReentrant returns (uint256 reward0, uint256 reward1) {
         return VaultClosing.forceClose(_store, positionId);
+    }
+
+    function forceCloseThrough(uint256 positionId, address venue, bytes calldata route)
+        external
+        nonReentrant
+        returns (uint256 reward0, uint256 reward1)
+    {
+        return VaultClosing.forceCloseThrough(_store, positionId, venue, route);
     }
 
     // ---------------------------------------------------------------- maker book
@@ -207,6 +231,18 @@ contract MetricLendingVault is
         return MakerBook.withdraw(_store, vaultId, bucketId, shares, minimum0, minimum1, receiver);
     }
 
+    function withdrawOrderAfterSwap(
+        uint256 vaultId,
+        uint256 bucketId,
+        uint256 shares,
+        uint256 minimum0,
+        uint256 minimum1,
+        address receiver,
+        ExitSwap calldata swap
+    ) external nonReentrant returns (uint256 amount0, uint256 amount1, uint256 burned) {
+        return MakerBook.withdrawAfterSwap(_store, vaultId, bucketId, shares, minimum0, minimum1, receiver, swap);
+    }
+
     function claimOrderIncome(uint256 vaultId, uint256 bucketId, address receiver)
         external
         nonReentrant
@@ -221,6 +257,14 @@ contract MetricLendingVault is
         returns (uint256 paid, uint256 received)
     {
         return MakerBook.fill(_store, vaultId, bucketId);
+    }
+
+    function fillBucketThrough(uint256 vaultId, uint256 bucketId, address venue, bytes calldata route)
+        external
+        nonReentrant
+        returns (uint256 paid, uint256 received)
+    {
+        return MakerBook.fillThrough(_store, vaultId, bucketId, venue, route);
     }
 
     function openMaker(MakerOpenRequest calldata request) external nonReentrant returns (uint256) {
@@ -259,35 +303,36 @@ contract MetricLendingVault is
         return MakerClosing.close(_store, request);
     }
 
+    function closeMakerAfterSwap(MakerCloseRequest calldata request, ExitSwap calldata exit)
+        external
+        nonReentrant
+        returns (uint256 paid0, uint256 paid1)
+    {
+        return MakerClosing.closeAfterSwap(_store, request, exit);
+    }
+
     function forceCloseMaker(uint256 positionId) external nonReentrant returns (uint256 reward0, uint256 reward1) {
         return MakerClosing.forceClose(_store, positionId);
+    }
+
+    function forceCloseMakerThrough(uint256 positionId, address venue, bytes calldata route)
+        external
+        nonReentrant
+        returns (uint256 reward0, uint256 reward1)
+    {
+        return MakerClosing.forceCloseThrough(_store, positionId, venue, route);
     }
 
     // ---------------------------------------------------------------- Metric callbacks
 
     /// @inheritdoc IMetricLiquidityCallback
     function metricOmmModifyLiquidityCallback(uint256 amount0, uint256 amount1, bytes calldata) external {
-        (uint256 vaultId, uint256 maximum0, uint256 maximum1) = _takeCallback();
-        if (amount0 > maximum0) revert UnexpectedCallback();
-        if (amount1 > maximum1) revert UnexpectedCallback();
-        _payPool(vaultId, amount0, amount1);
+        MetricVenue.payLiquidityCallback(_store, amount0, amount1);
     }
 
     /// @inheritdoc IMetricSwapCallback
     function metricOmmSwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata) external {
-        (uint256 minimumOut0, uint256 minimumOut1) = VaultCallback.minimumOutputs();
-        (uint256 vaultId, uint256 maximum0, uint256 maximum1) = _takeCallback();
-        uint256 owed0 = amount0Delta > 0 ? uint256(amount0Delta) : 0;
-        uint256 owed1 = amount1Delta > 0 ? uint256(amount1Delta) : 0;
-        uint256 output0 = amount0Delta < 0 ? uint256(-amount0Delta) : 0;
-        uint256 output1 = amount1Delta < 0 ? uint256(-amount1Delta) : 0;
-        if (owed0 > maximum0) revert UnexpectedCallback();
-        if (owed1 > maximum1) revert UnexpectedCallback();
-        // A partial fill reverts here, undoing the whole swap.
-        if (output0 < minimumOut0) revert SlippageExceeded();
-        if (output1 < minimumOut1) revert SlippageExceeded();
-        _requireArrived(vaultId, minimumOut0, minimumOut1);
-        _payPool(vaultId, owed0, owed1);
+        MetricVenue.paySwapCallback(_store, amount0Delta, amount1Delta);
     }
 
     // ---------------------------------------------------------------- views
@@ -409,44 +454,5 @@ contract MetricLendingVault is
 
     function legOf(uint256 positionId, uint256 index) external view returns (Leg memory) {
         return _store.legs[positionId][index];
-    }
-
-    // ---------------------------------------------------------------- internal
-
-    function _takeCallback() private returns (uint256 vaultId, uint256 maximum0, uint256 maximum1) {
-        bool ok;
-        (ok, vaultId, maximum0, maximum1) = VaultCallback.take(msg.sender);
-        if (!ok) revert UnexpectedCallback();
-    }
-
-    /// @dev The caller's library records the ledger debit once the pool call returns, from the amounts the pool
-    /// reports; this only moves the tokens.
-    function _payPool(uint256 vaultId, uint256 amount0, uint256 amount1) private {
-        Vault storage vault = _store.vaults[vaultId];
-        _payExactly(vault.parameters.token0, amount0);
-        _payExactly(vault.parameters.token1, amount1);
-    }
-
-    /// @dev Pays the calling pool and requires custody to fall by exactly `amount`: a token that took more from the
-    /// sender would leave the other vaults' tokens short (audit finding B2).
-    function _payExactly(address token, uint256 amount) private {
-        if (amount == 0) return;
-        uint256 balanceBefore = IERC20(token).balanceOf(address(this));
-        IERC20(token).safeTransfer(msg.sender, amount);
-        // Checked after the transfer: the singleton's lock is held, so nothing else moved the balance.
-        if (balanceBefore - IERC20(token).balanceOf(address(this)) != amount) revert UnexpectedCallback();
-    }
-
-    /// @dev Requires a minimum output to have actually arrived, not merely to be reported, measured from the balances
-    /// saved before the swap: Metric pays the output before it calls back (audit finding B2).
-    function _requireArrived(uint256 vaultId, uint256 minimumOut0, uint256 minimumOut1) private view {
-        Vault storage vault = _store.vaults[vaultId];
-        (uint256 balance0Before, uint256 balance1Before) = VaultCallback.balancesBefore();
-        uint256 balance0 = IERC20(vault.parameters.token0).balanceOf(address(this));
-        uint256 balance1 = IERC20(vault.parameters.token1).balanceOf(address(this));
-        uint256 arrived0 = balance0 > balance0Before ? balance0 - balance0Before : 0;
-        uint256 arrived1 = balance1 > balance1Before ? balance1 - balance1Before : 0;
-        if (arrived0 < minimumOut0) revert SlippageExceeded();
-        if (arrived1 < minimumOut1) revert SlippageExceeded();
     }
 }

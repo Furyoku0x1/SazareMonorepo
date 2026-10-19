@@ -4,7 +4,7 @@ pragma solidity 0.8.37;
 import {SqrtPriceMath} from "v4-core/src/libraries/SqrtPriceMath.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {PositionIndex} from "./PositionIndex.sol";
-import {CloseRequest, Position, Vault, VaultStore} from "../VaultTypes.sol";
+import {CloseRequest, ExitSwap, Position, Vault, VaultStore} from "../VaultTypes.sol";
 import {IMetricLendingVault} from "../interfaces/IMetricLendingVault.sol";
 import {Charge, VaultAccrual} from "./VaultAccrual.sol";
 import {VaultBook} from "./VaultBook.sol";
@@ -40,12 +40,35 @@ library VaultClosing {
         /// @dev Premium a force close collects from the leftover, in token1: a wait that would leave the trader no
         /// more than this protects no one, so the close scales instead (audit finding W-3).
         uint256 arrears;
+        /// @dev What an exit swap lost against the close band, in token1: counted back into the proceeds, so the profit
+        /// share is measured as if the swap had filled at the band.
+        uint256 exitLost;
+        /// @dev The venue a force close's keeper named for the shortfall swap, and its route; zero for the pool.
+        address venue;
+        bytes route;
     }
 
     /// @notice Closes `fractionWad` of the caller's position, repaying with `repay0` and `repay1` from the closed part
     /// of the reserves. A partial close must pay all premium owed and leave the rest solvent.
     function close(VaultStore storage store, CloseRequest calldata request)
         external
+        returns (uint256 paid0, uint256 paid1)
+    {
+        ExitSwap memory none;
+        return _close(store, request, none);
+    }
+
+    /// @notice As `close`, after first swapping part of the closed reserves through the venue the trader names. Needs
+    /// the close band, which values the swap's loss; a close without a swap needs no price.
+    function closeAfterSwap(VaultStore storage store, CloseRequest calldata request, ExitSwap calldata exit)
+        external
+        returns (uint256 paid0, uint256 paid1)
+    {
+        return _close(store, request, exit);
+    }
+
+    function _close(VaultStore storage store, CloseRequest calldata request, ExitSwap memory exit)
+        private
         returns (uint256 paid0, uint256 paid1)
     {
         Position storage position = store.positions[request.positionId];
@@ -55,6 +78,7 @@ library VaultClosing {
         Vault storage vault = store.vaults[vaultId];
         VaultAccrual.checkpoint(vault, vaultId);
         Closing memory closing = _portion(position, request.fractionWad);
+        _exitSwap(vault, vaultId, position, closing, exit);
         _requireRepayment(position, closing, request.repay0, request.repay1);
         Charge memory unpaid = VaultBook.collect(vault, position, true);
         _payArrears(vault, position, closing, unpaid, closing.fractionWad != WAD);
@@ -79,6 +103,23 @@ library VaultClosing {
         external
         returns (uint256 reward0, uint256 reward1)
     {
+        return _forceClose(store, positionId, address(0), "");
+    }
+
+    /// @notice As `forceClose`, buying the shortfall through the venue the keeper names instead of the pool. The venue is
+    /// sent the budget the pool swap could spend and must return at least the deficit, so the trader pays no more than
+    /// through the pool; a vault without a pool, which otherwise scales, can buy its shortfall this way too.
+    function forceCloseThrough(VaultStore storage store, uint256 positionId, address venue, bytes calldata route)
+        external
+        returns (uint256 reward0, uint256 reward1)
+    {
+        return _forceClose(store, positionId, venue, route);
+    }
+
+    function _forceClose(VaultStore storage store, uint256 positionId, address venue, bytes memory route)
+        private
+        returns (uint256 reward0, uint256 reward1)
+    {
         Position storage position = store.positions[positionId];
         if (position.owner == address(0)) revert IMetricLendingVault.UnknownPosition();
         uint256 vaultId = position.vaultId;
@@ -87,6 +128,8 @@ library VaultClosing {
         Charge memory unpaid = VaultBook.collect(vault, position, true);
         Closing memory closing = _portion(position, WAD);
         closing.arrears = unpaid.premium;
+        closing.venue = venue;
+        closing.route = route;
         _forcedRepayment(vault, position, closing);
         _payArrears(vault, position, closing, unpaid, false);
         _repay(vault, closing);
@@ -111,6 +154,25 @@ library VaultClosing {
         closing.portion1 = VaultMath.portionDown(position.reserve1, fractionWad);
         closing.released0 = VaultMath.portionUp(position.released0, fractionWad);
         closing.released1 = VaultMath.portionUp(position.released1, fractionWad);
+    }
+
+    /// @dev The trader's swap on the closed part of the reserves, before the repayment is checked. It sells no more of a
+    /// token than the closed part holds, and the closed part and the reserves move by what moved, so the rest of the
+    /// position is untouched.
+    function _exitSwap(
+        Vault storage vault,
+        uint256 vaultId,
+        Position storage position,
+        Closing memory closing,
+        ExitSwap memory exit
+    ) private {
+        if (exit.amountIn == 0) return;
+        uint256 closedHeld = exit.zeroForOne ? closing.portion0 : closing.portion1;
+        (uint256 paid, uint256 received, uint256 lost) = MetricVenue.exitSwap(vault, vaultId, exit, closedHeld);
+        _applySwap(vault, position, exit.zeroForOne, paid, received);
+        closing.portion0 = exit.zeroForOne ? closing.portion0 - paid : closing.portion0 + received;
+        closing.portion1 = exit.zeroForOne ? closing.portion1 + received : closing.portion1 - paid;
+        closing.exitLost = lost;
     }
 
     function _requireRepayment(Position storage position, Closing memory closing, uint256 repay0, uint256 repay1)
@@ -172,7 +234,9 @@ library VaultClosing {
         uint160 sqrtLowerX96,
         uint160 sqrtUpperX96
     ) private returns (bool) {
-        if (vault.parameters.pool == address(0)) return false;
+        if (vault.parameters.pool == address(0)) {
+            if (closing.venue == address(0)) return false;
+        }
         (bool ok, uint160 sqrtBidX96) = VaultPricing.tryCloseBid(vault);
         if (!ok) {
             VaultPricing.requireNoPriceWaitOver(position.delinquentSince, vault.parameters.graceSeconds);
@@ -181,7 +245,7 @@ library VaultClosing {
         (uint256 target0, uint256 target1) = _target(position.liquidity, sqrtLowerX96, sqrtUpperX96, sqrtBidX96);
         // The targets always pass; a failure would be a rounding surprise, and scaling needs no price.
         if (!VaultMath.repays(target0, target1, position.liquidity, sqrtLowerX96, sqrtUpperX96)) return false;
-        if (!_buyShortfall(vault, position, target0, target1, closing.arrears)) return false;
+        if (!_buyShortfall(vault, position, target0, target1, closing)) return false;
         closing.repay0 = target0;
         closing.repay1 = target1;
         closing.portion0 = position.reserve0;
@@ -211,7 +275,7 @@ library VaultClosing {
         Position storage position,
         uint256 target0,
         uint256 target1,
-        uint256 arrears
+        Closing memory closing
     ) private returns (bool) {
         uint256 reserve0 = position.reserve0;
         uint256 reserve1 = position.reserve1;
@@ -224,9 +288,9 @@ library VaultClosing {
         bool buyToken0 = reserve0 < target0;
         uint256 deficit = buyToken0 ? target0 - reserve0 : target1 - reserve1;
         uint256 surplus = buyToken0 ? reserve1 - target1 : reserve0 - target0;
-        uint256 maximumIn = _budget(vault, position, buyToken0, deficit, surplus, arrears);
+        uint256 maximumIn = _budget(vault, position, buyToken0, deficit, surplus, closing.arrears);
         if (maximumIn == 0) return false;
-        _swapShortfall(vault, position, buyToken0, deficit, maximumIn);
+        _swapShortfall(vault, position, buyToken0, deficit, maximumIn, closing);
         return true;
     }
 
@@ -244,18 +308,20 @@ library VaultClosing {
         return VaultPricing.shortfallBudget(vault, buyToken0, deficit, surplus, arrearsInSurplus);
     }
 
-    /// @dev Buys exactly `deficit` through the pool for at most `maximumIn`, or reverts: the reserves could pay at the
-    /// band, so scaling would hand the trader's surplus to lenders, and a paused or thin pool fills later, so the close
-    /// waits for it (audit finding Sol-2-1).
+    /// @dev Buys at least `deficit` for at most `maximumIn`, through the pool or the keeper's venue, or reverts: the
+    /// reserves could pay at the band, so scaling would hand the trader's surplus to lenders, and a paused or thin pool
+    /// fills later, so the close waits for it (audit finding Sol-2-1).
     function _swapShortfall(
         Vault storage vault,
         Position storage position,
         bool buyToken0,
         uint256 deficit,
-        uint256 maximumIn
+        uint256 maximumIn,
+        Closing memory closing
     ) private {
-        (bool filled, uint256 paid, uint256 received) =
-            MetricVenue.trySwapExactOut(vault, position.vaultId, !buyToken0, deficit, maximumIn);
+        (bool filled, uint256 paid, uint256 received) = MetricVenue.swapForKeeper(
+            vault, position.vaultId, !buyToken0, deficit, maximumIn, closing.venue, closing.route
+        );
         if (!filled) revert IMetricLendingVault.ShortfallUnfilled();
         _applySwap(vault, position, !buyToken0, paid, received);
     }
@@ -343,7 +409,7 @@ library VaultClosing {
         uint256 value0 = ok
             ? VaultMath.priceTimes(closing.leftover0, sqrtBidX96, false)
             : VaultPricing.atStrike(position, closing.leftover0);
-        uint256 proceeds = value0 + closing.leftover1 + closing.refund;
+        uint256 proceeds = value0 + closing.leftover1 + closing.refund + closing.exitLost;
         share = VaultBook.profit(proceeds, closing.basis) * vault.parameters.profitShareBps / BPS;
         if (share == 0) return 0;
         uint256 fromLeftover1 = _min(share, closing.leftover1);

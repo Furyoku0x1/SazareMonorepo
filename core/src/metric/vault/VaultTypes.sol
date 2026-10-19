@@ -30,8 +30,10 @@ struct VaultParameters {
     /// @notice A force closer's reward, in basis points of each token left after repayment, arrears and the profit
     /// share.
     uint16 forceCloseRewardBps;
-    /// @notice How far past the band's far edge a force close's shortfall swap may pay, in basis points; beyond it the
-    /// close waits for the pool rather than scale at the trader's loss (audit finding Sol-2-1).
+    /// @notice How far past the band's edge a keeper's swap of someone else's tokens may fill, in basis points: a force
+    /// close's shortfall swap may pay this much past the far edge, beyond which the close waits rather than scale at
+    /// the trader's loss (audit finding Sol-2-1); a fill through a venue the keeper names may lose this much of what it
+    /// sells. A keeper can take most of it (audit finding B-2), so keep it small.
     uint16 forceCloseSlippageBps;
     /// @notice The highest utilization of either token an open may leave.
     uint16 utilizationCeilingBps;
@@ -207,10 +209,15 @@ struct OpenRequest {
     uint128 collateral;
     /// @notice Token1 prepaid into the premium escrow.
     uint128 escrow;
-    /// @notice Reserve tokens sold into the target asset through Metric after the release; zero for none.
+    /// @notice Reserve tokens sold into the target asset after the release; zero for none.
     uint256 entryAmountIn;
     /// @notice The least the entry swap must return.
     uint256 entryMinimumOut;
+    /// @notice Where the entry swap trades: zero for the vault's Metric pool, otherwise any `ISwapVenue` the trader
+    /// names, such as an aggregator's adapter. Any fill stands; what it loses against the band is charged to the basis.
+    address entryVenue;
+    /// @notice Passed to `entryVenue` untouched: the route.
+    bytes entryRoute;
 }
 
 struct IncreaseRequest {
@@ -221,11 +228,35 @@ struct IncreaseRequest {
     uint128 collateral;
     /// @notice Token1 added to the premium escrow, after the premium owed at the old size is settled.
     uint128 escrow;
-    /// @notice Tokens this call adds sold into the target asset through Metric after the release, as an open's entry
-    /// swap; zero for none. Reserves the position already held are not sold.
+    /// @notice Tokens this call adds sold into the target asset after the release, as an open's entry swap; zero for
+    /// none. Reserves the position already held are not sold.
     uint256 entryAmountIn;
     /// @notice The least the entry swap must return.
     uint256 entryMinimumOut;
+    /// @notice As an open's: zero for the vault's Metric pool, otherwise the `ISwapVenue` the trader names.
+    address entryVenue;
+    bytes entryRoute;
+}
+
+/// @notice A swap of tokens leaving the vault, through the venue their owner names: a close's closed reserves before
+/// it repays (for the token the repayment needs, or the tokens the trader wants to leave with), or a withdrawal's
+/// payout. Any fill stands. On a close, what it loses against the close band counts as taken out, so the profit share
+/// is measured as if it had filled at the band; a payout is the owner's alone.
+struct ExitSwap {
+    /// @notice True to sell token0 for token1.
+    bool zeroForOne;
+    /// @notice At most what the closed part of the reserves, or the payout, holds of the token sold.
+    uint256 amountIn;
+    uint256 minimumOut;
+    /// @notice Zero for the vault's Metric pool, otherwise any `ISwapVenue` the trader names.
+    address venue;
+    bytes route;
+}
+
+/// @notice A venue a keeper names for a swap of someone else's tokens, and its route; a zero venue is the vault's pool.
+struct NamedVenue {
+    address venue;
+    bytes route;
 }
 
 struct CloseRequest {

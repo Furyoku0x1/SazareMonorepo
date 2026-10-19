@@ -4,13 +4,14 @@ pragma solidity 0.8.37;
 import {FullMath} from "v4-core/src/libraries/FullMath.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {Book, BookSettings, Bucket, FloorRow, MakerShare} from "../MakerTypes.sol";
-import {Vault, VaultStore} from "../VaultTypes.sol";
+import {ExitSwap, NamedVenue, Vault, VaultStore} from "../VaultTypes.sol";
 import {IMakerBook} from "../interfaces/IMakerBook.sol";
 import {IMetricLendingVault} from "../interfaces/IMetricLendingVault.sol";
 import {Curve, VaultMath} from "./VaultMath.sol";
 import {MakerAccounting} from "./MakerAccounting.sol";
 import {MakerMath} from "./MakerMath.sol";
 import {MetricVenue} from "./MetricVenue.sol";
+import {VenueSwap} from "./VenueSwap.sol";
 import {VaultLedger} from "./VaultLedger.sol";
 import {VaultPricing} from "./VaultPricing.sol";
 
@@ -117,14 +118,44 @@ library MakerBook {
         uint256 minimum1,
         address receiver
     ) external returns (uint256 amount0, uint256 amount1, uint256 burned) {
+        ExitSwap memory none;
+        return _withdraw(store, vaultId, bucketId, shares, minimum0, minimum1, receiver, none);
+    }
+
+    /// @notice As `withdraw`, swapping part of the payout through the venue the maker names before paying it, as
+    /// `VaultLending.withdrawAfterSwap` does for lenders.
+    function withdrawAfterSwap(
+        VaultStore storage store,
+        uint256 vaultId,
+        uint256 bucketId,
+        uint256 shares,
+        uint256 minimum0,
+        uint256 minimum1,
+        address receiver,
+        ExitSwap calldata swap
+    ) external returns (uint256 amount0, uint256 amount1, uint256 burned) {
+        return _withdraw(store, vaultId, bucketId, shares, minimum0, minimum1, receiver, swap);
+    }
+
+    function _withdraw(
+        VaultStore storage store,
+        uint256 vaultId,
+        uint256 bucketId,
+        uint256 shares,
+        uint256 minimum0,
+        uint256 minimum1,
+        address receiver,
+        ExitSwap memory swap
+    ) private returns (uint256 amount0, uint256 amount1, uint256 burned) {
         Vault storage vault = _vault(store, vaultId);
         Withdrawal memory result = _withdrawShares(vault, bucketId, shares);
         if (result.amount0 < minimum0) revert IMetricLendingVault.SlippageExceeded();
         if (result.amount1 < minimum1) revert IMetricLendingVault.SlippageExceeded();
-        VaultLedger.push(vault, 0, receiver, result.amount0);
-        VaultLedger.push(vault, 1, receiver, result.amount1);
-        emit IMakerBook.OrderWithdrawn(vaultId, bucketId, msg.sender, result.amount0, result.amount1, result.burned);
-        return (result.amount0, result.amount1, result.burned);
+        (amount0, amount1, burned) = (result.amount0, result.amount1, result.burned);
+        if (swap.amountIn != 0) (amount0, amount1) = MetricVenue.swapPayout(vault, vaultId, swap, amount0, amount1);
+        VaultLedger.push(vault, 0, receiver, amount0);
+        VaultLedger.push(vault, 1, receiver, amount1);
+        emit IMakerBook.OrderWithdrawn(vaultId, bucketId, msg.sender, amount0, amount1, burned);
     }
 
     /// @notice Pays the caller's vested income from a bucket, in both tokens.
@@ -158,12 +189,36 @@ library MakerBook {
         external
         returns (uint256 paid, uint256 received)
     {
+        NamedVenue memory pool;
+        return _fill(store, vaultId, bucketId, pool);
+    }
+
+    /// @notice As `fill`, through the venue the keeper names instead of the pool, on a vault with a pool or without
+    /// one. The venue trades the makers' tokens, so its fill must also be within `forceCloseSlippageBps` of the band's
+    /// edge, the allowance a keeper's force-close swap has: the makers' limit alone would let a venue the keeper
+    /// controls keep everything between the limit and the market (audit finding B-1).
+    function fillThrough(
+        VaultStore storage store,
+        uint256 vaultId,
+        uint256 bucketId,
+        address venue,
+        bytes calldata route
+    ) external returns (uint256 paid, uint256 received) {
+        return _fill(store, vaultId, bucketId, NamedVenue({venue: venue, route: route}));
+    }
+
+    function _fill(VaultStore storage store, uint256 vaultId, uint256 bucketId, NamedVenue memory named)
+        private
+        returns (uint256 paid, uint256 received)
+    {
         Vault storage vault = _vault(store, vaultId);
         Book storage book = _book(vault);
-        if (vault.parameters.pool == address(0)) revert IMakerBook.NotFillable();
+        if (vault.parameters.pool == address(0)) {
+            if (named.venue == address(0)) revert IMakerBook.NotFillable();
+        }
         Bucket storage bucket = MakerAccounting.checkpoint(book, bucketId);
         uint256 netReceived;
-        (paid, received, netReceived) = _swapWaiting(vault, vaultId, bucket, bucketId);
+        (paid, received, netReceived) = _swapWaiting(vault, vaultId, bucket, bucketId, named);
         (, bool isBuy,) = MakerMath.decode(bucketId);
         _settleFill(book, bucket, isBuy, paid, netReceived);
         VaultLedger.push(vault, isBuy ? 0 : 1, msg.sender, received - netReceived);
@@ -296,21 +351,72 @@ library MakerBook {
 
     /// @dev Swaps the bucket's waiting tokens through Metric up to the makers' limit, once the whole band has passed
     /// the level, and returns what was paid, received, and received net of the keeper's reward.
-    function _swapWaiting(Vault storage vault, uint256 vaultId, Bucket storage bucket, uint256 bucketId)
-        private
-        returns (uint256 paid, uint256 received, uint256 netReceived)
-    {
+    function _swapWaiting(
+        Vault storage vault,
+        uint256 vaultId,
+        Bucket storage bucket,
+        uint256 bucketId,
+        NamedVenue memory named
+    ) private returns (uint256 paid, uint256 received, uint256 netReceived) {
         (int24 level, bool isBuy,) = MakerMath.decode(bucketId);
         (uint160 sqrtLowerX96, uint160 sqrtUpperX96) = MakerMath.levelRange(level, vault.book.settings.levelTicks);
         _requirePassed(vault, isBuy, sqrtLowerX96, sqrtUpperX96);
         uint256 waiting = isBuy ? bucket.balance1 : bucket.balance0;
         if (waiting == 0) revert IMakerBook.NotFillable();
-        uint128 limitX64 = _fillLimit(vault, isBuy, isBuy ? sqrtLowerX96 : sqrtUpperX96);
-        (paid, received) = MetricVenue.swapExactInToLimit(vault, vaultId, !isBuy, waiting, limitX64);
-        // Checked after the pool call: MetricLendingVault's nonReentrant lock is held, so nothing ran in between.
+        uint160 sqrtLimitX96 = isBuy ? sqrtLowerX96 : sqrtUpperX96;
+        (paid, received) = _swapThrough(vault, vaultId, isBuy, waiting, sqrtLimitX96, named);
+        // Checked after the swap: MetricLendingVault's nonReentrant lock is held, so nothing ran in between.
         if (received == 0) revert IMakerBook.NotFillable();
         netReceived = received - received * vault.book.settings.fillRewardBps / MakerMath.BPS;
         _requireFillPrice(isBuy, paid, netReceived, sqrtLowerX96, sqrtUpperX96);
+    }
+
+    /// @dev The fill's swap: through the pool up to the makers' limit, or through the keeper's venue, whose fill must also
+    /// be near the band. The limit in the pool's own units exists only for a vault with a pool.
+    function _swapThrough(
+        Vault storage vault,
+        uint256 vaultId,
+        bool isBuy,
+        uint256 waiting,
+        uint160 sqrtLimitX96,
+        NamedVenue memory named
+    ) private returns (uint256 paid, uint256 received) {
+        if (named.venue == address(0)) {
+            uint128 limitX64 = _poolFillLimit(vault, isBuy, sqrtLimitX96);
+            return MetricVenue.swapExactInToLimit(vault, vaultId, !isBuy, waiting, limitX64);
+        }
+        (paid, received) = MetricVenue.swapThroughVenue(vault, !isBuy, waiting, named.venue, named.route);
+        _requireNearBand(vault, isBuy, paid, received);
+    }
+
+    /// @dev The pool fill's price limit: the makers' limit, tightened to the band's edge plus `forceCloseSlippageBps`.
+    /// The makers' limit alone let a keeper push the pool toward it before filling and keep the makers' improvement
+    /// (audit finding B-1); now a push can take at most the allowance, as through a venue. The rest fills later.
+    function _poolFillLimit(Vault storage vault, bool isBuy, uint160 sqrtLimitX96) private returns (uint128) {
+        uint128 levelLimitX64 = _fillLimit(vault, isBuy, sqrtLimitX96);
+        (uint160 sqrtBidX96, uint160 sqrtAskX96) = VaultPricing.band(vault);
+        uint256 slippageBps = vault.parameters.forceCloseSlippageBps;
+        uint256 scale0 = vault.venue.scale0;
+        uint256 scale1 = vault.venue.scale1;
+        if (isBuy) {
+            uint256 askX64 = MakerMath.toPriceX64(sqrtAskX96, scale0, scale1, false);
+            uint256 ceilingX64 = askX64 * (MakerMath.BPS + slippageBps) / MakerMath.BPS;
+            return ceilingX64 < levelLimitX64 ? ceilingX64.toUint128() : levelLimitX64;
+        }
+        uint256 bidX64 = MakerMath.toPriceX64(sqrtBidX96, scale0, scale1, true);
+        uint256 floorX64 = FullMath.mulDivRoundingUp(bidX64, MakerMath.BPS - slippageBps, MakerMath.BPS);
+        return floorX64 > levelLimitX64 ? floorX64.toUint128() : levelLimitX64;
+    }
+
+    /// @dev A venue's fill of the makers' tokens may lose against the band's edge no more than `forceCloseSlippageBps`
+    /// of what it sold, valued at that edge.
+    function _requireNearBand(Vault storage vault, bool isBuy, uint256 paid, uint256 received) private {
+        VenueSwap.Trade memory trade;
+        trade.zeroForOne = !isBuy;
+        (trade.sqrtBidX96, trade.sqrtAskX96) = VaultPricing.band(vault);
+        uint256 valueIn = isBuy ? paid : VaultMath.priceTimes(paid, trade.sqrtBidX96, true);
+        uint256 allowed = valueIn * vault.parameters.forceCloseSlippageBps / MakerMath.BPS;
+        if (VenueSwap.shortfall(trade, paid, received) > allowed) revert IMetricLendingVault.VenueBelowBand();
     }
 
     /// @dev A buy level fills only once the ask is at or below its bottom; a sell level once the bid is at or above

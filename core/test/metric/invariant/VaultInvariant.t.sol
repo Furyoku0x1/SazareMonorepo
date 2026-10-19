@@ -72,6 +72,15 @@ contract VaultInvariantTest is VaultFixture {
         // Vault two: a short.
         handler.actOpenShort(1, 100, 500, 5_000e6, 1 + 3 * 100, 2 + 3 * 10e6);
         assertEq(handler.opens(), 3, "three opens");
+        // Through a named venue: a fair long, a short 0.5% short of the band, and a long filled at half, all charged.
+        handler.actOpenThroughVenue(0, true, 200, 3_000e6, 2 + 3 * 2_000, 50 + 100 * 80);
+        handler.actOpenThroughVenue(1, false, 200, 3_000e6, 2 + 3 * 2_000, 50 + 100 * 80 + 10_000);
+        // Selling 1% at half value: more would break the chord, which the vault refuses as it should.
+        handler.actOpenThroughVenue(0, true, 200, 3_000e6, 2 + 3 * 2_000, 30_000);
+        assertEq(handler.venueOpens(), 3, "every fill stands");
+        // The first venue long holds base: close it by selling all of it at the bid.
+        handler.actCloseThroughVenue(3, 99);
+        assertEq(handler.venueCloses(), 1, "closed through a venue");
         handler.actWarp(1 days);
         handler.actFlag(1);
         handler.actWarp(2 days);
@@ -219,7 +228,7 @@ contract VaultInvariantTest is VaultFixture {
     }
 
     function _actions() private view returns (bytes4[] memory selectors) {
-        selectors = new bytes4[](15);
+        selectors = new bytes4[](17);
         selectors[0] = handler.actDeposit.selector;
         selectors[1] = handler.actWithdraw.selector;
         selectors[2] = handler.actPayProtocol.selector;
@@ -235,6 +244,8 @@ contract VaultInvariantTest is VaultFixture {
         selectors[12] = handler.actWarp.selector;
         selectors[13] = handler.actMovePrice.selector;
         selectors[14] = handler.actIncrease.selector;
+        selectors[15] = handler.actOpenThroughVenue.selector;
+        selectors[16] = handler.actCloseThroughVenue.selector;
     }
 
     /// @dev Each owner's listed passive positions are exactly their open ones (`positionsOf`): opens list them, increases

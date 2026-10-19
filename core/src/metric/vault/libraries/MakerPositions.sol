@@ -21,6 +21,7 @@ import {MakerAccounting} from "./MakerAccounting.sol";
 import {MakerMath} from "./MakerMath.sol";
 import {MakerSettlement} from "./MakerSettlement.sol";
 import {MetricVenue} from "./MetricVenue.sol";
+import {VenueSwap} from "./VenueSwap.sol";
 import {VaultLedger} from "./VaultLedger.sol";
 import {VaultMath} from "./VaultMath.sol";
 import {VaultPricing} from "./VaultPricing.sol";
@@ -73,7 +74,9 @@ library MakerPositions {
         _fund(vault, position, request.collateral, request.escrow);
         _prepay(store, vault, position, positionId, 0);
         uint256 available = request.isLong ? position.reserve1 : position.reserve0;
-        _enter(vault, position, request.entryAmountIn, request.entryMinimumOut, available);
+        VenueSwap.Trade memory trade =
+            _trade(opening, request.isLong, request.entryAmountIn, request.entryMinimumOut, request.entryVenue);
+        _enter(vault, position, trade, request.entryRoute, available);
         _priceLegs(store, book, positionId, legCount, opening);
         _requireOpenable(position, request.maximumRateBps, opening);
         emit IMakerBook.MakerOpened(
@@ -105,7 +108,9 @@ library MakerPositions {
         _fund(vault, position, request.collateral, request.escrow);
         _prepay(store, vault, position, positionId, firstIndex);
         uint256 available = position.isLong ? opening.release1 + request.collateral : opening.release0;
-        _enter(vault, position, request.entryAmountIn, request.entryMinimumOut, available);
+        VenueSwap.Trade memory trade =
+            _trade(opening, position.isLong, request.entryAmountIn, request.entryMinimumOut, request.entryVenue);
+        _enter(vault, position, trade, request.entryRoute, available);
         _priceLegs(store, book, positionId, legCount, opening);
         _requireOpenable(position, request.maximumRateBps, opening);
         emit IMakerBook.MakerIncreased(positionId, legCount - firstIndex, opening.maximum0, opening.maximum1);
@@ -341,22 +346,45 @@ library MakerPositions {
         vault.ledger.escrow -= total.toUint128();
     }
 
-    /// @dev The entry swap: a long sells token1 for token0, a short token0 for token1, through the vault's pool, from
-    /// no more than `available`, what the call itself put in.
+    /// @dev The entry swap a request asks for: a long sells token1 for token0, a short token0 for token1, its fill
+    /// measured at the band the legs were priced at.
+    function _trade(Opening memory opening, bool isLong, uint256 amountIn, uint256 minimumOut, address venue)
+        private
+        pure
+        returns (VenueSwap.Trade memory)
+    {
+        return VenueSwap.Trade({
+            zeroForOne: !isLong,
+            amountIn: amountIn,
+            minimumOut: minimumOut,
+            venue: venue,
+            sqrtBidX96: opening.sqrtBidX96,
+            sqrtAskX96: opening.sqrtAskX96
+        });
+    }
+
+    /// @dev The entry swap, through the venue the trader chose, from no more than `available`, what the call itself
+    /// put in.
     function _enter(
         Vault storage vault,
         MakerPosition storage position,
-        uint256 amountIn,
-        uint256 minimumOut,
+        VenueSwap.Trade memory trade,
+        bytes calldata route,
         uint256 available
     ) private {
-        if (amountIn == 0) return;
-        if (vault.parameters.pool == address(0)) revert IMetricLendingVault.InvalidParameters();
-        if (amountIn > available) revert IMetricLendingVault.InvalidParameters();
-        bool zeroForOne = !position.isLong;
-        (uint256 paid, uint256 received) =
-            MetricVenue.swapExactIn(vault, position.vaultId, zeroForOne, amountIn, minimumOut);
-        _moveReserves(vault, position, paid, received, zeroForOne);
+        if (trade.amountIn == 0) return;
+        if (trade.amountIn > available) revert IMetricLendingVault.InvalidParameters();
+        (uint256 paid, uint256 received, uint256 lost) =
+            MetricVenue.swapForTrader(vault, position.vaultId, trade, route);
+        _moveReserves(vault, position, paid, received, trade.zeroForOne);
+        _chargeToBasis(position, lost);
+    }
+
+    /// @dev A fill's loss against the band counts as taken out of the position, as in `VaultPositions`: the profit
+    /// share is measured as if the swap had filled at the band.
+    function _chargeToBasis(MakerPosition storage position, uint256 lost) private {
+        uint256 basis = position.basis;
+        position.basis = (lost < basis ? basis - lost : 0).toUint128();
     }
 
     function _moveReserves(

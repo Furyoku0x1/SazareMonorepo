@@ -9,11 +9,14 @@ import {MetricOmmPool} from "metric/MetricOmmPool.sol";
 import {IMetricOmmPoolActions} from "metric/interfaces/IMetricOmmPool/IMetricOmmPoolActions.sol";
 import {PoolStateLibrary} from "metric/libraries/PoolStateLibrary.sol";
 import {MetricLendingVault} from "vault/MetricLendingVault.sol";
-import {CloseRequest, Ledger, OpenRequest, Position, Venue} from "vault/VaultTypes.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {CloseRequest, ExitSwap, Ledger, OpenRequest, Position, Venue} from "vault/VaultTypes.sol";
+import {ISwapVenue} from "vault/interfaces/ISwapVenue.sol";
 import {IMetricLendingVault} from "vault/interfaces/IMetricLendingVault.sol";
 import {MetricPrice} from "vault/libraries/MetricPrice.sol";
 import {VaultMath} from "vault/libraries/VaultMath.sol";
 import {VaultPricing} from "vault/libraries/VaultPricing.sol";
+import {VenueSwap} from "vault/libraries/VenueSwap.sol";
 import {IntegrationToken, SettableProvider, Trader} from "../utils/MetricFixture.sol";
 
 /// @notice Reads of the vault's Metric position straight from the pool's storage, through Metric's own
@@ -46,6 +49,14 @@ library PoolReads {
 /// @notice Drives one vault on a real Metric pool: lenders, traders, a force closer, an outside trader, the price
 /// provider and time. Every vault call is try/caught; a revert whose selector is not on the action's list of
 /// legitimate reasons is recorded, and the invariant suite requires none.
+/// @notice A venue elsewhere that sells everything it is sent at a fixed rate from its own inventory.
+contract HandlerRateVenue is ISwapVenue {
+    function swapForVault(address, address tokenOut, uint256 amountIn, bytes calldata route) external {
+        (uint256 numerator, uint256 denominator) = abi.decode(route, (uint256, uint256));
+        ERC20(tokenOut).transfer(msg.sender, FullMath.mulDiv(amountIn, numerator, denominator));
+    }
+}
+
 contract MetricVaultHandler is Test {
     uint256 internal constant WAD = 1e18;
     uint256 internal constant Q64 = 1 << 64;
@@ -55,6 +66,8 @@ contract MetricVaultHandler is Test {
     /// @dev Metric rounding per lender flow: under a unit per bin and token on each add and removal, in quote units.
     uint256 internal constant DILUTION_DUST = 100;
     bytes4 internal constant NONE = 0xffffffff;
+    uint256 internal constant BPS = 10_000;
+    uint256 internal constant Q192 = 1 << 192;
 
     MetricLendingVault internal immutable vault;
     uint256 internal immutable vaultId;
@@ -94,6 +107,13 @@ contract MetricVaultHandler is Test {
     uint256 public withdrawals;
     uint256 public opens;
     uint256 public opensRefused;
+    uint256 public venueOpens;
+    uint256 public venueCloses;
+    uint256 public venueWithdrawals;
+    /// @dev Venue actions whose result was not what the fill implies: an open whose basis is not its collateral and
+    /// escrow less exactly the fill's loss, or a withdrawal that sold all its payout's token0 and still paid some.
+    uint256 public venueMismatches;
+    HandlerRateVenue internal rateVenue;
     uint256 public fullCloses;
     uint256 public partialCloses;
     uint256 public closesRefused;
@@ -123,6 +143,9 @@ contract MetricVaultHandler is Test {
         quote = quote_;
         outsider = outsider_;
         factory = factory_;
+        rateVenue = new HandlerRateVenue();
+        base_.mint(address(rateVenue), 1e30);
+        quote_.mint(address(rateVenue), 1e30);
         lenders = [makeAddr("handler.lender0"), makeAddr("handler.lender1"), makeAddr("handler.lender2")];
         traders = [makeAddr("handler.trader0"), makeAddr("handler.trader1")];
         // three lenders and two traders
@@ -216,30 +239,9 @@ contract MetricVaultHandler is Test {
         uint256 entrySeed,
         uint256 escrowSeed
     ) external watchActiveBin {
-        (uint160 sqrtBidX96, uint160 sqrtAskX96) = _band();
-        int24 tick = TickMath.getTickAtSqrtPrice(sqrtBidX96);
-        int24 lower = tick - 800 + int24(int256(bound(offsetSeed, 0, 1_200)));
-        int24 upper = lower + int24(int256(bound(widthSeed, 10, 600)));
-        uint160 sqrtLowerX96 = TickMath.getSqrtPriceAtTick(lower);
-        uint160 sqrtUpperX96 = TickMath.getSqrtPriceAtTick(upper);
-        uint128 liquidity =
-            uint128(FullMath.mulDiv(bound(notionalSeed, 150e6, 25_000e6), Q96, sqrtUpperX96 - sqrtLowerX96));
-        (uint256 maximum0, uint256 maximum1) = VaultMath.debtExtremes(liquidity, sqrtLowerX96, sqrtUpperX96);
-        (uint256 release0, uint256 release1) =
-            VaultMath.releaseAcrossBand(liquidity, sqrtLowerX96, sqrtUpperX96, sqrtBidX96, sqrtAskX96);
-        // The chord r1 + K·r0 ≥ M1 with K = M1 / M0.
-        uint256 covered = release1 + FullMath.mulDiv(release0, maximum1, maximum0);
-        uint256 gap = covered >= maximum1 ? 0 : maximum1 - covered;
-        uint256 collateral = collateralSeed % 4 == 0 ? gap + 1 : gap + bound(collateralSeed, 0, maximum1 / 5);
-        uint256 available = isLong ? release1 + collateral : release0;
-        OpenRequest memory request;
-        request.vaultId = vaultId;
-        request.isLong = isLong;
-        request.tickLower = lower;
-        request.tickUpper = upper;
-        request.liquidity = liquidity;
-        request.collateral = uint128(collateral);
-        request.escrow = uint128(bound(escrowSeed, 0, 30e6));
+        (OpenRequest memory request, uint256 available) = _openTerms(
+            isLong, offsetSeed, widthSeed, notionalSeed, collateralSeed, bound(escrowSeed, 0, 30e6)
+        );
         request.entryAmountIn = entrySeed % 3 == 0 ? 0 : available * bound(entrySeed, 1, 100) / 100;
         vm.prank(traders[who % 2]);
         try vault.open(request) returns (uint256 positionId) {
@@ -259,6 +261,180 @@ contract MetricVaultHandler is Test {
                     IMetricOmmPoolActions.FinalAmountIsZero.selector,
                     NONE
                 ]
+            );
+        }
+    }
+
+    /// @dev The range, liquidity and collateral `open` chooses, and what an entry swap could sell.
+    function _openTerms(
+        bool isLong,
+        uint256 offsetSeed,
+        uint256 widthSeed,
+        uint256 notionalSeed,
+        uint256 collateralSeed,
+        uint256 escrow
+    ) internal returns (OpenRequest memory request, uint256 available) {
+        (uint160 sqrtBidX96, uint160 sqrtAskX96) = _band();
+        int24 tick = TickMath.getTickAtSqrtPrice(sqrtBidX96);
+        int24 lower = tick - 800 + int24(int256(bound(offsetSeed, 0, 1_200)));
+        int24 upper = lower + int24(int256(bound(widthSeed, 10, 600)));
+        uint160 sqrtLowerX96 = TickMath.getSqrtPriceAtTick(lower);
+        uint160 sqrtUpperX96 = TickMath.getSqrtPriceAtTick(upper);
+        uint128 liquidity =
+            uint128(FullMath.mulDiv(bound(notionalSeed, 150e6, 25_000e6), Q96, sqrtUpperX96 - sqrtLowerX96));
+        (uint256 maximum0, uint256 maximum1) = VaultMath.debtExtremes(liquidity, sqrtLowerX96, sqrtUpperX96);
+        (uint256 release0, uint256 release1) =
+            VaultMath.releaseAcrossBand(liquidity, sqrtLowerX96, sqrtUpperX96, sqrtBidX96, sqrtAskX96);
+        // The chord r1 + K·r0 ≥ M1 with K = M1 / M0.
+        uint256 covered = release1 + FullMath.mulDiv(release0, maximum1, maximum0);
+        uint256 gap = covered >= maximum1 ? 0 : maximum1 - covered;
+        uint256 collateral = collateralSeed % 4 == 0 ? gap + 1 : gap + bound(collateralSeed, 0, maximum1 / 5);
+        available = isLong ? release1 + collateral : release0;
+        request.vaultId = vaultId;
+        request.isLong = isLong;
+        request.tickLower = lower;
+        request.tickUpper = upper;
+        request.liquidity = liquidity;
+        request.collateral = uint128(collateral);
+        request.escrow = uint128(escrow);
+    }
+
+    /// @dev A withdrawal that sells its payout's token0 through the venue elsewhere, fair at the bid or ten percent short:
+    /// the lender's own tokens, so any fill stands. The payout is read first in a snapshot, so the swap sells exactly it.
+    function withdrawThroughVenue(uint256 who, uint256 fractionBps, uint256 fillSeed) external watchActiveBin {
+        address lender = lenders[who % 3];
+        uint256 shares = vault.sharesOf(vaultId, lender) * bound(fractionBps, 1, 10_000) / 10_000;
+        if (shares == 0) return;
+        uint256 payout0 = _plainPayout0(lender, shares);
+        if (payout0 == 0) return;
+        (uint160 sqrtBidX96,) = _band();
+        uint256 numerator = uint256(sqrtBidX96) * sqrtBidX96 * (fillSeed % 2 == 0 ? BPS : 9_000);
+        ExitSwap memory swap = ExitSwap({
+            zeroForOne: true,
+            amountIn: payout0,
+            minimumOut: 0,
+            venue: address(rateVenue),
+            route: abi.encode(numerator, Q192 * BPS)
+        });
+        vm.prank(lender);
+        try vault.withdrawAfterSwap(vaultId, shares, 0, 0, lender, swap) returns (uint256 amount0, uint256, uint256) {
+            venueWithdrawals += 1;
+            if (amount0 != 0) venueMismatches += 1;
+        } catch (bytes memory reason) {
+            _allow(reason, "withdraw through a venue", [NONE, NONE, NONE, NONE, NONE, NONE]);
+        }
+    }
+
+    /// @dev What a plain withdrawal would pay in token0, or zero where it is refused; the state is restored.
+    function _plainPayout0(address lender, uint256 shares) internal returns (uint256 payout0) {
+        uint256 snapshot = vm.snapshotState();
+        vm.prank(lender);
+        try vault.withdraw(vaultId, shares, 0, 0, lender) returns (uint256 amount0, uint256, uint256) {
+            payout0 = amount0;
+        } catch {}
+        vm.revertToState(snapshot);
+    }
+
+    /// @dev An open as `open` makes it, whose entry swap goes through a venue elsewhere at a fixed rate: fair at the
+    /// band's edge, half a percent short, or ten percent short. Any fill stands, and the basis must be the collateral
+    /// and escrow less exactly what the fill lost against the band.
+    function openThroughVenue(
+        uint256 who,
+        bool isLong,
+        uint256 offsetSeed,
+        uint256 widthSeed,
+        uint256 notionalSeed,
+        uint256 collateralSeed,
+        uint256 fillSeed
+    ) external watchActiveBin {
+        (OpenRequest memory request, uint256 available) =
+            _openTerms(isLong, offsetSeed, widthSeed, notionalSeed, collateralSeed, 3e6);
+        (uint160 sqrtBidX96, uint160 sqrtAskX96) = _band();
+        uint256 fillBps = [uint256(BPS), 9_950, 9_000][(fillSeed / 100) % 3];
+        request.entryAmountIn = available * bound(fillSeed % 100, 1, 100) / 100;
+        request.entryVenue = address(rateVenue);
+        request.entryRoute = isLong
+            ? abi.encode(Q192 * fillBps, uint256(sqrtAskX96) * sqrtAskX96 * BPS)
+            : abi.encode(uint256(sqrtBidX96) * sqrtBidX96 * fillBps, Q192 * BPS);
+        uint256 received = isLong
+            ? FullMath.mulDiv(request.entryAmountIn, Q192 * fillBps, uint256(sqrtAskX96) * sqrtAskX96 * BPS)
+            : FullMath.mulDiv(request.entryAmountIn, uint256(sqrtBidX96) * sqrtBidX96 * fillBps, Q192 * BPS);
+        VenueSwap.Trade memory trade;
+        trade.zeroForOne = !isLong;
+        trade.sqrtBidX96 = sqrtBidX96;
+        trade.sqrtAskX96 = sqrtAskX96;
+        uint256 lost = VenueSwap.shortfall(trade, request.entryAmountIn, received);
+        vm.prank(traders[who % 2]);
+        try vault.open(request) returns (uint256 positionId) {
+            openIds.push(positionId);
+            venueOpens += 1;
+            uint256 paidIn = uint256(request.collateral) + request.escrow;
+            if (vault.positionOf(positionId).basis + lost != paidIn) venueMismatches += 1;
+        } catch (bytes memory reason) {
+            opensRefused += 1;
+            _allow(
+                reason,
+                "open through a venue",
+                [
+                    IMetricLendingVault.Insolvent.selector,
+                    IMetricLendingVault.InsufficientIdle.selector,
+                    IMetricLendingVault.UtilizationCeiling.selector,
+                    IMetricLendingVault.BelowMinimumBorrow.selector,
+                    NONE,
+                    NONE
+                ]
+            );
+        }
+    }
+
+    /// @dev A full close that first sells token0 through the venue elsewhere, fair at the bid or ten percent short.
+    /// Where the reserves hold more than the debt's `M0`, it repays `M0 + 1` in kind and sells the rest, which always
+    /// repays; otherwise it sells all of it and repays with everything the reserves then hold, which a poor fill, or
+    /// a bid under the strike, can leave short.
+    function closeThroughVenue(uint256 pick, uint256 fillSeed) external watchActiveBin {
+        if (openIds.length == 0) return;
+        uint256 index = pick % openIds.length;
+        uint256 positionId = openIds[index];
+        Position memory position = vault.positionOf(positionId);
+        if (position.reserve0 == 0) return;
+        (uint160 sqrtBidX96,) = _band();
+        uint256 numerator = uint256(sqrtBidX96) * sqrtBidX96 * (fillSeed % 2 == 0 ? BPS : 9_000);
+        bool inKind = position.reserve0 > uint256(position.maximum0) + 1;
+        uint256 repay0 = inKind ? uint256(position.maximum0) + 1 : 0;
+        uint256 amountIn = position.reserve0 - repay0;
+        if (amountIn == 0) return;
+        uint256 received = FullMath.mulDiv(amountIn, numerator, Q192 * BPS);
+        ExitSwap memory exit = ExitSwap({
+            zeroForOne: true,
+            amountIn: amountIn,
+            minimumOut: 0,
+            venue: address(rateVenue),
+            route: abi.encode(numerator, Q192 * BPS)
+        });
+        CloseRequest memory request = CloseRequest({
+            positionId: positionId, fractionWad: WAD, repay0: repay0, repay1: inKind ? 0 : position.reserve1 + received
+        });
+        _closeThroughVenue(index, position.owner, request, exit, inKind);
+    }
+
+    function _closeThroughVenue(
+        uint256 index,
+        address owner,
+        CloseRequest memory request,
+        ExitSwap memory exit,
+        bool inKind
+    ) internal {
+        vm.prank(owner);
+        try vault.closeAfterSwap(request, exit) {
+            venueCloses += 1;
+            _forget(index);
+        } catch (bytes memory reason) {
+            // Repaying in kind cannot fall short; selling everything can.
+            bytes4 short = inKind ? NONE : IMetricLendingVault.RepaymentShort.selector;
+            _allow(
+                reason,
+                "close through a venue",
+                [short, IMetricLendingVault.InvalidBand.selector, NONE, NONE, NONE, NONE]
             );
         }
     }

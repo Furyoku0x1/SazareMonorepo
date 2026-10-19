@@ -3,7 +3,7 @@ pragma solidity 0.8.37;
 
 import {FullMath} from "v4-core/src/libraries/FullMath.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
-import {Vault, VaultStore} from "../VaultTypes.sol";
+import {ExitSwap, Vault, VaultStore} from "../VaultTypes.sol";
 import {IMetricLendingVault} from "../interfaces/IMetricLendingVault.sol";
 import {DebtValuation} from "./DebtValuation.sol";
 import {VaultAccrual} from "./VaultAccrual.sol";
@@ -70,6 +70,34 @@ library VaultLending {
         uint256 minimum1,
         address receiver
     ) external returns (uint256 amount0, uint256 amount1, uint256 burned) {
+        ExitSwap memory none;
+        return _withdraw(store, vaultId, shares, minimum0, minimum1, receiver, none);
+    }
+
+    /// @notice As `withdraw`, swapping part of the payout through the venue the lender names before paying it, so the
+    /// lender can leave with the token they want. `minimum0` and `minimum1` bound the payout before the swap; the
+    /// swap's own `minimumOut` bounds its fill.
+    function withdrawAfterSwap(
+        VaultStore storage store,
+        uint256 vaultId,
+        uint256 shares,
+        uint256 minimum0,
+        uint256 minimum1,
+        address receiver,
+        ExitSwap calldata swap
+    ) external returns (uint256 amount0, uint256 amount1, uint256 burned) {
+        return _withdraw(store, vaultId, shares, minimum0, minimum1, receiver, swap);
+    }
+
+    function _withdraw(
+        VaultStore storage store,
+        uint256 vaultId,
+        uint256 shares,
+        uint256 minimum0,
+        uint256 minimum1,
+        address receiver,
+        ExitSwap memory swap
+    ) private returns (uint256 amount0, uint256 amount1, uint256 burned) {
         Vault storage vault = _vault(store, vaultId);
         if (shares == 0) revert IMetricLendingVault.ZeroAmount();
         if (shares > vault.shares[msg.sender]) revert IMetricLendingVault.InsufficientShares();
@@ -82,6 +110,7 @@ library VaultLending {
         vault.shares[msg.sender] -= burned;
         vault.totalShares -= burned;
         if (vault.totalShares == 0) VaultAccrual.forfeitToTreasury(vault);
+        if (swap.amountIn != 0) (amount0, amount1) = MetricVenue.swapPayout(vault, vaultId, swap, amount0, amount1);
         VaultLedger.push(vault, 0, receiver, amount0);
         VaultLedger.push(vault, 1, receiver, amount1);
         MetricVenue.place(vault, vaultId);

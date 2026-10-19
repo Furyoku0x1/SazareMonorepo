@@ -33,6 +33,9 @@ interface IMetricLendingVault {
     /// @notice A force close's shortfall swap did not fill though the reserves could pay at the band; retry once the
     /// pool can fill it, rather than scale at a loss to the trader.
     error ShortfallUnfilled();
+    /// @notice A keeper's swap of someone else's tokens through a venue the keeper named filled further past the band's
+    /// edge than `forceCloseSlippageBps` allows.
+    error VenueBelowBand();
     /// @notice A force close found no price on its pool; retry once the pool prices again, or once the wait without a
     /// price is over and the close may scale the reserves instead.
     error PriceUnavailable();

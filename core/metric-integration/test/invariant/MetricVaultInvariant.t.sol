@@ -21,7 +21,7 @@ contract MetricVaultInvariantTest is MetricFixture {
         deposit(lender, 20e18, 40_000e6);
         handler = new MetricVaultHandler(vault, vaultId, pool, provider, base, quote, outsider, address(this));
         targetContract(address(handler));
-        bytes4[] memory selectors = new bytes4[](13);
+        bytes4[] memory selectors = new bytes4[](16);
         selectors[0] = MetricVaultHandler.deposit.selector;
         selectors[1] = MetricVaultHandler.withdraw.selector;
         selectors[2] = MetricVaultHandler.recenter.selector;
@@ -35,6 +35,9 @@ contract MetricVaultInvariantTest is MetricFixture {
         selectors[10] = MetricVaultHandler.swapOutside.selector;
         selectors[11] = MetricVaultHandler.moveReference.selector;
         selectors[12] = MetricVaultHandler.warp.selector;
+        selectors[13] = MetricVaultHandler.openThroughVenue.selector;
+        selectors[14] = MetricVaultHandler.closeThroughVenue.selector;
+        selectors[15] = MetricVaultHandler.withdrawThroughVenue.selector;
         targetSelector(StdInvariant.FuzzSelector({addr: address(handler), selectors: selectors}));
     }
 
@@ -129,6 +132,27 @@ contract MetricVaultInvariantTest is MetricFixture {
         );
     }
 
+    /// @dev The venue actions reach the vault and succeed: a long that buys 1% of what it adds through the venue, with
+    /// a hundred quote of margin, then a full close that sells its base through the venue and repays.
+    function test_venueActionsReachTheVault() public {
+        handler.openThroughVenue(0, true, 0, 100, 1_000e6, 100e6 + 1, 0);
+        assertEq(handler.venueOpens(), 1, "opened through the venue");
+        assertEq(handler.venueMismatches(), 0, "the fill's loss charged exactly");
+        handler.closeThroughVenue(0, 0);
+        assertEq(handler.venueCloses(), 1, "closed through the venue");
+        handler.deposit(0, 10e18, 20_000e6);
+        handler.withdrawThroughVenue(0, 5_000, 0);
+        assertEq(handler.venueWithdrawals(), 1, "withdrew through the venue");
+        assertEq(handler.unexpectedReverts(), 0, handler.lastUnexpectedAction());
+        assertLedger();
+    }
+
+    /// @dev Every venue open's basis is its collateral and escrow less exactly what its fill lost against the band, and
+    /// a withdrawal that sells its payout's token0 pays none.
+    function invariant_venueResultsExact() public view {
+        assertEq(handler.venueMismatches(), 0, "a venue action's result not what its fill implies");
+    }
+
     /// @dev Deposits and withdrawals never lower the value per share, at the bid, of the lenders who stay.
     function invariant_lenderFlowsNeverDiluteStayers() public view {
         assertEq(handler.stayersDiluted(), 0, "a lender flow diluted the lenders who stay");
@@ -150,6 +174,9 @@ contract MetricVaultInvariantTest is MetricFixture {
         emit log_named_uint("withdrawals", handler.withdrawals());
         emit log_named_uint("opens", handler.opens());
         emit log_named_uint("opens refused", handler.opensRefused());
+        emit log_named_uint("venue opens", handler.venueOpens());
+        emit log_named_uint("venue closes", handler.venueCloses());
+        emit log_named_uint("venue withdrawals", handler.venueWithdrawals());
         emit log_named_uint("full closes", handler.fullCloses());
         emit log_named_uint("partial closes", handler.partialCloses());
         emit log_named_uint("closes refused", handler.closesRefused());

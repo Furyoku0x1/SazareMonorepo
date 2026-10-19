@@ -5,7 +5,7 @@ import {FullMath} from "v4-core/src/libraries/FullMath.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {PositionIndex} from "./PositionIndex.sol";
 import {Book, Bucket, Leg, MakerCloseRequest, MakerPosition} from "../MakerTypes.sol";
-import {Vault, VaultStore} from "../VaultTypes.sol";
+import {ExitSwap, Vault, VaultStore} from "../VaultTypes.sol";
 import {IMakerBook} from "../interfaces/IMakerBook.sol";
 import {IMetricLendingVault} from "../interfaces/IMetricLendingVault.sol";
 import {MakerAccounting} from "./MakerAccounting.sol";
@@ -45,12 +45,36 @@ library MakerClosing {
         /// @dev Premium a force close collects from the leftover, in token1: a wait that would leave the trader no
         /// more than this protects no one, so the close scales instead (audit finding W-3).
         uint256 arrears;
+        /// @dev What an exit swap lost against the close band, in token1: counted back into the proceeds, so the profit
+        /// share is measured as if the swap had filled at the band.
+        uint256 exitLost;
+        /// @dev The venue a force close's keeper named for the shortfall swap, and its route; zero for the pool.
+        address venue;
+        bytes route;
     }
 
     /// @notice Closes `fractionWad` of every leg of the caller's position, repaying each leg from the closed part of
     /// the reserves. A partial close must pay all premium owed and leave the rest solvent and above the minimums.
     function close(VaultStore storage store, MakerCloseRequest calldata request)
         external
+        returns (uint256 paid0, uint256 paid1)
+    {
+        ExitSwap memory none;
+        return _close(store, request, none);
+    }
+
+    /// @notice As `close`, after first swapping part of the closed reserves through the venue the trader names; each
+    /// leg's repayment is taken from the closed part as the swap left it. Needs the close band, which values the
+    /// swap's loss; a close without a swap needs no price.
+    function closeAfterSwap(VaultStore storage store, MakerCloseRequest calldata request, ExitSwap calldata exit)
+        external
+        returns (uint256 paid0, uint256 paid1)
+    {
+        return _close(store, request, exit);
+    }
+
+    function _close(VaultStore storage store, MakerCloseRequest calldata request, ExitSwap memory exit)
+        private
         returns (uint256 paid0, uint256 paid1)
     {
         uint256 positionId = request.positionId;
@@ -61,6 +85,7 @@ library MakerClosing {
         if (request.repay1.length != position.legCount) revert IMakerBook.InvalidLegs();
         Vault storage vault = store.vaults[position.vaultId];
         Closing memory closing = _portion(store, vault, positionId, request.fractionWad);
+        _exitSwap(vault, position, closing, exit);
         MakerSettlement.Dues memory dues = MakerSettlement.collect(store, vault, positionId, true);
         _repayOwner(store, vault, positionId, request, closing);
         _payArrears(store, vault, positionId, closing, dues, closing.fractionWad != WAD);
@@ -81,6 +106,22 @@ library MakerClosing {
         external
         returns (uint256 reward0, uint256 reward1)
     {
+        return _forceClose(store, positionId, address(0), "");
+    }
+
+    /// @notice As `forceClose`, buying the shortfall through the venue the keeper names instead of the pool, as
+    /// `VaultClosing.forceCloseThrough` does.
+    function forceCloseThrough(VaultStore storage store, uint256 positionId, address venue, bytes calldata route)
+        external
+        returns (uint256 reward0, uint256 reward1)
+    {
+        return _forceClose(store, positionId, venue, route);
+    }
+
+    function _forceClose(VaultStore storage store, uint256 positionId, address venue, bytes memory route)
+        private
+        returns (uint256 reward0, uint256 reward1)
+    {
         MakerPosition storage position = store.makerPositions[positionId];
         if (position.owner == address(0)) revert IMetricLendingVault.UnknownPosition();
         Vault storage vault = store.vaults[position.vaultId];
@@ -88,6 +129,8 @@ library MakerClosing {
         MakerSettlement.Dues memory dues = MakerSettlement.collect(store, vault, positionId, true);
         Closing memory closing = _portion(store, vault, positionId, WAD);
         closing.arrears = dues.total;
+        closing.venue = venue;
+        closing.route = route;
         _repayForced(store, vault, positionId, closing);
         _payArrears(store, vault, positionId, closing, dues, false);
         _takeProfitShare(store, vault, positionId, closing);
@@ -129,6 +172,24 @@ library MakerClosing {
         }
     }
 
+    /// @dev The trader's swap on the closed part of the reserves, before any leg is repaid. It sells no more of a token
+    /// than the closed part holds, and the closed part and the reserves move by what moved, so the rest of the
+    /// position is untouched.
+    function _exitSwap(
+        Vault storage vault,
+        MakerPosition storage position,
+        Closing memory closing,
+        ExitSwap memory exit
+    ) private {
+        if (exit.amountIn == 0) return;
+        uint256 closedHeld = exit.zeroForOne ? closing.portion0 : closing.portion1;
+        (uint256 paid, uint256 received, uint256 lost) = MetricVenue.exitSwap(vault, position.vaultId, exit, closedHeld);
+        _applySwap(vault, position, exit.zeroForOne, paid, received);
+        closing.portion0 = exit.zeroForOne ? closing.portion0 - paid : closing.portion0 + received;
+        closing.portion1 = exit.zeroForOne ? closing.portion1 + received : closing.portion1 - paid;
+        closing.exitLost = lost;
+    }
+
     // ---------------------------------------------------------------- repayment
 
     /// @dev Checks each leg's repayment against its own repayment rule and returns it to the leg's bucket.
@@ -168,7 +229,7 @@ library MakerClosing {
         MakerPosition storage position = store.makerPositions[positionId];
         uint256[8] memory repay0;
         uint256[8] memory repay1;
-        bool atBid = _targetsAtBid(store, vault, positionId, repay0, repay1, closing.arrears);
+        bool atBid = _targetsAtBid(store, vault, positionId, repay0, repay1, closing);
         if (!atBid) _scaledRepayments(store, vault, positionId, repay0, repay1);
         uint256 legCount = position.legCount;
         // legCount <= MAX_LEGS
@@ -195,9 +256,11 @@ library MakerClosing {
         uint256 positionId,
         uint256[8] memory repay0,
         uint256[8] memory repay1,
-        uint256 arrears
+        Closing memory closing
     ) private returns (bool) {
-        if (vault.parameters.pool == address(0)) return false;
+        if (vault.parameters.pool == address(0)) {
+            if (closing.venue == address(0)) return false;
+        }
         (bool ok, uint160 sqrtBidX96) = VaultPricing.tryCloseBid(vault);
         if (!ok) {
             uint256 flaggedAt = store.makerPositions[positionId].delinquentSince;
@@ -207,7 +270,7 @@ library MakerClosing {
         (bool repaid, uint256 target0, uint256 target1) =
             _holdingsAt(store, vault, positionId, sqrtBidX96, repay0, repay1);
         if (!repaid) return false;
-        return _buyShortfall(vault, store.makerPositions[positionId], target0, target1, arrears);
+        return _buyShortfall(vault, store.makerPositions[positionId], target0, target1, closing);
     }
 
     /// @dev Buys the one token the reserves lack for the targets, paying at most the other token's surplus. Returns
@@ -218,7 +281,7 @@ library MakerClosing {
         MakerPosition storage position,
         uint256 target0,
         uint256 target1,
-        uint256 arrears
+        Closing memory closing
     ) private returns (bool) {
         uint256 reserve0 = position.reserve0;
         uint256 reserve1 = position.reserve1;
@@ -231,9 +294,9 @@ library MakerClosing {
         bool buyToken0 = reserve0 < target0;
         uint256 deficit = buyToken0 ? target0 - reserve0 : target1 - reserve1;
         uint256 surplus = buyToken0 ? reserve1 - target1 : reserve0 - target0;
-        uint256 maximumIn = _budget(vault, position, buyToken0, deficit, surplus, arrears);
+        uint256 maximumIn = _budget(vault, position, buyToken0, deficit, surplus, closing.arrears);
         if (maximumIn == 0) return false;
-        _swapShortfall(vault, position, buyToken0, deficit, maximumIn);
+        _swapShortfall(vault, position, buyToken0, deficit, maximumIn, closing);
         return true;
     }
 
@@ -260,12 +323,14 @@ library MakerClosing {
         MakerPosition storage position,
         bool buyToken0,
         uint256 deficit,
-        uint256 maximumIn
+        uint256 maximumIn,
+        Closing memory closing
     ) private {
-        (bool filled, uint256 paid, uint256 received) =
-            MetricVenue.trySwapExactOut(vault, position.vaultId, !buyToken0, deficit, maximumIn);
-        // Checked after the pool call: MetricLendingVault's nonReentrant lock is held, and a partial fill reverts
-        // inside the swap, so an unfilled swap moved nothing.
+        (bool filled, uint256 paid, uint256 received) = MetricVenue.swapForKeeper(
+            vault, position.vaultId, !buyToken0, deficit, maximumIn, closing.venue, closing.route
+        );
+        // Checked after the swap: MetricLendingVault's nonReentrant lock is held. A pool swap that falls short moved
+        // nothing; a venue's has, and the revert undoes it.
         if (!filled) revert IMetricLendingVault.ShortfallUnfilled();
         _applySwap(vault, position, !buyToken0, paid, received);
     }
@@ -463,7 +528,7 @@ library MakerClosing {
         uint256 value0 = priced
             ? VaultMath.priceTimes(closing.leftover0, sqrtBidX96, false)
             : FullMath.mulDiv(closing.leftover0, closing.closedMaximum1, closing.closedMaximum0);
-        uint256 proceeds = value0 + closing.leftover1 + closing.refund;
+        uint256 proceeds = value0 + closing.leftover1 + closing.refund + closing.exitLost;
         return VaultBook.profit(proceeds, closing.basis) * vault.parameters.profitShareBps / MakerMath.BPS;
     }
 

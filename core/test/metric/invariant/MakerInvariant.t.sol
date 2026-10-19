@@ -41,6 +41,11 @@ contract MakerInvariantTest is MakerFixture {
     function test_handlerReachesEveryAction() public {
         handler.actOpen(true, 3, 0, 1, false);
         handler.actOpen(false, 2, 1, 2, true);
+        // Through a named venue, selling 1% of what each open adds (more would break the chord of a 1% margin, since the
+        // fill is at the market and not the strike): a fair long, a short 0.5% short of the band, a long filled at half.
+        handler.actOpenThroughVenue(true, 1, 4, 3, 0);
+        handler.actOpenThroughVenue(false, 1, 4, 3, 10_000);
+        handler.actOpenThroughVenue(true, 1, 5, 3, 30_000);
         handler.actIncrease(0, 2, 1_000e6, false);
         handler.actWarp(3 days);
         handler.actSettle(0);
@@ -57,6 +62,7 @@ contract MakerInvariantTest is MakerFixture {
         handler.actClose(0, false, 0);
         assertEq(handler.violations(), 0, handler.lastViolation());
         assertGt(handler.opens(), 0, "opens");
+        assertEq(handler.venueOpens(), 3, "every fill stands");
         assertGt(handler.increases(), 0, "increases");
         assertGt(handler.settlements(), 0, "settlements");
         assertGt(handler.claims(), 0, "claims");
@@ -141,7 +147,7 @@ contract MakerInvariantTest is MakerFixture {
     }
 
     function _actions() private view returns (bytes4[] memory selectors) {
-        selectors = new bytes4[](12);
+        selectors = new bytes4[](13);
         selectors[0] = handler.actDeposit.selector;
         selectors[1] = handler.actWithdraw.selector;
         selectors[2] = handler.actClaim.selector;
@@ -154,6 +160,7 @@ contract MakerInvariantTest is MakerFixture {
         selectors[9] = handler.actMovePrice.selector;
         selectors[10] = handler.actOpen.selector;
         selectors[11] = handler.actIncrease.selector;
+        selectors[12] = handler.actOpenThroughVenue.selector;
     }
 
     /// @dev Each owner's listed maker positions are exactly their open ones (`positionsOf`): opens list them, increases

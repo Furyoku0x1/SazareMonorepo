@@ -149,11 +149,16 @@ struct MakerOpenRequest {
     uint128 collateral;
     /// @notice Token1 prepaid into the premium escrow.
     uint128 escrow;
-    /// @notice Reserve tokens sold into the target asset through Metric after the release; zero for none.
+    /// @notice Reserve tokens sold into the target asset after the release; zero for none.
     uint256 entryAmountIn;
     uint256 entryMinimumOut;
     /// @notice The highest blended yearly rate the trader accepts, after the borrow, in basis points.
     uint256 maximumRateBps;
+    /// @notice Where the entry swap trades: zero for the vault's Metric pool, otherwise any `ISwapVenue` the trader
+    /// names. Any fill stands; what it loses against the band is charged to the basis.
+    address entryVenue;
+    /// @notice Passed to `entryVenue` untouched: the route.
+    bytes entryRoute;
 }
 
 struct MakerIncreaseRequest {
@@ -165,12 +170,14 @@ struct MakerIncreaseRequest {
     uint128 collateral;
     /// @notice Token1 added to the premium escrow.
     uint128 escrow;
-    /// @notice Tokens the new legs released, or the collateral added, sold into the target asset through Metric; zero
-    /// for none.
+    /// @notice Tokens the new legs released, or the collateral added, sold into the target asset; zero for none.
     uint256 entryAmountIn;
     uint256 entryMinimumOut;
     /// @notice The highest blended yearly rate the trader accepts over every leg after the increase, in basis points.
     uint256 maximumRateBps;
+    /// @notice As an open's: zero for the vault's Metric pool, otherwise the `ISwapVenue` the trader names.
+    address entryVenue;
+    bytes entryRoute;
 }
 
 struct MakerCloseRequest {

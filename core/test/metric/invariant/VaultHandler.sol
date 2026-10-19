@@ -3,9 +3,18 @@ pragma solidity 0.8.37;
 
 import {MetricLendingVault} from "../../../src/metric/vault/MetricLendingVault.sol";
 import {FullMath} from "v4-core/src/libraries/FullMath.sol";
-import {CloseRequest, IncreaseRequest, Ledger, OpenRequest, Position} from "../../../src/metric/vault/VaultTypes.sol";
+import {
+    CloseRequest,
+    ExitSwap,
+    IncreaseRequest,
+    Ledger,
+    OpenRequest,
+    Position
+} from "../../../src/metric/vault/VaultTypes.sol";
 import {IMetricLendingVault} from "../../../src/metric/vault/interfaces/IMetricLendingVault.sol";
 import {DebtTotals, VaultMath} from "../../../src/metric/vault/libraries/VaultMath.sol";
+import {VenueSwap} from "../../../src/metric/vault/libraries/VenueSwap.sol";
+import {RouteVenue, VenueRoutes} from "../utils/RouteVenue.sol";
 import {MockPriceSource, TestToken, VaultFixture} from "../utils/VaultFixture.sol";
 
 /// @notice The actions of the vault's invariant test, on two vaults of one singleton that share the quote token.
@@ -35,6 +44,7 @@ contract VaultHandler is VaultFixture {
     uint256 internal constant WITHDRAW_ROUNDING = 4;
 
     TestToken internal secondBase;
+    RouteVenue internal venue;
     uint256[VAULT_COUNT] public vaultIds;
     address[LENDER_COUNT] public lenders;
     address[TRADER_COUNT] internal traders;
@@ -59,6 +69,8 @@ contract VaultHandler is VaultFixture {
     uint256 public forceCloses;
     uint256 public protocolPayments;
     uint256 public increases;
+    uint256 public venueOpens;
+    uint256 public venueCloses;
 
     constructor(
         MetricLendingVault sharedVault,
@@ -78,6 +90,10 @@ contract VaultHandler is VaultFixture {
         vaultIds = [firstVaultId, secondVaultId];
         priceTick = PRICE_TICK;
         spreadTicks = 1;
+        venue = new RouteVenue();
+        firstBase.mint(address(venue), 1e30);
+        secondBase_.mint(address(venue), 1e30);
+        sharedQuote.mint(address(venue), 1e30);
         // LENDER_COUNT and TRADER_COUNT actors
         for (uint256 index = 0; index < LENDER_COUNT; ++index) {
             lenders[index] = makeAddr(string.concat("lender", vm.toString(index)));
@@ -204,6 +220,44 @@ contract VaultHandler is VaultFixture {
         );
     }
 
+    /// @dev An open whose entry swap goes through a venue the trader names: part or all of what the open adds is
+    /// sold, part or all of that spent, at a fair fill or a poor one. Any fill stands, and the basis must be the
+    /// collateral and escrow less exactly what the fill lost against the band.
+    function actOpenThroughVenue(
+        uint256 actorChoice,
+        bool isLong,
+        uint256 distanceTicks,
+        uint256 notional,
+        uint256 collateralChoice,
+        uint256 swapChoice
+    ) external {
+        (int24 tickLower, int24 tickUpper) = _venueRange(isLong, distanceTicks);
+        notional = bound(notional, MIN_NOTIONAL, MAX_NOTIONAL);
+        OpenRequest memory request =
+            _openTerms(isLong, actorChoice, tickLower, tickUpper, notional, collateralChoice, 2 + 3 * 50e6);
+        uint256 lost = _routeThroughVenue(request, swapChoice);
+        bytes32[VAULT_COUNT] memory before = _snapshot();
+        vm.prank(traders[(actorChoice / VAULT_COUNT) % TRADER_COUNT]);
+        try vault.open(request) returns (uint256 positionId) {
+            positionIds.push(positionId);
+            ++venueOpens;
+            uint256 paidIn = uint256(request.collateral) + request.escrow;
+            if (vault.positionOf(positionId).basis + lost != paidIn) {
+                _violate("a venue fill's loss not charged exactly");
+            }
+        } catch (bytes memory reason) {
+            // The fill is at the band's edge or worse, not the strike, so it can leave the reserves under the chord.
+            _expect(
+                reason,
+                "open through a venue",
+                IMetricLendingVault.UtilizationCeiling.selector,
+                IMetricLendingVault.InsufficientIdle.selector,
+                IMetricLendingVault.Insolvent.selector
+            );
+        }
+        _checkIsolation(before, request.vaultId);
+    }
+
     // ---------------------------------------------------------------- open positions
 
     function actAddEscrow(uint256 positionChoice, uint256 amount) external {
@@ -273,6 +327,33 @@ contract VaultHandler is VaultFixture {
             ++fullCloses;
         } catch (bytes memory reason) {
             _expect(reason, "full close", 0, 0, 0);
+        }
+        _checkIsolation(before, position.vaultId);
+    }
+
+    /// @dev A full close that first sells part of its token0 through the venue, at a fair or a poor fill, then repays
+    /// with everything the reserves hold after it. Refused only when a poor fill leaves too little to repay.
+    function actCloseThroughVenue(uint256 positionChoice, uint256 swapChoice) external {
+        (bool found, uint256 positionId, Position memory position) = _pick(positionChoice);
+        if (!found) return;
+        if (position.reserve0 == 0) return;
+        VenueRoutes.Route memory chosen =
+            VenueRoutes.route(false, position.reserve0, swapChoice, source.sqrtBidX96(), source.sqrtAskX96());
+        ExitSwap memory exit = ExitSwap({
+            zeroForOne: true, amountIn: chosen.amountIn, minimumOut: 0, venue: address(venue), route: chosen.data
+        });
+        CloseRequest memory request = CloseRequest({
+            positionId: positionId,
+            fractionWad: WAD,
+            repay0: position.reserve0 - chosen.spend,
+            repay1: position.reserve1 + chosen.amountOut
+        });
+        bytes32[VAULT_COUNT] memory before = _snapshot();
+        vm.prank(position.owner);
+        try vault.closeAfterSwap(request, exit) {
+            ++venueCloses;
+        } catch (bytes memory reason) {
+            _expect(reason, "close through a venue", IMetricLendingVault.RepaymentShort.selector, 0, 0);
         }
         _checkIsolation(before, position.vaultId);
     }
@@ -371,11 +452,9 @@ contract VaultHandler is VaultFixture {
         uint256 collateralChoice,
         uint256 escrowChoice
     ) private {
-        uint128 liquidity = liquidityFor1(tickLower, tickUpper, notional);
-        OpenRequest memory request = openRequest(isLong, tickLower, tickUpper, liquidity, 0);
-        request.vaultId = vaultIds[actorChoice % VAULT_COUNT];
-        request.collateral = uint128(_collateral(tickLower, tickUpper, liquidity, notional, collateralChoice));
-        request.escrow = uint128(_escrow(escrowChoice));
+        OpenRequest memory request = _openTerms(
+            isLong, actorChoice, tickLower, tickUpper, notional, collateralChoice, escrowChoice
+        );
         bytes32[VAULT_COUNT] memory before = _snapshot();
         vm.prank(traders[(actorChoice / VAULT_COUNT) % TRADER_COUNT]);
         try vault.open(request) returns (uint256 positionId) {
@@ -408,6 +487,55 @@ contract VaultHandler is VaultFixture {
         if (mode == 0) return minimum + amountChoice % 4;
         if (mode == 1) return minimum + notional * bound(amountChoice, 10, 200) / BPS;
         return minimum + notional * bound(amountChoice, 500, 5_000) / BPS;
+    }
+
+    /// @dev A long's range entirely below the bid, a short's entirely above the ask, as the other opens choose them.
+    function _venueRange(bool isLong, uint256 distanceTicks) private view returns (int24 tickLower, int24 tickUpper) {
+        int24 distance = _ticks(distanceTicks, 0, 1_500);
+        int24 width = _ticks(distanceTicks / 1_501, 1, 2_000);
+        if (isLong) {
+            tickUpper = priceTick - spreadTicks - distance;
+            return (tickUpper - width, tickUpper);
+        }
+        tickLower = priceTick + spreadTicks + distance;
+        return (tickLower, tickLower + width);
+    }
+
+    function _openTerms(
+        bool isLong,
+        uint256 actorChoice,
+        int24 tickLower,
+        int24 tickUpper,
+        uint256 notional,
+        uint256 collateralChoice,
+        uint256 escrowChoice
+    ) private view returns (OpenRequest memory request) {
+        uint128 liquidity = liquidityFor1(tickLower, tickUpper, notional);
+        request = openRequest(isLong, tickLower, tickUpper, liquidity, 0);
+        request.vaultId = vaultIds[actorChoice % VAULT_COUNT];
+        request.collateral = uint128(_collateral(tickLower, tickUpper, liquidity, notional, collateralChoice));
+        request.escrow = uint128(_escrow(escrowChoice));
+    }
+
+    /// @dev Routes the open's entry swap through the handler's venue (`VenueRoutes.route`), and returns what the fill
+    /// loses against the band, as the vault measures it.
+    function _routeThroughVenue(OpenRequest memory request, uint256 swapChoice) private view returns (uint256) {
+        (uint160 sqrtLowerX96, uint160 sqrtUpperX96) = VaultMath.rangeSqrtPrices(request.tickLower, request.tickUpper);
+        uint160 sqrtBidX96 = source.sqrtBidX96();
+        uint160 sqrtAskX96 = source.sqrtAskX96();
+        (uint256 release0, uint256 release1) =
+            VaultMath.releaseAcrossBand(request.liquidity, sqrtLowerX96, sqrtUpperX96, sqrtBidX96, sqrtAskX96);
+        uint256 sellable = request.isLong ? release1 + request.collateral : release0;
+        VenueRoutes.Route memory chosen =
+            VenueRoutes.route(request.isLong, sellable, swapChoice, sqrtBidX96, sqrtAskX96);
+        request.entryAmountIn = chosen.amountIn;
+        request.entryVenue = address(venue);
+        request.entryRoute = chosen.data;
+        VenueSwap.Trade memory trade;
+        trade.zeroForOne = !request.isLong;
+        trade.sqrtBidX96 = sqrtBidX96;
+        trade.sqrtAskX96 = sqrtAskX96;
+        return VenueSwap.shortfall(trade, chosen.spend, chosen.amountOut);
     }
 
     /// @dev No escrow, a dust escrow, or up to 100 quote: the first two go delinquent within a step or two.

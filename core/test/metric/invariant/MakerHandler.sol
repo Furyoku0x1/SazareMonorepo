@@ -17,6 +17,8 @@ import {IMakerBook} from "../../../src/metric/vault/interfaces/IMakerBook.sol";
 import {IMetricLendingVault} from "../../../src/metric/vault/interfaces/IMetricLendingVault.sol";
 import {MakerMath} from "../../../src/metric/vault/libraries/MakerMath.sol";
 import {DebtTotals, VaultMath} from "../../../src/metric/vault/libraries/VaultMath.sol";
+import {VenueSwap} from "../../../src/metric/vault/libraries/VenueSwap.sol";
+import {RouteVenue, VenueRoutes} from "../utils/RouteVenue.sol";
 import {MockPriceSource, TestToken} from "../utils/VaultFixture.sol";
 import {MakerFixture} from "../utils/MakerFixture.sol";
 
@@ -37,6 +39,9 @@ contract MakerHandler is MakerFixture {
     /// @dev Buy levels below the starting price and sell levels above it.
     int24[LEVEL_COUNT] internal buyLevels;
     int24[LEVEL_COUNT] internal sellLevels;
+    RouteVenue internal venue;
+    /// @dev Positions whose entry swap went through the venue, and so may hold the token they bought.
+    mapping(uint256 positionId => bool) internal swappedAtEntry;
     /// @dev Every bucket ever deposited into, and every position ever opened (closed ones read back with no owner).
     uint256[] public bucketIds;
     mapping(uint256 bucketId => bool) internal tracked;
@@ -54,6 +59,7 @@ contract MakerHandler is MakerFixture {
     uint256 public fullCloses;
     uint256 public partialCloses;
     uint256 public forceCloses;
+    uint256 public venueOpens;
 
     constructor(
         MetricLendingVault sharedVault,
@@ -78,6 +84,9 @@ contract MakerHandler is MakerFixture {
         }
         fundWith(trader, base);
         fundWith(trader, quote);
+        venue = new RouteVenue();
+        base_.mint(address(venue), 1e30);
+        quote_.mint(address(venue), 1e30);
     }
 
     function makerAt(uint256 index) external view returns (address) {
@@ -157,9 +166,74 @@ contract MakerHandler is MakerFixture {
     // ---------------------------------------------------------------- traders
 
     function actOpen(bool isLong, uint256 legsSeed, uint256 levelSeed, uint256 sizeSeed, bool tight) external {
+        (uint256[] memory ids, uint128[] memory liquidities) = _legs(isLong, legsSeed, levelSeed, sizeSeed);
+        if (_hasDuplicate(ids)) return;
+        _open(_request(isLong, ids, liquidities, tight));
+    }
+
+    /// @dev An open whose entry swap goes through a venue the trader names: part or all of what the open adds is
+    /// sold, part or all of that spent, at a fair fill or a poor one. Any fill stands, and the basis must be the
+    /// collateral and escrow less exactly what the fill lost against the band.
+    function actOpenThroughVenue(bool isLong, uint256 legsSeed, uint256 levelSeed, uint256 sizeSeed, uint256 swapChoice)
+        external
+    {
+        (uint256[] memory ids, uint128[] memory liquidities) = _legs(isLong, legsSeed, levelSeed, sizeSeed);
+        if (_hasDuplicate(ids)) return;
+        MakerOpenRequest memory request = _request(isLong, ids, liquidities, false);
+        (,, uint256 release0, uint256 release1) = _terms(ids, liquidities);
+        uint256 sellable = isLong ? release1 + request.collateral : release0;
+        uint256 lost = _routeThroughVenue(request, sellable, swapChoice);
+        bytes32 before = _passiveBooks();
+        vm.prank(trader);
+        try vault.openMaker(request) returns (uint256 positionId) {
+            ++venueOpens;
+            positionIds.push(positionId);
+            swappedAtEntry[positionId] = true;
+            uint256 paidIn = uint256(request.collateral) + request.escrow;
+            if (vault.makerPositionOf(positionId).basis + lost != paidIn) {
+                _violate("a venue fill's loss not charged exactly");
+            }
+        } catch (bytes memory reason) {
+            _expectVenueRefusal(reason);
+        }
+        _checkIsolation(before);
+    }
+
+    /// @dev Routes the open's entry swap through the handler's venue, and returns what the fill loses against the
+    /// band, as the vault measures it.
+    function _routeThroughVenue(MakerOpenRequest memory request, uint256 sellable, uint256 swapChoice)
+        private
+        view
+        returns (uint256)
+    {
+        uint160 sqrtBidX96 = source.sqrtBidX96();
+        uint160 sqrtAskX96 = source.sqrtAskX96();
+        VenueRoutes.Route memory chosen =
+            VenueRoutes.route(request.isLong, sellable, swapChoice, sqrtBidX96, sqrtAskX96);
+        request.entryAmountIn = chosen.amountIn;
+        request.entryVenue = address(venue);
+        request.entryRoute = chosen.data;
+        VenueSwap.Trade memory trade;
+        trade.zeroForOne = !request.isLong;
+        trade.sqrtBidX96 = sqrtBidX96;
+        trade.sqrtAskX96 = sqrtAskX96;
+        return VenueSwap.shortfall(trade, chosen.spend, chosen.amountOut);
+    }
+
+    function _refusedOnBoughtToken(uint256 positionId, bytes4 selector) private view returns (bool) {
+        if (selector != IMetricLendingVault.Insolvent.selector) return false;
+        return swappedAtEntry[positionId];
+    }
+
+    /// @dev One to three legs on the side's levels, every other level from `levelSeed`, sorted by bucket id.
+    function _legs(bool isLong, uint256 legsSeed, uint256 levelSeed, uint256 sizeSeed)
+        private
+        view
+        returns (uint256[] memory ids, uint128[] memory liquidities)
+    {
         uint256 legCount = bound(legsSeed, 1, 3);
-        uint256[] memory ids = new uint256[](legCount);
-        uint128[] memory liquidities = new uint128[](legCount);
+        ids = new uint256[](legCount);
+        liquidities = new uint128[](legCount);
         // legCount <= 3
         for (uint256 index = 0; index < legCount; ++index) {
             uint256 levelIndex = (levelSeed % LEVEL_COUNT + index * 2) % LEVEL_COUNT;
@@ -168,13 +242,11 @@ contract MakerHandler is MakerFixture {
             liquidities[index] =
                 liquidityOn(level, bound(uint256(keccak256(abi.encode(sizeSeed, index))), 101e6, 20_000e6));
         }
-        (ids, liquidities) = _sorted(ids, liquidities);
-        if (_hasDuplicate(ids)) return;
-        _open(_request(isLong, ids, liquidities, tight));
+        return _sorted(ids, liquidities);
     }
 
     /// @dev Adds one leg on the position's side, collateralized for its own chord, so the whole stays on the aggregate
-    /// chord; any level, including one an existing leg already borrows from.
+    /// chord while the reserves hold only token1; any level, including one an existing leg already borrows from.
     function actIncrease(uint256 positionChoice, uint256 levelSeed, uint256 sizeSeed, bool tight) external {
         (bool found, uint256 positionId) = _pick(positionChoice);
         if (!found) return;
@@ -199,6 +271,9 @@ contract MakerHandler is MakerFixture {
             bytes4 selector = reason.length >= 4 ? bytes4(reason) : bytes4(0);
             if (selector == IMetricLendingVault.PremiumUnpaid.selector) return;
             if (selector == IMakerBook.InvalidLegs.selector) return;
+            // The aggregate chord values token0 at the blended strike, so a leg at another level moves what bought
+            // token0 counts for: its own collateral then need not keep the whole solvent.
+            if (_refusedOnBoughtToken(positionId, selector)) return;
             _expectOpen(reason);
         }
         _checkIsolation(before);
@@ -425,6 +500,14 @@ contract MakerHandler is MakerFixture {
         if (selector == IMetricLendingVault.UtilizationCeiling.selector) return;
         if (selector == IMetricLendingVault.EscrowTooSmall.selector) return;
         _violate(string.concat("open reverted unexpectedly: ", vm.toString(reason)));
+    }
+
+    /// @dev A venue open may also find the swap left the reserves under the aggregate chord, since the fill is at the
+    /// band's edge or worse and not the strikes.
+    function _expectVenueRefusal(bytes memory reason) private {
+        bytes4 selector = reason.length >= 4 ? bytes4(reason) : bytes4(0);
+        if (selector == IMetricLendingVault.Insolvent.selector) return;
+        _expectOpen(reason);
     }
 
     function _expectPartial(bytes memory reason) private {

@@ -12,6 +12,7 @@ import {VaultLedger} from "./VaultLedger.sol";
 import {VaultMath} from "./VaultMath.sol";
 import {VaultPricing} from "./VaultPricing.sol";
 import {MetricVenue} from "./MetricVenue.sol";
+import {VenueSwap} from "./VenueSwap.sol";
 
 /// @notice Opening positions, topping them up, settling their premium, and flagging delinquent ones.
 /// @dev An external library: the singleton delegatecalls it, so `msg.sender` is the trader and token movements are
@@ -27,6 +28,7 @@ library VaultPositions {
         uint160 sqrtLowerX96;
         uint160 sqrtUpperX96;
         uint160 sqrtBidX96;
+        uint160 sqrtAskX96;
         uint256 maximum0;
         uint256 maximum1;
         uint256 release0;
@@ -47,7 +49,9 @@ library VaultPositions {
         PositionIndex.add(store.passivePositionIds[position.owner], store.indexInOwnerList, positionId);
         _fund(vault, position, request.collateral, request.escrow);
         uint256 sellable = _sellable(opening, request.isLong, request.collateral);
-        _enter(vault, request.vaultId, position, request.entryAmountIn, request.entryMinimumOut, sellable);
+        VenueSwap.Trade memory trade =
+            _trade(opening, request.isLong, request.entryAmountIn, request.entryMinimumOut, request.entryVenue);
+        _enter(vault, request.vaultId, position, trade, request.entryRoute, sellable);
         _requireSolvent(position);
         _requireEscrow(vault, position);
         MetricVenue.place(vault, request.vaultId);
@@ -81,7 +85,9 @@ library VaultPositions {
         _merge(vault, position, request.liquidity, opening);
         _fund(vault, position, request.collateral, request.escrow);
         uint256 sellable = _sellable(opening, position.isLong, request.collateral);
-        _enter(vault, vaultId, position, request.entryAmountIn, request.entryMinimumOut, sellable);
+        VenueSwap.Trade memory trade =
+            _trade(opening, position.isLong, request.entryAmountIn, request.entryMinimumOut, request.entryVenue);
+        _enter(vault, vaultId, position, trade, request.entryRoute, sellable);
         _requireSolvent(position);
         _requireEscrow(vault, position);
         MetricVenue.place(vault, vaultId);
@@ -164,10 +170,9 @@ library VaultPositions {
         (opening.maximum0, opening.maximum1) =
             VaultMath.debtExtremes(liquidity, opening.sqrtLowerX96, opening.sqrtUpperX96);
         if (opening.maximum1 < vault.parameters.minBorrowNotional) revert IMetricLendingVault.BelowMinimumBorrow();
-        uint160 sqrtAskX96;
-        (opening.sqrtBidX96, sqrtAskX96) = VaultPricing.band(vault);
+        (opening.sqrtBidX96, opening.sqrtAskX96) = VaultPricing.band(vault);
         (opening.release0, opening.release1) = VaultMath.releaseAcrossBand(
-            liquidity, opening.sqrtLowerX96, opening.sqrtUpperX96, opening.sqrtBidX96, sqrtAskX96
+            liquidity, opening.sqrtLowerX96, opening.sqrtUpperX96, opening.sqrtBidX96, opening.sqrtAskX96
         );
     }
 
@@ -283,21 +288,45 @@ library VaultPositions {
         return opening.release0;
     }
 
-    /// @dev The entry swap: a long sells token1 for token0, a short token0 for token1, through the vault's pool.
+    /// @dev The entry swap a request asks for: a long sells token1 for token0, a short token0 for token1, its fill
+    /// measured at the band the release was priced at.
+    function _trade(Opening memory opening, bool isLong, uint256 amountIn, uint256 minimumOut, address venue)
+        private
+        pure
+        returns (VenueSwap.Trade memory)
+    {
+        return VenueSwap.Trade({
+            zeroForOne: !isLong,
+            amountIn: amountIn,
+            minimumOut: minimumOut,
+            venue: venue,
+            sqrtBidX96: opening.sqrtBidX96,
+            sqrtAskX96: opening.sqrtAskX96
+        });
+    }
+
+    /// @dev The entry swap, through the venue the trader chose, of no more than this call adds.
     function _enter(
         Vault storage vault,
         uint256 vaultId,
         Position storage position,
-        uint256 amountIn,
-        uint256 minimumOut,
+        VenueSwap.Trade memory trade,
+        bytes calldata route,
         uint256 sellable
     ) private {
-        if (amountIn == 0) return;
-        if (vault.parameters.pool == address(0)) revert IMetricLendingVault.InvalidParameters();
-        if (amountIn > sellable) revert IMetricLendingVault.InvalidParameters();
-        bool zeroForOne = !position.isLong;
-        (uint256 paid, uint256 received) = MetricVenue.swapExactIn(vault, vaultId, zeroForOne, amountIn, minimumOut);
-        _moveReserves(vault, position, zeroForOne, paid, received);
+        if (trade.amountIn == 0) return;
+        if (trade.amountIn > sellable) revert IMetricLendingVault.InvalidParameters();
+        (uint256 paid, uint256 received, uint256 lost) = MetricVenue.swapForTrader(vault, vaultId, trade, route);
+        _moveReserves(vault, position, trade.zeroForOne, paid, received);
+        _chargeToBasis(position, lost);
+    }
+
+    /// @dev A fill's loss against the band counts as taken out of the position: a venue the trader controls could
+    /// return less than the market and keep the rest, so the profit share is measured as if the swap had filled at the
+    /// band. The chord bounds what any fill can take to collateral the trader put in, all of it in the basis.
+    function _chargeToBasis(Position storage position, uint256 lost) private {
+        uint256 basis = position.basis;
+        position.basis = (lost < basis ? basis - lost : 0).toUint128();
     }
 
     /// @dev The chord on the position as it now stands: an increase checks the combined position, as an open would.

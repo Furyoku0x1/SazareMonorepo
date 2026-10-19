@@ -3,16 +3,19 @@ pragma solidity 0.8.37;
 
 import {FullMath} from "v4-core/src/libraries/FullMath.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
-import {Vault} from "../VaultTypes.sol";
+import {ExitSwap, Vault, VaultStore} from "../VaultTypes.sol";
 import {IMetricLendingVault} from "../interfaces/IMetricLendingVault.sol";
 import {IMetricPool, LiquidityDelta} from "../interfaces/IMetricPool.sol";
+import {ISwapVenue} from "../interfaces/ISwapVenue.sol";
 import {MetricPrice} from "./MetricPrice.sol";
 import {MetricState} from "./MetricState.sol";
 import {VaultCallback} from "./VaultCallback.sol";
 import {VaultLedger} from "./VaultLedger.sol";
 import {VaultMath} from "./VaultMath.sol";
 import {VaultPricing} from "./VaultPricing.sol";
+import {VenueSwap} from "./VenueSwap.sol";
 
 /// @notice The vault's idle capital in its Metric pool: placement around the active bin, withdrawal from the edges,
 /// re-centering, and reads of what the position holds.
@@ -328,6 +331,203 @@ library MetricVenue {
             VaultCallback.clear();
             return (false, 0, 0);
         }
+    }
+
+    // ---------------------------------------------------------------- Metric callbacks
+
+    /// @notice The singleton's `metricOmmModifyLiquidityCallback`: pays the pool for a placement the vault expected,
+    /// no more than it expected. Here rather than in the singleton for its size; delegatecalled, so `msg.sender` is
+    /// still the pool and the expectation's transient slots are the singleton's.
+    function payLiquidityCallback(VaultStore storage store, uint256 amount0, uint256 amount1) public {
+        (uint256 vaultId, uint256 maximum0, uint256 maximum1) = _takeCallback();
+        if (amount0 > maximum0) revert IMetricLendingVault.UnexpectedCallback();
+        if (amount1 > maximum1) revert IMetricLendingVault.UnexpectedCallback();
+        _payPool(store.vaults[vaultId], amount0, amount1);
+    }
+
+    /// @notice The singleton's `metricOmmSwapCallback`: pays the pool for a swap the vault expected, no more than it
+    /// expected, once at least the expected output has arrived.
+    function paySwapCallback(VaultStore storage store, int256 amount0Delta, int256 amount1Delta) public {
+        (uint256 minimumOut0, uint256 minimumOut1) = VaultCallback.minimumOutputs();
+        (uint256 vaultId, uint256 maximum0, uint256 maximum1) = _takeCallback();
+        uint256 owed0 = amount0Delta > 0 ? uint256(amount0Delta) : 0;
+        uint256 owed1 = amount1Delta > 0 ? uint256(amount1Delta) : 0;
+        uint256 output0 = amount0Delta < 0 ? uint256(-amount0Delta) : 0;
+        uint256 output1 = amount1Delta < 0 ? uint256(-amount1Delta) : 0;
+        if (owed0 > maximum0) revert IMetricLendingVault.UnexpectedCallback();
+        if (owed1 > maximum1) revert IMetricLendingVault.UnexpectedCallback();
+        // A partial fill reverts here, undoing the whole swap.
+        if (output0 < minimumOut0) revert IMetricLendingVault.SlippageExceeded();
+        if (output1 < minimumOut1) revert IMetricLendingVault.SlippageExceeded();
+        Vault storage vault = store.vaults[vaultId];
+        _requireArrived(vault, minimumOut0, minimumOut1);
+        _payPool(vault, owed0, owed1);
+    }
+
+    function _takeCallback() private returns (uint256 vaultId, uint256 maximum0, uint256 maximum1) {
+        bool ok;
+        (ok, vaultId, maximum0, maximum1) = VaultCallback.take(msg.sender);
+        if (!ok) revert IMetricLendingVault.UnexpectedCallback();
+    }
+
+    /// @dev The caller's library records the ledger debit once the pool call returns, from the amounts the pool
+    /// reports; this only moves the tokens.
+    function _payPool(Vault storage vault, uint256 amount0, uint256 amount1) private {
+        _payExactly(vault.parameters.token0, amount0);
+        _payExactly(vault.parameters.token1, amount1);
+    }
+
+    /// @dev Pays the calling pool and requires custody to fall by exactly `amount`: a token that took more from the
+    /// sender would leave the other vaults' tokens short (audit finding B2).
+    function _payExactly(address token, uint256 amount) private {
+        if (amount == 0) return;
+        uint256 balanceBefore = IERC20(token).balanceOf(address(this));
+        SafeERC20.safeTransfer(IERC20(token), msg.sender, amount);
+        // Checked after the transfer: the singleton's lock is held, so nothing else moved the balance.
+        if (balanceBefore - IERC20(token).balanceOf(address(this)) != amount) {
+            revert IMetricLendingVault.UnexpectedCallback();
+        }
+    }
+
+    /// @dev Requires a minimum output to have actually arrived, not merely to be reported, measured from the balances
+    /// saved before the swap: Metric pays the output before it calls back (audit finding B2).
+    function _requireArrived(Vault storage vault, uint256 minimumOut0, uint256 minimumOut1) private view {
+        (uint256 balance0Before, uint256 balance1Before) = VaultCallback.balancesBefore();
+        uint256 balance0 = IERC20(vault.parameters.token0).balanceOf(address(this));
+        uint256 balance1 = IERC20(vault.parameters.token1).balanceOf(address(this));
+        uint256 arrived0 = balance0 > balance0Before ? balance0 - balance0Before : 0;
+        uint256 arrived1 = balance1 > balance1Before ? balance1 - balance1Before : 0;
+        if (arrived0 < minimumOut0) revert IMetricLendingVault.SlippageExceeded();
+        if (arrived1 < minimumOut1) revert IMetricLendingVault.SlippageExceeded();
+    }
+
+    // ---------------------------------------------------------------- named venues
+
+    /// @notice A trader's swap for their own position: through the vault's pool when `trade.venue` is zero, otherwise
+    /// through the venue they named. Returns what was paid and received, and what the fill lost against the band,
+    /// which the caller counts as taken out of the position.
+    function swapForTrader(Vault storage vault, uint256 vaultId, VenueSwap.Trade memory trade, bytes memory route)
+        public
+        returns (uint256 paid, uint256 received, uint256 lost)
+    {
+        (paid, received) = trade.venue == address(0)
+            ? _traderThroughPool(vault, vaultId, trade)
+            : _traderThroughVenue(vault, trade, route);
+        lost = VenueSwap.shortfall(trade, paid, received);
+    }
+
+    /// @notice A keeper's swap of a position's reserves for exactly the `amountOut` its repayment lacks: through the
+    /// vault's pool when `venue` is zero, otherwise through the venue the keeper named, which is sent `maximumIn`, the
+    /// most the pool swap could spend, and must send back at least `amountOut`. Returns whether it filled; an unfilled
+    /// swap through a venue has moved tokens, so the caller must revert.
+    function swapForKeeper(
+        Vault storage vault,
+        uint256 vaultId,
+        bool zeroForOne,
+        uint256 amountOut,
+        uint256 maximumIn,
+        address venue,
+        bytes memory route
+    ) public returns (bool filled, uint256 paid, uint256 received) {
+        if (venue == address(0)) {
+            return trySwapExactOut(vault, vaultId, zeroForOne, amountOut, maximumIn);
+        }
+        (paid, received) = swapThroughVenue(vault, zeroForOne, maximumIn, venue, route);
+        filled = received >= amountOut;
+    }
+
+    /// @notice Swaps part of a payout leaving the vault, its owner's tokens, through the venue they name (the pool when
+    /// none): `swap.amountIn` of the token sold, at most what the payout holds of it, for at least `swap.minimumOut`.
+    /// Returns the payout as the swap left it.
+    function swapPayout(Vault storage vault, uint256 vaultId, ExitSwap memory swap, uint256 amount0, uint256 amount1)
+        public
+        returns (uint256, uint256)
+    {
+        if (swap.amountIn == 0) return (amount0, amount1);
+        uint256 held = swap.zeroForOne ? amount0 : amount1;
+        if (swap.amountIn > held) revert IMetricLendingVault.InvalidParameters();
+        VenueSwap.Trade memory trade;
+        trade.zeroForOne = swap.zeroForOne;
+        trade.amountIn = swap.amountIn;
+        trade.minimumOut = swap.minimumOut;
+        trade.venue = swap.venue;
+        (uint256 paid, uint256 received) = trade.venue == address(0)
+            ? _traderThroughPool(vault, vaultId, trade)
+            : _traderThroughVenue(vault, trade, swap.route);
+        if (swap.zeroForOne) return (amount0 - paid, amount1 + received);
+        return (amount0 + received, amount1 - paid);
+    }
+
+    /// @notice A close's exit swap on the closed part of the reserves, which holds `closedHeld` of the token sold. It is
+    /// measured at the close band, the band the profit share values leftovers at, and so needs it.
+    function exitSwap(Vault storage vault, uint256 vaultId, ExitSwap memory exit, uint256 closedHeld)
+        public
+        returns (uint256 paid, uint256 received, uint256 lost)
+    {
+        if (exit.amountIn > closedHeld) revert IMetricLendingVault.InvalidParameters();
+        (bool ok, uint160 sqrtBidX96, uint160 sqrtAskX96) = VaultPricing.tryCloseBand(vault);
+        if (!ok) revert IMetricLendingVault.InvalidBand();
+        VenueSwap.Trade memory trade = VenueSwap.Trade({
+            zeroForOne: exit.zeroForOne,
+            amountIn: exit.amountIn,
+            minimumOut: exit.minimumOut,
+            venue: exit.venue,
+            sqrtBidX96: sqrtBidX96,
+            sqrtAskX96: sqrtAskX96
+        });
+        return swapForTrader(vault, vaultId, trade, exit.route);
+    }
+
+    function _traderThroughPool(Vault storage vault, uint256 vaultId, VenueSwap.Trade memory trade)
+        private
+        returns (uint256, uint256)
+    {
+        if (vault.parameters.pool == address(0)) revert IMetricLendingVault.InvalidParameters();
+        return swapExactIn(vault, vaultId, trade.zeroForOne, trade.amountIn, trade.minimumOut);
+    }
+
+    function _traderThroughVenue(Vault storage vault, VenueSwap.Trade memory trade, bytes memory route)
+        private
+        returns (uint256 paid, uint256 received)
+    {
+        (paid, received) = swapThroughVenue(vault, trade.zeroForOne, trade.amountIn, trade.venue, route);
+        if (received < trade.minimumOut) revert IMetricLendingVault.SlippageExceeded();
+    }
+
+    /// @notice Sells up to `amountIn` of one token for the other through a venue someone names (`ISwapVenue`): an
+    /// aggregator's adapter, a router, anything. Sends it the input, lets it trade, and measures what came back: the
+    /// output, and whatever input it did not spend. The singleton's lock is held, so the venue cannot re-enter it, and
+    /// the vault grants no allowance, so its balances move only by what the venue sends back. Callers judge the fill.
+    function swapThroughVenue(Vault storage vault, bool zeroForOne, uint256 amountIn, address venue, bytes memory route)
+        public
+        returns (uint256 paid, uint256 received)
+    {
+        _requireOutsider(vault, venue);
+        uint256 indexIn = zeroForOne ? 0 : 1;
+        uint256 indexOut = 1 - indexIn;
+        IERC20 tokenIn = IERC20(VaultLedger.tokenOf(vault, indexIn));
+        IERC20 tokenOut = IERC20(VaultLedger.tokenOf(vault, indexOut));
+        uint256 inBefore = tokenIn.balanceOf(address(this));
+        uint256 outBefore = tokenOut.balanceOf(address(this));
+        // No Metric callback may be pending while foreign code runs, or a venue trading through the pool could collect it.
+        VaultCallback.clear();
+        VaultLedger.push(vault, indexIn, venue, amountIn);
+        ISwapVenue(venue).swapForVault(address(tokenIn), address(tokenOut), amountIn, route);
+        uint256 unspent = tokenIn.balanceOf(address(this)) + amountIn - inBefore;
+        // Underflows, and so reverts, if the venue sent back more input than it was given.
+        paid = amountIn - unspent;
+        received = tokenOut.balanceOf(address(this)) - outBefore;
+        VaultLedger.credit(vault, indexIn, unspent);
+        VaultLedger.credit(vault, indexOut, received);
+    }
+
+    /// @dev The vault calls the venue on someone's word, so it may not be one of the vault's tokens, its pool or the
+    /// vault itself. The venue's selector matches none of their functions; this keeps it so should one ever gain it.
+    function _requireOutsider(Vault storage vault, address venue) private view {
+        if (venue == vault.parameters.token0) revert IMetricLendingVault.InvalidParameters();
+        if (venue == vault.parameters.token1) revert IMetricLendingVault.InvalidParameters();
+        if (venue == vault.parameters.pool) revert IMetricLendingVault.InvalidParameters();
+        if (venue == address(this)) revert IMetricLendingVault.InvalidParameters();
     }
 
     /// @dev Records a swap's token movements as the singleton's balances moved, not as the pool reports them, so the
