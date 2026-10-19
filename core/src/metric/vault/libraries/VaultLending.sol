@@ -40,11 +40,11 @@ library VaultLending {
         VaultAccrual.checkpoint(vault, vaultId);
         (uint160 sqrtBidX96, uint160 sqrtAskX96) = VaultPricing.band(vault);
         uint256 valueIn = VaultMath.valueInToken1(amount0, amount1, sqrtBidX96, false);
-        // Income still vesting was earned before this deposit, so the new shares pay for it (audit finding A3). Premium
-        // not yet collected is not counted (owner's decision on X-2): shares are priced on what is in the vault.
-        uint256 vesting = VaultMath.valueInToken1(vault.stream.remaining0, vault.stream.remaining1, sqrtAskX96, true);
-        uint256 vaultValue = valueHigh(vault, sqrtAskX96) + vesting;
-        shares = FullMath.mulDiv(valueIn, vault.totalShares + VIRTUAL_SHARES, vaultValue + VIRTUAL_VALUE);
+        // Shares are priced on what has vested into the vault, as withdrawals are, so a deposit withdrawn in the same
+        // block returns what was put in, less the band's spread (owner's decision, 2026-10-19, replacing audit finding
+        // A3). Neither income still vesting nor premium not yet collected (owner's decision on X-2) is counted.
+        shares =
+            FullMath.mulDiv(valueIn, vault.totalShares + VIRTUAL_SHARES, valueHigh(vault, sqrtAskX96) + VIRTUAL_VALUE);
         if (shares == 0) revert IMetricLendingVault.ZeroAmount();
         if (shares < minimumShares) revert IMetricLendingVault.SlippageExceeded();
         VaultLedger.pull(vault, 0, msg.sender, amount0);

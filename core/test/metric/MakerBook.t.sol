@@ -535,9 +535,10 @@ contract MakerBookTest is MakerFixture {
         vault.appendBookCurve(vaultId, Curve({kinkWad: 0.8e18, baseRateWad: 0, slope1Wad: 0, slope2Wad: 2e18}));
     }
 
-    /// @dev Audit finding A3, in the maker book: a maker depositing just after premium was paid to a bucket, who
-    /// leaves once it has vested, ends with no more than they put in, at a fixed price.
-    function test_deposit_cannotTakeMakerIncomeEarnedBeforeIt() public {
+    /// @dev Owner's decision, 2026-10-19 (replacing audit finding A3), in the maker book: a maker who deposits while
+    /// income is still vesting in the bucket and withdraws in the same block gets back what they put in, less
+    /// rounding, and claims no income.
+    function test_deposit_sameBlockRoundTripReturnsTheDeposit() public {
         setPrice(PRICE_TICK, 0);
         (uint256 bucketId,) = depositBuy(makerA, LEVEL_10X, 50_000e6);
         uint256 positionId =
@@ -547,16 +548,38 @@ contract MakerBookTest is MakerFixture {
         closeMakerFull(positionId, repay0, repay1);
         assertGt(vault.bucketOf(vaultId, bucketId).stream1Remaining, 0, "income still vesting");
         (, uint256 shares) = depositBuy(makerB, LEVEL_10X, 50_000e6);
-        vm.warp(block.timestamp + 2 days);
         vm.startPrank(makerB);
         (uint256 amount0, uint256 amount1,) = vault.withdrawOrder(vaultId, bucketId, shares, 0, 0, makerB);
-        (uint256 income0, uint256 income1) = vault.claimOrderIncome(vaultId, bucketId, makerB);
+        // No income vested in the same block, so there is nothing to claim.
+        vm.expectRevert(IMetricLendingVault.ZeroAmount.selector);
+        vault.claimOrderIncome(vaultId, bucketId, makerB);
         vm.stopPrank();
-        uint256 value = VaultMath.valueInToken1(amount0 + income0, amount1 + income1, source.sqrtAskX96(), true);
-        assertLe(value, 50_000e6, "no share of income earned before the deposit");
-        // Nor charged for more than it takes: it pays for the income through fewer shares, and recovers its part of that
-        // payment through the balances, so it ends at its deposit.
-        assertGe(value + 10, 50_000e6, "not overcharged");
+        uint256 value = VaultMath.valueInToken1(amount0, amount1, source.sqrtAskX96(), false);
+        assertLe(value, 50_000e6, "no more than the deposit");
+        assertApproxEqAbs(value, 50_000e6, 3, "the deposit back, less rounding");
+        assertLedger();
+    }
+
+    /// @dev Audit finding A-2: a maker leaving one share in an unlent bucket while income vests must not dilute the
+    /// next depositor. With the vesting no longer grossed up by `(S + virtual) / S`, the next maker's deposit buys
+    /// shares at the bucket's value, so it gets its deposit back whether it leaves first or last.
+    function test_deposit_afterOneShareIsLeft_isNotDiluted() public {
+        (uint256 bucketId, uint256 attackerShares) = depositBuy(makerA, LEVEL_2X, 1_000e6);
+        uint256 positionId =
+            openMaker(makerRequest(true, single(bucketId), single128(liquidityOn(LEVEL_2X, 500e6)), 10e6));
+        (uint256[] memory repay0, uint256[] memory repay1) = repaymentsAtBid(positionId, WAD);
+        closeMakerFull(positionId, repay0, repay1);
+        assertGt(vault.bucketOf(vaultId, bucketId).stream1Remaining, 0, "income still vesting");
+        vm.prank(makerA);
+        vault.withdrawOrder(vaultId, bucketId, attackerShares - 1, 0, 0, makerA);
+        assertEq(vault.bucketOf(vaultId, bucketId).totalShares, 1, "one share left");
+        (uint256 sameBucket, uint256 victimShares) = depositBuy(makerB, LEVEL_2X, 10_000e6);
+        assertEq(sameBucket, bucketId, "the same bucket");
+        vm.warp(block.timestamp + 1 hours);
+        uint256 before = quote.balanceOf(makerB);
+        vm.prank(makerB);
+        vault.withdrawOrder(vaultId, bucketId, victimShares, 0, 0, makerB);
+        assertGe(quote.balanceOf(makerB) - before + 3, 10_000e6, "the deposit back, less rounding");
         assertLedger();
     }
 

@@ -123,38 +123,39 @@ contract GapLendersTest is VaultFixture {
 
     // ---------------------------------------------------------------- G12: entrants around vesting
 
-    /// @dev G12: a deposit values income still vesting at the ask, so an entrant pays for income earned before it. A
-    /// second before the vesting end a second's income still vests; at and after the end all of it has, into idle
-    /// capital. In each case an entrant who stays until everything vests leaves with no more than it put in, and the
-    /// lender who earned the income keeps all of it.
-    function test_entrantAroundTheVestingEnd_capturesNoEarlierIncome() public {
+    /// @dev G12: a deposit is priced on vested value only, as a withdrawal is, so an entrant who leaves in the same
+    /// block gets its deposit back, while one who stays shares in the income still vesting at entry (the owner's
+    /// decision, 2026-10-19, replacing audit finding A3). A second before the vesting end a second's income still
+    /// vests; at and after the end all of it has, into idle capital, so the entrant pays for it and takes none of it.
+    function test_entrantAroundTheVestingEnd_roundTripsWhole() public {
         deposit(lender, 0, CAPITAL);
         uint256 vestingEnd = _payIncome();
         // offsetSeconds in [-1, 1]: three entry times, a second before the vesting end, at it, a second after
         for (int256 offsetSeconds = -1; offsetSeconds <= 1; ++offsetSeconds) {
             uint256 snapshot = vm.snapshotState();
-            uint256 unvested = _assertEntrantTakesNoIncome(uint256(int256(vestingEnd) + offsetSeconds));
+            uint256 unvested = _assertEntrant(uint256(int256(vestingEnd) + offsetSeconds));
             if (offsetSeconds < 0) assertGt(unvested, 0, "income still vesting at entry");
             else assertEq(unvested, 0, "all of it vested at the end");
             vm.revertToState(snapshot);
         }
     }
 
-    /// @dev G12, at any entry time from the payment to a day past the vesting end: the entrant takes no earlier income.
-    /// The fixed cases pin the edges; this rules out a window between them where entering would buy income cheaply.
-    function testFuzz_entrantAnyTime_capturesNoEarlierIncome(uint256 delaySeconds) public {
+    /// @dev G12, at any entry time from the payment to a day past the vesting end: a same-block exit is whole, and a
+    /// stay takes no more than the entrant's share of what vests after it entered. The fixed cases pin the edges;
+    /// this rules out a window between them where entering would buy income cheaply.
+    function testFuzz_entrantAnyTime_roundTripsWhole(uint256 delaySeconds) public {
         deposit(lender, 0, CAPITAL);
         uint256 openedAt = block.timestamp;
         _payIncome();
-        _assertEntrantTakesNoIncome(openedAt + 30 days + bound(delaySeconds, 0, 2 days));
+        _assertEntrant(openedAt + 30 days + bound(delaySeconds, 0, 2 days));
     }
 
-    /// @dev G12: a new payment restarts the vesting of everything still unvested. An entrant in the same block pays for
-    /// the old remainder and the new payment alike, so it takes neither.
-    function test_entrantRightAfterANewPayment_capturesNoEarlierIncome() public {
+    /// @dev G12: a new payment restarts the vesting of everything still unvested. An entrant in the same block still
+    /// gets its deposit back, and if it stays, shares in the old remainder and the new payment alike.
+    function test_entrantRightAfterANewPayment_roundTripsWhole() public {
         deposit(lender, 0, CAPITAL);
         uint256 unvestedBefore = _payTwice();
-        uint256 unvested = _assertEntrantTakesNoIncome(block.timestamp);
+        uint256 unvested = _assertEntrant(block.timestamp);
         assertGt(unvested, unvestedBefore, "the new payment joined the stream");
     }
 
@@ -263,22 +264,49 @@ contract GapLendersTest is VaultFixture {
         }
     }
 
-    /// @dev Enters with `CAPITAL` at `enterAt`, stays until everything has vested, and leaves; then the incumbent
-    /// leaves. Returns the income still vesting at entry.
-    function _assertEntrantTakesNoIncome(uint256 enterAt) internal returns (uint256 unvestedAtEntry) {
+    /// @dev Enters with `CAPITAL` at `enterAt` and, from the same state, leaves in that block or stays until
+    /// everything has vested. Returns the income still vesting at entry.
+    function _assertEntrant(uint256 enterAt) internal returns (uint256 unvestedAtEntry) {
         vm.warp(enterAt);
+        uint256 snapshot = vm.snapshotState();
+        unvestedAtEntry = _assertSameBlockRoundTrip();
+        vm.revertToState(snapshot);
+        _assertStaySharesWhatVestsAfter();
+    }
+
+    /// @dev Deposits and withdraws in one block: the entrant gets its deposit back, less rounding, and the incumbent
+    /// keeps everything it earned, the income still vesting included.
+    function _assertSameBlockRoundTrip() internal returns (uint256 unvestedAtEntry) {
         // Release moves income from the stream to the buffer, so this sum is the incumbent's, released or not.
         uint256 earned = uint256(vault.ledgerOf(vaultId).buffer1) + vault.streamOf(vaultId).remaining1;
         uint256 shares = deposit(entrant, 0, CAPITAL);
         unvestedAtEntry = vault.streamOf(vaultId).remaining1;
-        vm.warp(enterAt + 2 days);
         vm.prank(entrant);
         (uint256 entrant0, uint256 entrant1,) = vault.withdraw(vaultId, shares, 0, 0, entrant);
         assertEq(entrant0, 0, "a quote-only vault");
-        assertLe(entrant1, CAPITAL, "the entrant takes no earlier income");
-        assertGe(entrant1 + ROUND_TRIP_UNITS, CAPITAL, "and loses only rounding");
+        assertLe(entrant1, CAPITAL, "no more than the deposit");
+        assertGe(entrant1 + ROUND_TRIP_UNITS, CAPITAL, "the deposit back, less rounding");
+        vm.warp(block.timestamp + 2 days);
         (, uint256 incumbent1) = _redeemAll(lender);
         assertGe(incumbent1 + ROUND_TRIP_UNITS, earned, "the incumbent keeps all it earned");
+        assertLedger();
+    }
+
+    /// @dev Deposits and stays until everything has vested: the entrant receives its deposit and its share of the
+    /// income still vesting at entry, which vested while it held shares, and the incumbent the rest.
+    function _assertStaySharesWhatVestsAfter() internal {
+        uint256 earned = uint256(vault.ledgerOf(vaultId).buffer1) + vault.streamOf(vaultId).remaining1;
+        uint256 shares = deposit(entrant, 0, CAPITAL);
+        uint256 ownershipWad = FullMath.mulDiv(shares, WAD, vault.totalSharesOf(vaultId) + VIRTUAL_SHARES);
+        uint256 entrantShare = FullMath.mulDiv(vault.streamOf(vaultId).remaining1, ownershipWad, WAD);
+        vm.warp(block.timestamp + 2 days);
+        vm.prank(entrant);
+        (, uint256 entrant1,) = vault.withdraw(vaultId, shares, 0, 0, entrant);
+        assertApproxEqAbs(
+            entrant1, CAPITAL + entrantShare, ROUND_TRIP_UNITS, "the deposit and its share of the vesting"
+        );
+        (, uint256 incumbent1) = _redeemAll(lender);
+        assertApproxEqAbs(incumbent1 + entrantShare, earned, ROUND_TRIP_UNITS, "the incumbent keeps the rest");
         assertLedger();
     }
 

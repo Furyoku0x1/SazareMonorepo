@@ -229,8 +229,10 @@ library MakerBook {
     // ---------------------------------------------------------------- deposits
 
     /// @dev The shares a deposit buys: its value at the bid (token0 for a sell level) against the bucket's value at the
-    /// ask, with the virtual offset. The level must lie wholly on the waiting side of the band. The bucket's value
-    /// counts its income still vesting, so the new shares pay for income earned before them (audit finding A3).
+    /// ask, with the virtual offset. The level must lie wholly on the waiting side of the band. Income still vesting
+    /// and premium the legs have not settled (owner's decision on X-2) are not counted, as withdrawals do not count
+    /// them, so a deposit withdrawn in the same block returns what was put in (owner's decision, 2026-10-19, replacing
+    /// audit finding A3; without the gross-up of the vesting by `(S + virtual) / S`, audit finding A-2 cannot arise).
     function _depositShares(Vault storage vault, Bucket storage bucket, int24 level, bool isBuy, uint256 amount)
         private
         returns (uint256)
@@ -241,19 +243,8 @@ library MakerBook {
         MakerMath.requireWaitingSide(isBuy, sqrtBidX96, sqrtAskX96, sqrtLowerX96, sqrtUpperX96);
         uint256 valueIn = isBuy ? amount : VaultMath.priceTimes(amount, sqrtBidX96, false);
         if (valueIn < book.settings.minimumNotional) revert IMakerBook.BelowMinimumNotional();
-        uint256 valueHigh = MakerMath.bucketValue(bucket, sqrtLowerX96, sqrtUpperX96, sqrtAskX96, true)
-            + _vestingValue(bucket, sqrtAskX96);
+        uint256 valueHigh = MakerMath.bucketValue(bucket, sqrtLowerX96, sqrtUpperX96, sqrtAskX96, true);
         return FullMath.mulDiv(valueIn, bucket.totalShares + VIRTUAL_SHARES, valueHigh + VIRTUAL_VALUE);
-    }
-
-    /// @dev The income still vesting, at the ask and rounded up. It vests to real shares only, while the deposit is
-    /// priced against real and virtual ones, so it is grossed up by `(S + virtual) / S` (Sol). A bucket with no shares
-    /// has nothing vesting (D22). Premium the legs owe and have not settled is not counted (owner's decision on X-2).
-    function _vestingValue(Bucket storage bucket, uint160 sqrtAskX96) private view returns (uint256) {
-        uint256 totalShares = bucket.totalShares;
-        if (totalShares == 0) return 0;
-        uint256 vesting = VaultMath.valueInToken1(bucket.stream0Remaining, bucket.stream1Remaining, sqrtAskX96, true);
-        return FullMath.mulDivRoundingUp(vesting, totalShares + VIRTUAL_SHARES, totalShares);
     }
 
     // ---------------------------------------------------------------- withdrawals

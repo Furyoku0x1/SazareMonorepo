@@ -316,10 +316,10 @@ contract MetricLendingVaultTest is VaultFixture {
         vault.close(CloseRequest({positionId: positionId, fractionWad: WAD, repay0: repay0, repay1: repay1}));
     }
 
-    /// @dev Audit finding A3: deposit value left out income still vesting, so a deposit made just after income was
-    /// paid took a share of it. At a fixed price with no spread, a lender who deposits after every position closed and
-    /// leaves once the income has vested ends with no more than they put in.
-    function test_deposit_cannotTakeIncomeEarnedBeforeIt() public {
+    /// @dev Owner's decision, 2026-10-19 (replacing audit finding A3): deposits and withdrawals both price on vested
+    /// value, so a lender who deposits while income is still vesting and withdraws in the same block gets back what
+    /// they put in, at a fixed price with no spread, less rounding.
+    function test_deposit_sameBlockRoundTripReturnsTheDeposit() public {
         setPrice(PRICE_TICK, 0);
         deposit(lender, 100e18, 100_000e6);
         uint256 longId = openLong(15_000e6, 300e6);
@@ -336,11 +336,11 @@ contract MetricLendingVaultTest is VaultFixture {
         fundWith(late, base);
         fundWith(late, quote);
         uint256 shares = deposit(late, 0, 100_000e6);
-        vm.warp(block.timestamp + 1 days + 1);
         vm.prank(late);
         (uint256 amount0, uint256 amount1,) = vault.withdraw(vaultId, shares, 0, 0, late);
-        uint256 value = VaultMath.priceTimes(amount0, source.sqrtAskX96(), true) + amount1;
-        assertLe(value, 100_000e6, "no share of income earned before the deposit");
+        uint256 value = VaultMath.priceTimes(amount0, source.sqrtAskX96(), false) + amount1;
+        assertLe(value, 100_000e6, "no more than the deposit");
+        assertApproxEqAbs(value, 100_000e6, 3, "the deposit back, less rounding");
         assertLedger();
     }
 
