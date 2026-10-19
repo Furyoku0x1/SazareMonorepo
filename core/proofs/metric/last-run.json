@@ -1,0 +1,34 @@
+{
+  "lean": "Lean (version 4.35.0, arm64-apple-darwin24.6.0, commit eb6cafb7290e8bd5f2937522d8d804f58f02bafc, Release)",
+  "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+  "checked_at_utc": "2026-10-19T22:55:05Z",
+  "dependency_cache_present": true,
+  "rebuilt_project": false,
+  "build_seconds": 3.152,
+  "axiom_audit_seconds": 6.109,
+  "build_and_audit_seconds": 9.274,
+  "theorems": 87,
+  "source_excerpts": 16,
+  "approved_axioms": [
+    "propext",
+    "Classical.choice",
+    "Quot.sound"
+  ],
+  "proof_input_sha256": {
+    "Audit.lean": "b3248e43a5251c56def12da73438229c22c15f0e67098b92f19a6c9331e5331b",
+    "MetricProofs/Allocation.lean": "e2f635071879bb45e5cce0f6bc31a1cc1e9d0d46c621dc4229fb0dc905e3fc65",
+    "MetricProofs/ForceClose.lean": "5cf80ecaf6127b0b9c9f5d80f2e26f9174e23e9c24b2fb5e51f3e18de99ec041",
+    "MetricProofs/ForceCloseIntegration.lean": "bd866e181d76c7a64d4c932a28235b3f997034b40382f50c96ae4f2d42239ab0",
+    "MetricProofs/FullMathSteps.lean": "87ce63a367bf646729cd139d52987f3c2b0a5b68896d9e54fb635a087f5c712e",
+    "MetricProofs/Repayment.lean": "d2fdfa436b3fa1b1d6d3239c045b9637e8f2359a18811efc70f881900ff26a08",
+    "MetricProofs/Rounding.lean": "36d17a6589ee1399823856f373cbeba7f04bbbc490a5069e4aa32e2128fa21fe",
+    "MetricProofs/Settlement.lean": "d34a4adc04d64011fbb20267f2dd95d277c16d398fb0fa5845a930b5fe57cff8",
+    "MetricProofs.lean": "56da0b597461078287c9360cf59c1b3ffe852bb1b21461e0fd9cf5b9175fe165",
+    "check.py": "f0a658c660862015ad6e2e415642a7b3225343c513a7144e58829015d56efb51",
+    "lake-manifest.json": "73be48edb9165f9f018d390ea7876b18d60e0d96e0802aa49861576558454049",
+    "lakefile.toml": "906bbb702450d93b1b87797225ff0e64af714d07581e8ddad0e66d536af3c60f",
+    "lean-toolchain": "ca5f1f601d34c49079e38d7e7041eb0f2a9c227fbc1df0f404820069a052330c",
+    "source-manifest.json": "3498fc0e4fd5a7b652dcf17044c6d2cad6e5de68d632f6ca45793b3d5fa213e1"
+  },
+  "scope": "Checked Lean models, source-excerpt freshness, and axiom dependencies. Not Solidity/EVM equivalence or a FullMath assembly proof."
+}

@@ -1,0 +1,989 @@
+{
+  "format": 1,
+  "captured_on": "2026-10-19",
+  "scope": "Manual mathematical models, not a verified Solidity translator or bytecode equivalence proof. Fingerprints detect drift; they do not prove model equivalence. Do not refresh fingerprints without reviewing the models and proof statements.",
+  "bindings": [
+    {
+      "path": "core/src/metric/vault/libraries/VaultMath.sol",
+      "kind": "function",
+      "name": "chordHolds",
+      "sha256": "c2bb50b37777a0282dacfcbf3298581c2c8296f9ce4eb39af8c92bac8c9624a1",
+      "reviewed_code": "function chordHolds(uint256 reserve0, uint256 reserve1, uint256 maximum0, uint256 maximum1) internal pure returns (bool) { uint256 leftA = reserve1 * maximum0; uint256 leftB = maximum1 * reserve0; uint256 right = maximum1 * maximum0; unchecked { uint256 left = leftA + leftB; if (left < leftA) return true; return left >= right; } }"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultMath.sol",
+      "kind": "function",
+      "name": "repays",
+      "sha256": "78ad2f991b898f824de2a2b72c40e7085dfc35c1144956919f7d3cbb5c4c610b",
+      "reviewed_code": "function repays(uint256 amount0, uint256 amount1, uint128 liquidity, uint160 sqrtLowerX96, uint160 sqrtUpperX96) internal pure returns (bool) { if (liquidity == 0) return true; uint256 virtual0X64 = amount0 * Q64 + FullMath.mulDiv(liquidity, Q160, sqrtUpperX96); uint256 virtual1X64 = amount1 * Q64 + FullMath.mulDiv(liquidity, sqrtLowerX96, 1 << 32); uint256 thresholdX64 = uint256(liquidity) * Q64; if (virtual0X64 >= thresholdX64) { if (virtual1X64 >= thresholdX64) return true; } return FullMath.mulDiv(virtual0X64, virtual1X64, thresholdX64) >= thresholdX64; }"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultMath.sol",
+      "kind": "function",
+      "name": "scaleToRepay",
+      "sha256": "149c86cf7abcab6ed3fb385401f508218d293ac3d5a96b6d97d5dfd7dc76c6a2",
+      "reviewed_code": "function scaleToRepay( uint256 reserve0, uint256 reserve1, uint128 liquidity, uint160 sqrtLowerX96, uint160 sqrtUpperX96 ) internal pure returns (uint256 fractionWad) { if (!repays(reserve0, reserve1, liquidity, sqrtLowerX96, sqrtUpperX96)) { revert ReservesShort(); } uint256 low = 0; uint256 high = WAD; for (uint256 step = 0; step < SCALE_STEPS; ++step) { if (high - low <= 1) break; uint256 middle = (low + high) / 2; uint256 part0 = portionUp(reserve0, middle); uint256 part1 = portionUp(reserve1, middle); if (repays(part0, part1, liquidity, sqrtLowerX96, sqrtUpperX96)) high = middle; else low = middle; } return high; }"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultMath.sol",
+      "kind": "function",
+      "name": "portionDown",
+      "sha256": "95cbe88ec27ba7c33788829efc496ae66b9cfa89949ca4bf35c3c158cdbbe155",
+      "reviewed_code": "function portionDown(uint256 amount, uint256 fractionWad) internal pure returns (uint256) { if (fractionWad == WAD) return amount; return FullMath.mulDiv(amount, fractionWad, WAD); }"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultMath.sol",
+      "kind": "function",
+      "name": "portionUp",
+      "sha256": "69d32a50575411b6684c17c40ca203189efadec810050d2442993e68231251b1",
+      "reviewed_code": "function portionUp(uint256 amount, uint256 fractionWad) internal pure returns (uint256) { if (fractionWad == WAD) return amount; return FullMath.mulDivRoundingUp(amount, fractionWad, WAD); }"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultMath.sol",
+      "kind": "function",
+      "name": "sharesPaidFor",
+      "sha256": "cffa1f3fb4a57706a04a8c60ff3927c56b8604fb73aeab977ecebd542ac30ac8",
+      "reviewed_code": "function sharesPaidFor(uint256 shares, uint256 entitlementWad, uint256 askedWad, uint256 filledWad) internal pure returns (uint256) { uint256 paidWad = portionUp(askedWad, filledWad); if (paidWad >= entitlementWad) return shares; return FullMath.mulDivRoundingUp(shares, paidWad, entitlementWad); }"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultMath.sol",
+      "kind": "function",
+      "name": "splitShare",
+      "sha256": "ad3d92f6c325c99038d5d6b298470c139759c323a5437ac520b23fa727bfc233",
+      "reviewed_code": "function splitShare(uint256 share, uint256 treasuryShareBps, uint256 feeVaultShareBps) internal pure returns (uint256 lenderPart, uint256 treasuryPart, uint256 feeVaultPart) { treasuryPart = share * treasuryShareBps / BPS; feeVaultPart = share * feeVaultShareBps / BPS; lenderPart = share - treasuryPart - feeVaultPart; }"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultMath.sol",
+      "kind": "constant",
+      "name": "WAD",
+      "sha256": "c91b1489a11010bb32172c5e82e459c6701fda33659dafae1f7485090ba808eb",
+      "reviewed_code": "uint256 internal constant WAD = 1e18;"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultMath.sol",
+      "kind": "constant",
+      "name": "BPS",
+      "sha256": "93d6ccb90be7ed6188fd9f8106380c825d82819f2d17d5a40ce55fa708506452",
+      "reviewed_code": "uint256 internal constant BPS = 10_000;"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultMath.sol",
+      "kind": "constant",
+      "name": "Q64",
+      "sha256": "b87b956c33c6e0bf1e93b16d6ed44bea6bc00c30086a024365bafa2dbf2eb044",
+      "reviewed_code": "uint256 internal constant Q64 = 1 << 64;"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultMath.sol",
+      "kind": "constant",
+      "name": "Q160",
+      "sha256": "7213826a009abcb57e2cab874386b4678a087dfc48f32a9eb6187126b93102ba",
+      "reviewed_code": "uint256 internal constant Q160 = 1 << 160;"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultMath.sol",
+      "kind": "constant",
+      "name": "SCALE_STEPS",
+      "sha256": "996ae9fffe7f5256222bf1daff837f09b5d231e70f0086a4d5f3c6d231117fe0",
+      "reviewed_code": "uint256 internal constant SCALE_STEPS = 64;"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerMath.sol",
+      "kind": "function",
+      "name": "cumulativePart",
+      "sha256": "65b1af55308a80034dc32e65bbc63951dfd2d6f013472e72604c5998ef9ac16f",
+      "reviewed_code": "function cumulativePart(uint256 amount, uint256 weightBefore, uint256 weight, uint256 total) internal pure returns (uint256) { uint256 through = FullMath.mulDiv(amount, weightBefore + weight, total); return through - FullMath.mulDiv(amount, weightBefore, total); }"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerMath.sol",
+      "kind": "function",
+      "name": "settleLeg",
+      "sha256": "fe13cc6d15217f056875076e5d9a0b6a096858f6ec81243af148c817cfa98328",
+      "reviewed_code": "function settleLeg(Leg storage leg, uint256 rateIndexRay, uint256 nowSeconds, bool roundUp) internal returns (uint256 owedNow) { uint256 owedWad = legOwedWad(leg, rateIndexRay, nowSeconds); leg.rateIndexRay = rateIndexRay.toUint128(); if (leg.settledAt < nowSeconds) leg.settledAt = nowSeconds.toUint40(); if (roundUp) { leg.owedFractionWad = 0; return FullMath.mulDivRoundingUp(owedWad, 1, WAD); } leg.owedFractionWad = uint64(owedWad % WAD); return owedWad / WAD; }"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerMath.sol",
+      "kind": "constant",
+      "name": "WAD",
+      "sha256": "c91b1489a11010bb32172c5e82e459c6701fda33659dafae1f7485090ba808eb",
+      "reviewed_code": "uint256 internal constant WAD = 1e18;"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerMath.sol",
+      "kind": "constant",
+      "name": "BPS",
+      "sha256": "93d6ccb90be7ed6188fd9f8106380c825d82819f2d17d5a40ce55fa708506452",
+      "reviewed_code": "uint256 internal constant BPS = 10_000;"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultMath.sol",
+      "kind": "function",
+      "name": "debtExtremes",
+      "sha256": "ff0dfae45bda0977498f09a58bd906db033493334fef3d2ca53248de26fe9b99",
+      "reviewed_code": "function debtExtremes(uint128 liquidity, uint160 sqrtLowerX96, uint160 sqrtUpperX96) internal pure returns (uint256 maximum0, uint256 maximum1) { maximum0 = SqrtPriceMath.getAmount0Delta(sqrtLowerX96, sqrtUpperX96, liquidity, true) + 1; maximum1 = SqrtPriceMath.getAmount1Delta(sqrtLowerX96, sqrtUpperX96, liquidity, true) + 1; }",
+      "model": "Solvency, DebtValuation, Accrual",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultMath.sol",
+      "kind": "function",
+      "name": "valueInToken1",
+      "sha256": "bc0c710a8f441b7ed4c9a6b0480525f2ce623bc846ff3805574f7ac144f8bb94",
+      "reviewed_code": "function valueInToken1(uint256 amount0, uint256 amount1, uint160 sqrtPriceX96, bool roundUp) internal pure returns (uint256) { return amount1 + priceTimes(amount0, sqrtPriceX96, roundUp); }",
+      "model": "Solvency, DebtValuation, Accrual",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultMath.sol",
+      "kind": "function",
+      "name": "priceTimes",
+      "sha256": "f1f81bb757d20e809e9e754e37baba7cf3fa1f21051fd05b5ef8538f73ed046a",
+      "reviewed_code": "function priceTimes(uint256 amount0, uint160 sqrtPriceX96, bool roundUp) internal pure returns (uint256) { if (roundUp) { uint256 halfUp = FullMath.mulDivRoundingUp(amount0, sqrtPriceX96, FixedPoint96.Q96); return FullMath.mulDivRoundingUp(halfUp, sqrtPriceX96, FixedPoint96.Q96); } uint256 halfDown = FullMath.mulDiv(amount0, sqrtPriceX96, FixedPoint96.Q96); return FullMath.mulDiv(halfDown, sqrtPriceX96, FixedPoint96.Q96); }",
+      "model": "Solvency, DebtValuation, Accrual",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultMath.sol",
+      "kind": "function",
+      "name": "rateWad",
+      "sha256": "efa538587033b20784af07e84813b2330076f27e716517972506a51b141ecc38",
+      "reviewed_code": "function rateWad(Curve memory curve, uint256 borrowed, uint256 supplied) internal pure returns (uint256) { if (borrowed == 0) return curve.baseRateWad; uint256 utilizationWad = FullMath.mulDiv(borrowed, WAD, supplied); if (utilizationWad <= curve.kinkWad) { return curve.baseRateWad + FullMath.mulDiv(curve.slope1Wad, utilizationWad, curve.kinkWad); } uint256 steepRate = FullMath.mulDiv(curve.slope2Wad, utilizationWad - curve.kinkWad, WAD - curve.kinkWad); return curve.baseRateWad + curve.slope1Wad + steepRate; }",
+      "model": "Solvency, DebtValuation, Accrual",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultMath.sol",
+      "kind": "function",
+      "name": "growthAtRateRay",
+      "sha256": "ae87a76e94299df445180165e13e47913f3a6ffaa9ba603d3fcdbae45adce60c",
+      "reviewed_code": "function growthAtRateRay(uint256 yearlyRateWad, uint256 elapsedSeconds) internal pure returns (uint256) { return FullMath.mulDiv(yearlyRateWad * WAD_TO_RAY, elapsedSeconds, YEAR_SECONDS); }",
+      "model": "Solvency, DebtValuation, Accrual",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultMath.sol",
+      "kind": "function",
+      "name": "indexGrowthRay",
+      "sha256": "cf1f6268bbd435f1d62e9f48fcee7cc77e5e740b1685c6ed2f46b99d61fe9fd7",
+      "reviewed_code": "function indexGrowthRay(Curve memory curve, uint256 borrowed, uint256 supplied, uint256 elapsedSeconds) internal pure returns (uint256) { return growthAtRateRay(rateWad(curve, borrowed, supplied), elapsedSeconds); }",
+      "model": "Solvency, DebtValuation, Accrual",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/DebtValuation.sol",
+      "kind": "function",
+      "name": "add",
+      "sha256": "c331b6e11702d6e2af80889f8b39369b9f5846145b487196b028e9e493e0b613",
+      "reviewed_code": "function add(DebtTree storage tree, uint128 liquidity, int24 tickLower, int24 tickUpper) internal { tree.count += 1; _update(tree, liquidity, tickLower, tickUpper, 1); }",
+      "model": "DebtValuation",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/DebtValuation.sol",
+      "kind": "function",
+      "name": "remove",
+      "sha256": "b94e7344d53cc1a6118522196010465967161638cdb390516db7f507eff3f42c",
+      "reviewed_code": "function remove(DebtTree storage tree, uint128 liquidity, int24 tickLower, int24 tickUpper) internal { tree.count -= 1; _update(tree, liquidity, tickLower, tickUpper, -1); }",
+      "model": "DebtValuation",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/DebtValuation.sol",
+      "kind": "function",
+      "name": "holdingsX64",
+      "sha256": "155f59293465df78090982a3ded14f2002ddf10d2a49f3cd39b792b9707f50fa",
+      "reviewed_code": "function holdingsX64(DebtTree storage tree, uint160 sqrtPriceX96) internal view returns (int256 amount0X64, int256 amount1X64) { DebtNode memory below = _prefix(tree, _priceIndex(sqrtPriceX96)); assert(below.liquidity >= 0); uint256 inRange = uint256(below.liquidity); amount1X64 = below.amount1X64 + FullMath.mulDiv(inRange, sqrtPriceX96, Q96_PER_X64).toInt256(); amount0X64 = tree.allAmount0X64 - below.amount0X64 + FullMath.mulDiv(inRange, X64_Q96, sqrtPriceX96).toInt256(); }",
+      "model": "DebtValuation",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/DebtValuation.sol",
+      "kind": "function",
+      "name": "_valueX64",
+      "sha256": "393c3289929331c8d844a132cc4b0639cc3e7cf336bc456c773a42e3d250b584",
+      "reviewed_code": "function _valueX64(DebtTree storage tree, uint160 sqrtPriceX96) private view returns (uint256 valueX64, uint256 slackX64) { (int256 amount0X64, int256 amount1X64) = holdingsX64(tree, sqrtPriceX96); valueX64 = VaultMath.valueInToken1(_atLeastZero(amount0X64), _atLeastZero(amount1X64), sqrtPriceX96, false); uint256 units = ROUNDING_UNITS * tree.count + 3; slackX64 = VaultMath.valueInToken1(units, units, sqrtPriceX96, true); }",
+      "model": "DebtValuation",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/DebtValuation.sol",
+      "kind": "function",
+      "name": "valueLow",
+      "sha256": "0ec0a3e34d4ea8cc6d6313a5ad54d9a19e35a926dc9e0a1eed956cfc55db2ae8",
+      "reviewed_code": "function valueLow(DebtTree storage tree, uint160 sqrtPriceX96) internal view returns (uint256) { if (tree.count == 0) return 0; (uint256 valueX64, uint256 slackX64) = _valueX64(tree, sqrtPriceX96); return valueX64 > slackX64 ? (valueX64 - slackX64) / X64 : 0; }",
+      "model": "DebtValuation",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/DebtValuation.sol",
+      "kind": "function",
+      "name": "valueHigh",
+      "sha256": "d6c02382200a0abed7dd2b3b48f3d8f96a4893b42aba50260940bde772eba443",
+      "reviewed_code": "function valueHigh(DebtTree storage tree, uint160 sqrtPriceX96) internal view returns (uint256) { if (tree.count == 0) return 0; (uint256 valueX64, uint256 slackX64) = _valueX64(tree, sqrtPriceX96); return FullMath.mulDivRoundingUp(valueX64 + slackX64, 1, X64); }",
+      "model": "DebtValuation",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/DebtValuation.sol",
+      "kind": "function",
+      "name": "_update",
+      "sha256": "6b99e4fa0b56035efca488034812e1225a3ff1a3ea2a2f97dd061ae373813a56",
+      "reviewed_code": "function _update(DebtTree storage tree, uint128 liquidity, int24 tickLower, int24 tickUpper, int256 sign) private { (uint160 sqrtLowerX96, uint160 sqrtUpperX96) = VaultMath.rangeSqrtPrices(tickLower, tickUpper); DebtNode memory lowerEnd = _end(liquidity, sqrtLowerX96, sign); DebtNode memory upperEnd = _end(liquidity, sqrtUpperX96, -sign); tree.allAmount0X64 += lowerEnd.amount0X64 + upperEnd.amount0X64; _addAt(tree, _tickIndex(tickLower), lowerEnd); _addAt(tree, _tickIndex(tickUpper), upperEnd); }",
+      "model": "DebtValuation",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/DebtValuation.sol",
+      "kind": "function",
+      "name": "_end",
+      "sha256": "3293a3628f5e1d0c2afe88b78320067209651f0c5a0180652dafa6e251294143",
+      "reviewed_code": "function _end(uint128 liquidity, uint160 sqrtX96, int256 sign) private pure returns (DebtNode memory end) { int256 amount1X64 = FullMath.mulDiv(liquidity, sqrtX96, Q96_PER_X64).toInt256(); int256 amount0X64 = FullMath.mulDiv(liquidity, X64_Q96, sqrtX96).toInt256(); end.liquidity = sign * int256(uint256(liquidity)); end.amount1X64 = -sign * amount1X64; end.amount0X64 = sign * amount0X64; }",
+      "model": "DebtValuation",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/DebtValuation.sol",
+      "kind": "function",
+      "name": "_atLeastZero",
+      "sha256": "7b5e97a081a8b4992960fba709b27ee6e51a45c59b76a800e385dc9c406314e9",
+      "reviewed_code": "function _atLeastZero(int256 amount) private pure returns (uint256) { return amount > 0 ? uint256(amount) : 0; }",
+      "model": "DebtValuation",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/DebtValuation.sol",
+      "kind": "function",
+      "name": "_tickIndex",
+      "sha256": "25b0bcaf131d6be76b01d101296754e4238597fb58a580d09f8f380711521575",
+      "reviewed_code": "function _tickIndex(int24 tick) private pure returns (uint256) { return uint256(int256(tick) + OFFSET); }",
+      "model": "DebtValuation",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerMath.sol",
+      "kind": "function",
+      "name": "aggregateChordHolds",
+      "sha256": "3b9e325cfcf8dea1205396179831efeb8b046684e258df4bc1533e153f6bf97f",
+      "reviewed_code": "function aggregateChordHolds( uint256 reserve0, uint256 reserve1, uint256 maximum0, uint256 maximum1, uint256 legCount ) internal pure returns (bool) { uint256 kept0 = reserve0 > legCount ? reserve0 - legCount : 0; uint256 kept1 = reserve1 > legCount ? reserve1 - legCount : 0; return VaultMath.chordHolds(kept0, kept1, maximum0, maximum1); }",
+      "model": "MakerSafety",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerMath.sol",
+      "kind": "function",
+      "name": "allocation",
+      "sha256": "23b688d90bd70af60d58bd49342f43c419afb25096cd691d4514353d5203cc5b",
+      "reviewed_code": "function allocation(uint256 reserve, uint256 legCount, uint256 part, uint256 whole) internal pure returns (uint256) { if (whole == 0) return 0; uint256 kept = reserve > legCount ? reserve - legCount : 0; return FullMath.mulDivRoundingUp(kept, part, whole); }",
+      "model": "MakerSafety",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerMath.sol",
+      "kind": "function",
+      "name": "liquidityFor",
+      "sha256": "5500c52f9cb1294196775f6af3af8921c02ce5237e5f8a20f31aa70266cace51",
+      "reviewed_code": "function liquidityFor(bool isBuy, uint256 amount, uint160 sqrtLowerX96, uint160 sqrtUpperX96) internal pure returns (uint256) { uint256 width = sqrtUpperX96 - sqrtLowerX96; if (isBuy) return FullMath.mulDiv(amount, Q96, width); return FullMath.mulDiv(FullMath.mulDiv(amount, sqrtLowerX96, Q96), sqrtUpperX96, width); }",
+      "model": "MakerSafety",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerMath.sol",
+      "kind": "function",
+      "name": "waitingFor",
+      "sha256": "becb61ee6403396d296a57844192b9649cda9de407b0a0d150b8b91cb8473b68",
+      "reviewed_code": "function waitingFor(bool isBuy, uint256 liquidity, uint160 sqrtLowerX96, uint160 sqrtUpperX96) internal pure returns (uint256) { uint256 width = sqrtUpperX96 - sqrtLowerX96; if (isBuy) return FullMath.mulDivRoundingUp(liquidity, width, Q96); uint256 scaled = FullMath.mulDivRoundingUp(liquidity, width, sqrtUpperX96); return FullMath.mulDivRoundingUp(scaled, Q96, sqrtLowerX96); }",
+      "model": "MakerSafety",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerMath.sol",
+      "kind": "function",
+      "name": "ceilingFractionWad",
+      "sha256": "481b86ff117530ea87792ca190b114cec96c07b301eebe1d1c2bcf0ebbe88fff",
+      "reviewed_code": "function ceilingFractionWad( bool isBuy, uint256 lent, uint256 waiting, uint256 ceilingBps, uint160 sqrtLowerX96, uint160 sqrtUpperX96 ) internal pure returns (uint256) { if (lent == 0) return WAD; uint256 capacityNeeded = FullMath.mulDivRoundingUp(lent, BPS - ceilingBps, ceilingBps); uint256 waitingKept = waitingFor(isBuy, capacityNeeded, sqrtLowerX96, sqrtUpperX96); if (waitingKept == 0) return WAD; if (waitingKept >= waiting) return 0; return FullMath.mulDiv(waiting - waitingKept, WAD, waiting); }",
+      "model": "MakerSafety",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerBook.sol",
+      "kind": "function",
+      "name": "_withdrawal",
+      "sha256": "1ecf474ebdaa691688a1e5eccde1fd9b203b4a194b1eb8bd381108b6673655db",
+      "reviewed_code": "function _withdrawal( Vault storage vault, Book storage book, Bucket storage bucket, uint256 bucketId, uint256 shares ) private returns (Withdrawal memory result) { (, bool isBuy,) = MakerMath.decode(bucketId); (uint160 sqrtLowerX96, uint160 sqrtUpperX96) = MakerAccounting.range(book, bucketId); uint256 entitlementWad = _entitlement(vault, bucket, shares, sqrtLowerX96, sqrtUpperX96); uint256 payWad = entitlementWad < MakerMath.WAD ? entitlementWad : MakerMath.WAD; uint256 ceilingWad = _ceilingFraction(book, bucket, isBuy, sqrtLowerX96, sqrtUpperX96); if (payWad > ceilingWad) payWad = ceilingWad; result.amount0 = VaultMath.portionDown(bucket.balance0, payWad); result.amount1 = VaultMath.portionDown(bucket.balance1, payWad); if (result.amount0 == 0) { if (result.amount1 == 0) revert IMetricLendingVault.InsufficientIdle(); } result.burned = payWad >= entitlementWad ? shares : FullMath.mulDivRoundingUp(shares, payWad, entitlementWad); }",
+      "model": "MakerSafety: selected active-withdrawal arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerBook.sol",
+      "kind": "function",
+      "name": "_ceilingFraction",
+      "sha256": "24143e3fcb49740663f34f77af938a0966c23ac1365a867d94f3d6a64f1254bf",
+      "reviewed_code": "function _ceilingFraction( Book storage book, Bucket storage bucket, bool isBuy, uint160 sqrtLowerX96, uint160 sqrtUpperX96 ) private view returns (uint256) { if (bucket.retired) return MakerMath.WAD; uint256 waiting = isBuy ? bucket.balance1 : bucket.balance0; return MakerMath.ceilingFractionWad( isBuy, bucket.lent, waiting, book.settings.utilizationCeilingBps, sqrtLowerX96, sqrtUpperX96 ); }",
+      "model": "MakerSafety: selected active-withdrawal arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "sigmaWad",
+      "sha256": "f413d80aa6c43526cf3b9ce6743e4e77ef3662c47c456b12f86caccdd791c6e3",
+      "reviewed_code": "function sigmaWad(Vault storage vault) public view returns (uint256) { uint256 fastWad = vault.prices.varianceFastWad; uint256 slowWad = vault.prices.varianceSlowWad; uint256 volatilityWad = Math.sqrt((fastWad > slowWad ? fastWad : slowWad) * WAD); return volatilityWad > MIN_SIGMA_WAD ? volatilityWad : MIN_SIGMA_WAD; }",
+      "model": "RealizedCharge: selected ideal geometry and integer arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_observe",
+      "sha256": "808438838d436a4c9332228bf58be14c79c2de5d554fc19b3cef3e559ff637ae",
+      "reviewed_code": "function _observe( PriceRecord storage prices, uint256 sqrtPreviousX96, uint256 sqrtCurrentX96, uint256 elapsedSeconds ) private { uint256 sqrtChangeX96 = sqrtCurrentX96 > sqrtPreviousX96 ? sqrtCurrentX96 - sqrtPreviousX96 : sqrtPreviousX96 - sqrtCurrentX96; uint256 returnWad = FullMath.mulDiv(2 * sqrtChangeX96, WAD, sqrtPreviousX96); uint256 sampleWad = FullMath.mulDiv(FullMath.mulDiv(returnWad, returnWad, WAD), YEAR_SECONDS, elapsedSeconds); uint256 slowWad = prices.varianceSlowWad; uint256 capWad = (slowWad > MIN_VARIANCE_WAD ? slowWad : MIN_VARIANCE_WAD) * MAX_SAMPLE_MULTIPLE; if (sampleWad > capWad) sampleWad = capWad; uint256 fastWad = _average(prices.varianceFastWad, sampleWad, elapsedSeconds, FAST_SECONDS); prices.varianceFastWad = fastWad.toUint112(); prices.varianceSlowWad = _average(slowWad, sampleWad, elapsedSeconds, SLOW_SECONDS).toUint112(); }",
+      "model": "RealizedCharge: selected ideal geometry and integer arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_average",
+      "sha256": "e6bc23902dc5d2c8cb8e8db5021a181c90df68047292f0654b41f31f13e5ab35",
+      "reviewed_code": "function _average(uint256 averageWad, uint256 sampleWad, uint256 elapsedSeconds, uint256 timeConstantSeconds) private pure returns (uint256) { return (averageWad * timeConstantSeconds + sampleWad * elapsedSeconds) / (timeConstantSeconds + elapsedSeconds); }",
+      "model": "RealizedCharge: selected ideal geometry and integer arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "restart",
+      "sha256": "83e803a6891f03ff15e542faf4428c84054d686bf0861bab45006286dd24208b",
+      "reviewed_code": "function restart(Vault storage vault, Position storage position, ChargeStart storage charge) public { uint256 count = vault.prices.count; if (count == 0) return; uint256 last = count - 1; if (charge.point >= last) return; PricePoint memory point = vault.prices.points[last]; charge.sqrtPriceX96 = point.sqrtPriceX96; charge.point = uint32(last); charge.startedAt = point.recordedAt; _snapshotSums(vault, position, charge); }",
+      "model": "RealizedCharge: selected ideal geometry and integer arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_settledStart",
+      "sha256": "bd35f927cf9fe3de29a67562b1a8689a5e955b60ebd1eaef19ba8fd8cb6f403a",
+      "reviewed_code": "function _settledStart(Vault storage vault, ChargeStart storage charge) private view returns (uint160 sqrtPriceX96, uint256 startedAt, uint256 rateBps) { uint256 last = vault.prices.count - 1; PricePoint memory point = vault.prices.points[last]; if (charge.point < last) return (point.sqrtPriceX96, point.recordedAt, point.rentRateBps); return (charge.sqrtPriceX96, charge.startedAt, point.rentRateBps); }",
+      "model": "RealizedCharge: selected ideal geometry and integer arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_treeTermsX64",
+      "sha256": "70b25901d2c170a5becc39f5fa379a740780486fd0691c38a1b098015988fe82",
+      "reviewed_code": "function _treeTermsX64(Range memory range, ChargeStart memory begin, Sums memory sums) private pure returns (int256) { int256 belowX64 = _times(range.maximum0X64, sums.moveBelowX96 - begin.moveBelowX96, Q96); int256 insideX64 = _times(range.liquidity, sums.rootInsideX96 - begin.rootInsideX96, Q96_PER_X64); int256 atUpperX64 = _times(range.liquidity << 64, sums.moveInsideX96 - begin.moveInsideX96, range.sqrtUpperX96); return belowX64 + insideX64 - atUpperX64; }",
+      "model": "RealizedCharge: selected ideal geometry and integer arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_firstIntervalX64",
+      "sha256": "f4768e46ab3ff7e078eaffbae7a4310e6d1151298d8469996ea10aaa4c4ec9dc",
+      "reviewed_code": "function _firstIntervalX64(Vault storage vault, Range memory range, ChargeStart memory begin) private view returns (int256) { uint160 sqrtPointX96 = vault.prices.points[begin.point].sqrtPriceX96; uint160 sqrtNextX96 = vault.prices.points[uint256(begin.point) + 1].sqrtPriceX96; return _holdingTimesMoveX64(range, begin.sqrtPriceX96, sqrtNextX96) - _holdingTimesMoveX64(range, sqrtPointX96, sqrtNextX96); }",
+      "model": "RealizedCharge: selected ideal geometry and integer arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_rentThroughLastBpsSeconds",
+      "sha256": "855ebdd6809975e9ad9cce6658aab9875eca5b5c75938de8cf563033d7a1c88f",
+      "reviewed_code": "function _rentThroughLastBpsSeconds( Vault storage vault, Position storage position, Range memory range, ChargeStart memory begin, Sums memory sums ) private view returns (uint256) { PricePoint memory point = vault.prices.points[begin.point]; uint256 nextRecordedAt = vault.prices.points[uint256(begin.point) + 1].recordedAt; int256 rentBpsSeconds = sums.rentPastBpsSeconds - begin.rentPastBpsSeconds; if (_isPast(position, range, point.sqrtPriceX96)) { rentBpsSeconds -= (uint256(point.rentRateBps) * (nextRecordedAt - point.recordedAt)).toInt256(); } if (_isPast(position, range, begin.sqrtPriceX96)) { rentBpsSeconds += (uint256(point.rentRateBps) * (nextRecordedAt - begin.startedAt)).toInt256(); } return rentBpsSeconds > 0 ? uint256(rentBpsSeconds) : 0; }",
+      "model": "RealizedCharge: selected ideal geometry and integer arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_heldX64",
+      "sha256": "ba77c593b2283e23088008b06ab2387ab1641bc3d543d18ecc7aadc8f7736c39",
+      "reviewed_code": "function _heldX64(Range memory range, uint160 sqrtPriceX96) private pure returns (uint256 amount0X64, uint256 amount1X64) { uint160 sqrtInsideX96 = sqrtPriceX96 < range.sqrtLowerX96 ? range.sqrtLowerX96 : sqrtPriceX96; if (sqrtInsideX96 > range.sqrtUpperX96) sqrtInsideX96 = range.sqrtUpperX96; amount0X64 = FullMath.mulDiv(range.liquidity, X64_Q96, sqrtInsideX96) - range.upper0X64; amount1X64 = FullMath.mulDiv(range.liquidity, sqrtInsideX96 - range.sqrtLowerX96, Q96_PER_X64); }",
+      "model": "RealizedCharge: selected ideal geometry and integer arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_valueX64",
+      "sha256": "99f1f0d63e49b493dd6f66a942d770ac86b7dbf46e8a2e5034a235101e0a0b0c",
+      "reviewed_code": "function _valueX64(Range memory range, uint160 sqrtPriceX96) private pure returns (uint256) { (uint256 amount0X64, uint256 amount1X64) = _heldX64(range, sqrtPriceX96); return FullMath.mulDiv(FullMath.mulDiv(amount0X64, sqrtPriceX96, Q96), sqrtPriceX96, Q96) + amount1X64; }",
+      "model": "RealizedCharge: selected ideal geometry and integer arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_valueChangeX64",
+      "sha256": "743707d99a3a3fefc93c4e95dffa7e2321920e361b75082313bab8eeba9787f6",
+      "reviewed_code": "function _valueChangeX64(Range memory range, uint160 sqrtFromX96, uint160 sqrtToX96) private pure returns (int256) { return _valueX64(range, sqrtToX96).toInt256() - _valueX64(range, sqrtFromX96).toInt256(); }",
+      "model": "RealizedCharge: selected ideal geometry and integer arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_holdingTimesMoveX64",
+      "sha256": "24df101a4f494a79d75d5f9db73e3737546a5bcf0e1fbb4ec44611d01dc016a9",
+      "reviewed_code": "function _holdingTimesMoveX64(Range memory range, uint160 sqrtFromX96, uint160 sqrtToX96) private pure returns (int256) { (uint256 amount0X64,) = _heldX64(range, sqrtFromX96); uint256 sqrtChangeX96 = sqrtToX96 > sqrtFromX96 ? sqrtToX96 - sqrtFromX96 : sqrtFromX96 - sqrtToX96; uint256 sqrtSumX96 = uint256(sqrtToX96) + sqrtFromX96; uint256 magnitude = FullMath.mulDiv(FullMath.mulDiv(amount0X64, sqrtChangeX96, Q96), sqrtSumX96, Q96); return sqrtToX96 >= sqrtFromX96 ? magnitude.toInt256() : -magnitude.toInt256(); }",
+      "model": "RealizedCharge: selected ideal geometry and integer arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_times",
+      "sha256": "e53e7cdf438e684cfb150f38dcc55877d6c797ca5ace5190ac03aa4ae5ab2f93",
+      "reviewed_code": "function _times(uint256 amount, int256 signed, uint256 divisor) private pure returns (int256) { uint256 magnitude = FullMath.mulDiv(amount, signed < 0 ? uint256(-signed) : uint256(signed), divisor); return signed < 0 ? -magnitude.toInt256() : magnitude.toInt256(); }",
+      "model": "RealizedCharge: selected ideal geometry and integer arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_toWad",
+      "sha256": "c929123c31999118be05c2ac8704a4d6a8ad631e6776d74345b2262d4e56b5b7",
+      "reviewed_code": "function _toWad(int256 lossX64) private pure returns (uint256) { if (lossX64 <= 0) return 0; return FullMath.mulDiv(uint256(lossX64), WAD, X64); }",
+      "model": "RealizedCharge: selected ideal geometry and integer arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultAccrual.sol",
+      "kind": "function",
+      "name": "charge",
+      "sha256": "1e3b0562c451fc3500147b882f61f8b5962bc03978d1a1df1e3be232857a82ae",
+      "reviewed_code": "function charge( Vault storage vault, Position storage position, ChargeStart storage start, bool roundUp, uint256 stubWad ) internal view returns (Charge memory owed) { uint256 maximum1 = position.maximum1; uint256 weight0Wad = position.weight0Wad; uint256 delta0Ray = vault.accrual.rateIndex0Ray - position.rateIndex0Ray; uint256 delta1Ray = vault.accrual.rateIndex1Ray - position.rateIndex1Ray; uint256 blendedRay = FullMath.mulDivRoundingUp(delta0Ray, weight0Wad, WAD) + FullMath.mulDivRoundingUp(delta1Ray, WAD - weight0Wad, WAD); uint256 realizedWad = RealizedCharge.owedWad(vault, position, start) + stubWad; uint256 premiumWad = FullMath.mulDiv(maximum1, blendedRay, RAY / WAD) + position.premiumFractionWad + _grossUpWad(vault, start, realizedWad); (owed.premium, owed.premiumFractionWad) = _units(premiumWad, roundUp); }",
+      "model": "Accrual, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultAccrual.sol",
+      "kind": "function",
+      "name": "_grossUpWad",
+      "sha256": "01d0915207100ee48c6007b02cd2905caff24d757093bf5f30f24bff624c4a3a",
+      "reviewed_code": "function _grossUpWad(Vault storage vault, ChargeStart storage start, uint256 amountWad) private view returns (uint256) { if (amountWad == 0) return 0; uint256 surchargeBps = start.highLeverage ? vault.parameters.highLeverageSurchargeBps : 0; return FullMath.mulDivRoundingUp(amountWad, BPS + surchargeBps, BPS - vault.parameters.premiumProtocolBps); }",
+      "model": "Accrual, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultAccrual.sol",
+      "kind": "function",
+      "name": "_units",
+      "sha256": "7fc3b37cb6067e7539cbd7aaba434050e6487d825dd0d0b40ef7cdde9063df38",
+      "reviewed_code": "function _units(uint256 amountWad, bool roundUp) private pure returns (uint256 units, uint256 fractionWad) { if (roundUp) return (FullMath.mulDivRoundingUp(amountWad, 1, WAD), 0); return (amountWad / WAD, amountWad % WAD); }",
+      "model": "Accrual, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultAccrual.sol",
+      "kind": "function",
+      "name": "_growRateIndices",
+      "sha256": "f021a79635bdba77cdd3a633b16cf77d4c89e1e0548ecb1e3c0360736de9c17d",
+      "reviewed_code": "function _growRateIndices(Vault storage vault) private { uint256 versions = vault.curves.length; uint256 fromTime = vault.accrual.updatedAt; uint256 outstanding0 = vault.accrual.outstanding0; uint256 outstanding1 = vault.accrual.outstanding1; uint256 supplied0 = outstanding0 + rateIdle0(vault); uint256 supplied1 = outstanding1 + rateIdle1(vault); uint256 growth0Ray; uint256 growth1Ray; for (uint256 version = vault.accrual.curveVersion; version < versions; ++version) { uint256 untilTime = version + 1 < versions ? vault.curves[version + 1].startedAt : block.timestamp; if (untilTime <= fromTime) continue; CurvePair storage curves = vault.curves[version]; growth0Ray += VaultMath.indexGrowthRay(curves.token0, outstanding0, supplied0, untilTime - fromTime); growth1Ray += VaultMath.indexGrowthRay(curves.token1, outstanding1, supplied1, untilTime - fromTime); fromTime = untilTime; } vault.accrual.rateIndex0Ray = (vault.accrual.rateIndex0Ray + growth0Ray).toUint128(); vault.accrual.rateIndex1Ray = (vault.accrual.rateIndex1Ray + growth1Ray).toUint128(); }",
+      "model": "Accrual, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultAccrual.sol",
+      "kind": "function",
+      "name": "releasable",
+      "sha256": "d2ac911a20e274ddb3b09af123c347f26cc5277926a1dd1307f378d92a186893",
+      "reviewed_code": "function releasable(uint256 remaining, uint256 vestingEnd, Vault storage vault, uint256 elapsedSeconds) internal view returns (uint256) { if (remaining == 0) return 0; uint256 from = vault.accrual.updatedAt; if (vestingEnd <= from) return remaining; uint256 leftSeconds = vestingEnd - from; if (elapsedSeconds >= leftSeconds) return remaining; return remaining * elapsedSeconds / leftSeconds; }",
+      "model": "Accrual, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultAccrual.sol",
+      "kind": "function",
+      "name": "release",
+      "sha256": "7521c16ddd97be60ef99ae4176babeaee826575d1fe5e81b2b6d79ef08e3f136",
+      "reviewed_code": "function release(Vault storage vault, uint256 elapsedSeconds) internal { if (vault.totalShares == 0) { if (vault.stream.remaining0 != 0) vault.stream.vestingEnd0 += uint40(elapsedSeconds); if (vault.stream.remaining1 != 0) vault.stream.vestingEnd1 += uint40(elapsedSeconds); return; } uint256 released0 = releasable(vault.stream.remaining0, vault.stream.vestingEnd0, vault, elapsedSeconds); uint256 released1 = releasable(vault.stream.remaining1, vault.stream.vestingEnd1, vault, elapsedSeconds); vault.stream.remaining0 -= uint128(released0); vault.stream.remaining1 -= uint128(released1); vault.ledger.buffer0 += uint128(released0); vault.ledger.buffer1 += uint128(released1); }",
+      "model": "Accrual, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultAccrual.sol",
+      "kind": "function",
+      "name": "fund",
+      "sha256": "954370e74c9bc9348e0596ed7d3c0a9662eab5796f033a151966f92881fba5c8",
+      "reviewed_code": "function fund(Vault storage vault, uint256 amount) internal { if (amount == 0) return; vault.stream.remaining1 = (vault.stream.remaining1 + amount).toUint128(); vault.stream.vestingEnd1 = uint40(block.timestamp + vault.parameters.vestSeconds); }",
+      "model": "Accrual, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultAccrual.sol",
+      "kind": "function",
+      "name": "fund0",
+      "sha256": "71555f959290fcf012daf53b6207a987607f4d15d2a1f1d0315d4d962803388d",
+      "reviewed_code": "function fund0(Vault storage vault, uint256 amount) internal { if (amount == 0) return; vault.stream.remaining0 = (vault.stream.remaining0 + amount).toUint128(); vault.stream.vestingEnd0 = uint40(block.timestamp + vault.parameters.vestSeconds); }",
+      "model": "Accrual, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultAccrual.sol",
+      "kind": "function",
+      "name": "forfeitToTreasury",
+      "sha256": "a5d1363331eb6feaa35da17c80271b0a692cfaab04d7c8fb0591387dddd90962",
+      "reviewed_code": "function forfeitToTreasury(Vault storage vault) internal { if (vault.longDebts.liquidity != 0) return; if (vault.shortDebts.liquidity != 0) return; vault.ledger.treasury0 += vault.stream.remaining0; vault.ledger.treasury1 += vault.stream.remaining1; vault.stream.remaining0 = 0; vault.stream.remaining1 = 0; }",
+      "model": "Accrual, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultBook.sol",
+      "kind": "function",
+      "name": "addDebt",
+      "sha256": "f52ee54c73700308cf59c32a83e2950ab6eb6cde9897d0f9ecaf9c84d16d41e3",
+      "reviewed_code": "function addDebt(Vault storage vault, Position storage position, uint128 liquidity) internal { DebtTotals storage totals = position.isLong ? vault.longDebts : vault.shortDebts; totals.liquidity += liquidity; DebtValuation.add(vault.debts, liquidity, position.tickLower, position.tickUpper); }",
+      "model": "LedgerOperations, PositionOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultBook.sol",
+      "kind": "function",
+      "name": "removeDebt",
+      "sha256": "dfbb0e04453b507d5ad416ff8880677b7f5701971b61874481c02dcf4d58b510",
+      "reviewed_code": "function removeDebt(Vault storage vault, Position storage position, uint128 liquidity) internal { DebtTotals storage totals = position.isLong ? vault.longDebts : vault.shortDebts; totals.liquidity -= liquidity; DebtValuation.remove(vault.debts, liquidity, position.tickLower, position.tickUpper); }",
+      "model": "LedgerOperations, PositionOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultBook.sol",
+      "kind": "function",
+      "name": "shortfall",
+      "sha256": "a4f75ae8ee4dd9a0fe42ddafe5397b7061888490894ce88b6ef3a62a6a58b472",
+      "reviewed_code": "function shortfall(Vault storage vault, Position storage position, ChargeStart storage start) internal view returns (uint256) { uint256 due = VaultAccrual.charge(vault, position, start, true, 0).premium; uint256 escrow = position.escrow; return due > escrow ? due - escrow : 0; }",
+      "model": "LedgerOperations, PositionOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultBook.sol",
+      "kind": "function",
+      "name": "collect",
+      "sha256": "84ac8c540818655c90e00c01e6fdfe207fbc3752f65c0904f5ffe80bcef9c503",
+      "reviewed_code": "function collect( Vault storage vault, Position storage position, ChargeStart storage start, bool roundUp, uint256 stubWad ) internal returns (Charge memory unpaid) { Charge memory owed = VaultAccrual.charge(vault, position, start, roundUp, stubWad); VaultAccrual.snapshot(vault, position); RealizedCharge.restart(vault, position, start); position.premiumFractionWad = owed.premiumFractionWad.toUint64(); uint256 due = owed.premium; uint256 fromEscrow = due < position.escrow ? due : position.escrow; position.escrow -= uint128(fromEscrow); vault.ledger.escrow -= uint128(fromEscrow); unpaid = _pay(vault, owed, fromEscrow); }",
+      "model": "LedgerOperations, PositionOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultBook.sol",
+      "kind": "function",
+      "name": "_creditPremium",
+      "sha256": "1247410220d5b8807c11d4d3b02ca0441c0d3a9e513f4ab2ddb1fe90810f7a93",
+      "reviewed_code": "function _creditPremium(Vault storage vault, uint256 amount) private { uint256 protocolPart = amount * vault.parameters.premiumProtocolBps / BPS; vault.ledger.treasury1 += protocolPart.toUint128(); VaultAccrual.fund(vault, amount - protocolPart); }",
+      "model": "LedgerOperations, PositionOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultBook.sol",
+      "kind": "function",
+      "name": "payProfitShare",
+      "sha256": "bbf8ce5de03692a3e933b6202f9d32f329ad09b3c0a0a1adeb352f8fb3c138ca",
+      "reviewed_code": "function payProfitShare(Vault storage vault, uint256 share0, uint256 share1) internal { uint256 treasuryBps = vault.parameters.profitTreasuryBps; uint256 feeVaultBps = vault.parameters.profitFeeVaultBps; (uint256 lender0, uint256 treasury0, uint256 feeVault0) = VaultMath.splitShare(share0, treasuryBps, feeVaultBps); (uint256 lender1, uint256 treasury1, uint256 feeVault1) = VaultMath.splitShare(share1, treasuryBps, feeVaultBps); vault.ledger.treasury0 += treasury0.toUint128(); vault.ledger.feeVault0 += feeVault0.toUint128(); vault.ledger.treasury1 += treasury1.toUint128(); vault.ledger.feeVault1 += feeVault1.toUint128(); VaultAccrual.fund0(vault, lender0); VaultAccrual.fund(vault, lender1); }",
+      "model": "LedgerOperations, PositionOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultBook.sol",
+      "kind": "function",
+      "name": "payArrears",
+      "sha256": "d6e073d008024523980479d8177a05c64ddde0e36b771ac047d0140133cce008",
+      "reviewed_code": "function payArrears(Vault storage vault, Charge memory unpaid, uint256 amount) internal returns (Charge memory remaining) { uint256 due = unpaid.premium; uint256 paid = amount < due ? amount : due; return _pay(vault, unpaid, paid); }",
+      "model": "LedgerOperations, PositionOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultBook.sol",
+      "kind": "function",
+      "name": "payArrearsInToken0",
+      "sha256": "a860b2d0d6faf24562dad1ed8d8d375b7895635d0b3d515d5b279a4bdab3a8aa",
+      "reviewed_code": "function payArrearsInToken0(Vault storage vault, uint256 amount0) internal { if (amount0 == 0) return; uint256 protocol0 = amount0 * vault.parameters.premiumProtocolBps / BPS; vault.ledger.treasury0 += protocol0.toUint128(); VaultAccrual.fund0(vault, amount0 - protocol0); }",
+      "model": "LedgerOperations, PositionOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultLedger.sol",
+      "kind": "function",
+      "name": "pull",
+      "sha256": "7c38d642ca88dbddba8e892fc9f2032aafe07b61e8218cf751c6a8d29a7298f3",
+      "reviewed_code": "function pull(Vault storage vault, uint256 tokenIndex, address from, uint256 amount) internal { if (amount == 0) return; IERC20 token = IERC20(tokenOf(vault, tokenIndex)); uint256 balanceBefore = token.balanceOf(address(this)); token.safeTransferFrom(from, address(this), amount); if (token.balanceOf(address(this)) - balanceBefore != amount) revert IMetricLendingVault.InvalidParameters(); credit(vault, tokenIndex, amount); }",
+      "model": "LedgerOperations: conditional exact-transfer model",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultLedger.sol",
+      "kind": "function",
+      "name": "push",
+      "sha256": "653a91c3da103665e3d33b55895ce3aeb1130fc1d5271ef36a27fa67c4ecfeb9",
+      "reviewed_code": "function push(Vault storage vault, uint256 tokenIndex, address to, uint256 amount) internal { if (amount == 0) return; if (to == address(this)) revert IMetricLendingVault.InvalidParameters(); debit(vault, tokenIndex, amount); IERC20(tokenOf(vault, tokenIndex)).safeTransfer(to, amount); }",
+      "model": "LedgerOperations: conditional exact-transfer model",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultLedger.sol",
+      "kind": "function",
+      "name": "pushOrKeep",
+      "sha256": "4af56c975bb7e9e1d67f22e1d9e27e4db600d0177f81937a252176d38ffc5623",
+      "reviewed_code": "function pushOrKeep(Vault storage vault, uint256 tokenIndex, address to, uint256 amount) internal { if (amount == 0) return; if (to == address(this)) revert IMetricLendingVault.InvalidParameters(); debit(vault, tokenIndex, amount); if (IERC20(tokenOf(vault, tokenIndex)).trySafeTransfer(to, amount)) return; credit(vault, tokenIndex, amount); vault.unclaimed[to][tokenIndex] += amount; if (tokenIndex == 0) vault.ledger.unclaimed0 += amount.toUint128(); else vault.ledger.unclaimed1 += amount.toUint128(); emit IMetricLendingVault.PayoutKept(to, tokenIndex, amount); }",
+      "model": "LedgerOperations: conditional exact-transfer model",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultLending.sol",
+      "kind": "function",
+      "name": "deposit",
+      "sha256": "6dfe53e8846e0dc07e5bf8fd2714ffc4f20e528d42f0b9ba710b35c23ff65ec5",
+      "reviewed_code": "function deposit( VaultStore storage store, uint256 vaultId, uint256 amount0, uint256 amount1, uint256 minimumShares, address receiver ) external returns (uint256 shares) { Vault storage vault = _vault(store, vaultId); if (amount0 == 0) { if (amount1 == 0) revert IMetricLendingVault.ZeroAmount(); } VaultAccrual.checkpoint(vault, vaultId); (uint160 sqrtBidX96, uint160 sqrtAskX96) = VaultPricing.band(vault); uint256 valueIn = VaultMath.valueInToken1(amount0, amount1, sqrtBidX96, false); shares = FullMath.mulDiv(valueIn, vault.totalShares + VIRTUAL_SHARES, valueHigh(vault, sqrtAskX96) + VIRTUAL_VALUE); if (shares == 0) revert IMetricLendingVault.ZeroAmount(); if (shares < minimumShares) revert IMetricLendingVault.SlippageExceeded(); VaultLedger.pull(vault, 0, msg.sender, amount0); VaultLedger.pull(vault, 1, msg.sender, amount1); vault.ledger.buffer0 += amount0.toUint128(); vault.ledger.buffer1 += amount1.toUint128(); vault.totalShares += shares; vault.shares[receiver] += shares; MetricVenue.place(vault, vaultId); emit IMetricLendingVault.Deposited(vaultId, receiver, amount0, amount1, shares); }",
+      "model": "LedgerOperations: selected no-swap custody arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultLending.sol",
+      "kind": "function",
+      "name": "_withdraw",
+      "sha256": "0b74e09008d53715c278a5dc194fd8f0b946c8e4724fc97c6d78662ae4c80ddf",
+      "reviewed_code": "function _withdraw( VaultStore storage store, uint256 vaultId, uint256 shares, uint256 minimum0, uint256 minimum1, address receiver, ExitSwap memory swap ) private returns (uint256 amount0, uint256 amount1, uint256 burned) { Vault storage vault = _vault(store, vaultId); if (shares == 0) revert IMetricLendingVault.ZeroAmount(); if (shares > vault.shares[msg.sender]) revert IMetricLendingVault.InsufficientShares(); VaultAccrual.checkpoint(vault, vaultId); (amount0, amount1, burned) = _payout(vault, vaultId, shares); if (amount0 < minimum0) revert IMetricLendingVault.SlippageExceeded(); if (amount1 < minimum1) revert IMetricLendingVault.SlippageExceeded(); vault.ledger.buffer0 -= amount0.toUint128(); vault.ledger.buffer1 -= amount1.toUint128(); vault.shares[msg.sender] -= burned; vault.totalShares -= burned; if (vault.totalShares == 0) VaultAccrual.forfeitToTreasury(vault); if (swap.amountIn != 0) (amount0, amount1) = MetricVenue.swapPayout(vault, vaultId, swap, amount0, amount1); VaultLedger.push(vault, 0, receiver, amount0); VaultLedger.push(vault, 1, receiver, amount1); MetricVenue.place(vault, vaultId); emit IMetricLendingVault.Withdrawn(vaultId, msg.sender, amount0, amount1, burned); }",
+      "model": "LedgerOperations: selected no-swap custody arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultPositions.sol",
+      "kind": "function",
+      "name": "open",
+      "sha256": "c523a8c7d93d4d5841abaa1340982f671ae605d31fd1cbd04c28b0d9a83ae29a",
+      "reviewed_code": "function open(VaultStore storage store, OpenRequest calldata request) external returns (uint256 positionId) { Vault storage vault = _vault(store, request.vaultId); if (request.liquidity == 0) revert IMetricLendingVault.ZeroAmount(); VaultAccrual.checkpoint(vault, request.vaultId); Opening memory opening = _price(vault, request.tickLower, request.tickUpper, request.liquidity); uint160 sqrtMidX96 = _mid(vault); _release(vault, request.vaultId, opening); positionId = ++store.lastPositionId; Position storage position = store.positions[positionId]; _record(vault, position, request, opening); RealizedCharge.start(vault, position, store.chargeStarts[positionId], sqrtMidX96); PositionIndex.add(store.passivePositionIds[position.owner], store.indexInOwnerList, positionId); _fund(vault, position, request.collateral, request.escrow); uint256 sellable = _sellable(opening, request.isLong, request.collateral); VenueSwap.Trade memory trade = _trade(opening, request.isLong, request.entryAmountIn, request.entryMinimumOut, request.entryVenue); _enter(vault, request.vaultId, position, trade, request.entryRoute, sellable); _requireSolvent(position); _requireEscrow(vault, position); MetricVenue.place(vault, request.vaultId); emit IMetricLendingVault.Opened( positionId, request.vaultId, msg.sender, request.isLong, request.tickLower, request.tickUpper, request.liquidity, opening.release0, opening.release1 ); }",
+      "model": "PositionOperations, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultPositions.sol",
+      "kind": "function",
+      "name": "increase",
+      "sha256": "23bc6d6c2ad3e6d7bfefb4a2168fe9b483de6a025889189f1a8baf9ea3491420",
+      "reviewed_code": "function increase(VaultStore storage store, IncreaseRequest calldata request) external { Position storage position = _owned(store, request.positionId); if (request.liquidity == 0) revert IMetricLendingVault.ZeroAmount(); uint256 vaultId = position.vaultId; Vault storage vault = store.vaults[vaultId]; ChargeStart storage start = store.chargeStarts[request.positionId]; if (!_trySettle(vault, request.positionId, position, start)) revert IMetricLendingVault.PremiumUnpaid(); uint160 sqrtMidX96 = _mid(vault); _payStub(vault, position, start, sqrtMidX96); Opening memory opening = _price(vault, position.tickLower, position.tickUpper, request.liquidity); _release(vault, vaultId, opening); _merge(vault, position, request.liquidity, opening); RealizedCharge.start(vault, position, start, sqrtMidX96); _fund(vault, position, request.collateral, request.escrow); uint256 sellable = _sellable(opening, position.isLong, request.collateral); VenueSwap.Trade memory trade = _trade(opening, position.isLong, request.entryAmountIn, request.entryMinimumOut, request.entryVenue); _enter(vault, vaultId, position, trade, request.entryRoute, sellable); _requireSolvent(position); _requireEscrow(vault, position); MetricVenue.place(vault, vaultId); emit IMetricLendingVault.Increased(request.positionId, request.liquidity, opening.release0, opening.release1); }",
+      "model": "PositionOperations, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultPositions.sol",
+      "kind": "function",
+      "name": "_release",
+      "sha256": "a8c23ce781ac1f604082a6458d7d1b9ec4d13cc2827f12dc27c9b13ef5fcec31",
+      "reviewed_code": "function _release(Vault storage vault, uint256 vaultId, Opening memory opening) private { _requireIdle(VaultAccrual.idle0(vault), opening.release0); _requireIdle(VaultAccrual.idle1(vault), opening.release1); _requireCeiling(vault, vault.accrual.outstanding0, VaultAccrual.rateIdle0(vault), opening.release0); _requireCeiling(vault, vault.accrual.outstanding1, VaultAccrual.rateIdle1(vault), opening.release1); if (!MetricVenue.gather(vault, vaultId, opening.release0, opening.release1)) { revert IMetricLendingVault.InsufficientIdle(); } vault.ledger.buffer0 -= opening.release0.toUint128(); vault.ledger.buffer1 -= opening.release1.toUint128(); vault.ledger.reserve0 += opening.release0.toUint128(); vault.ledger.reserve1 += opening.release1.toUint128(); vault.accrual.outstanding0 += opening.release0.toUint128(); vault.accrual.outstanding1 += opening.release1.toUint128(); }",
+      "model": "PositionOperations, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultPositions.sol",
+      "kind": "function",
+      "name": "_merge",
+      "sha256": "c1d7b22fad6f0bbfa2e5c64d6aad41c9b3c855586212943090445cc3ca4f86bb",
+      "reviewed_code": "function _merge(Vault storage vault, Position storage position, uint128 added, Opening memory opening) private { uint128 liquidity = position.liquidity; uint128 total = liquidity + added; (uint256 maximum0, uint256 maximum1) = VaultMath.debtExtremes(total, opening.sqrtLowerX96, opening.sqrtUpperX96); uint256 weight0Wad = _mergedWeight0(position.weight0Wad, position.maximum1, _weight0(opening), opening.maximum1); VaultBook.removeDebt(vault, position, liquidity); position.liquidity = total; position.maximum0 = maximum0.toUint128(); position.maximum1 = maximum1.toUint128(); position.weight0Wad = weight0Wad.toUint64(); position.reserve0 += opening.release0.toUint128(); position.reserve1 += opening.release1.toUint128(); position.released0 += opening.release0.toUint128(); position.released1 += opening.release1.toUint128(); VaultBook.addDebt(vault, position, total); }",
+      "model": "PositionOperations, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultPositions.sol",
+      "kind": "function",
+      "name": "_fund",
+      "sha256": "a93a8d759aed428fc14fa014b746fcb90b15cf3ab45e9b702905818e06b84c94",
+      "reviewed_code": "function _fund(Vault storage vault, Position storage position, uint128 collateral, uint128 escrow) private { uint256 paidIn = uint256(collateral) + escrow; VaultLedger.pull(vault, 1, msg.sender, paidIn); position.reserve1 += collateral; vault.ledger.reserve1 += collateral; position.escrow += escrow; vault.ledger.escrow += escrow; position.basis += paidIn.toUint128(); }",
+      "model": "PositionOperations, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultPositions.sol",
+      "kind": "function",
+      "name": "_sellable",
+      "sha256": "21686f605a17fa87a0be5cbd54aaa8271a7a000ea6a7ddc0c41fbbef3ae2505d",
+      "reviewed_code": "function _sellable(Opening memory opening, bool isLong, uint256 collateral) private pure returns (uint256) { if (isLong) return opening.release1 + collateral; return opening.release0; }",
+      "model": "PositionOperations, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultPositions.sol",
+      "kind": "function",
+      "name": "_enter",
+      "sha256": "f26c359676159718b5b8de657e54199ee60b39bd8af02fa9c53842a906008744",
+      "reviewed_code": "function _enter( Vault storage vault, uint256 vaultId, Position storage position, VenueSwap.Trade memory trade, bytes calldata route, uint256 sellable ) private { if (trade.amountIn == 0) return; if (trade.amountIn > sellable) revert IMetricLendingVault.InvalidParameters(); (uint256 paid, uint256 received, uint256 lost) = MetricVenue.swapForTrader(vault, vaultId, trade, route); _moveReserves(vault, position, trade.zeroForOne, paid, received); _chargeToBasis(position, lost); }",
+      "model": "PositionOperations, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultPositions.sol",
+      "kind": "function",
+      "name": "_moveReserves",
+      "sha256": "f1fbb2c68197d9d10bd1b15bbc2ad69b1e8982feefe23e92c62981b39f4ad4a8",
+      "reviewed_code": "function _moveReserves( Vault storage vault, Position storage position, bool zeroForOne, uint256 paid, uint256 received ) private { if (zeroForOne) { position.reserve0 -= paid.toUint128(); vault.ledger.reserve0 -= paid.toUint128(); position.reserve1 += received.toUint128(); vault.ledger.reserve1 += received.toUint128(); return; } position.reserve1 -= paid.toUint128(); vault.ledger.reserve1 -= paid.toUint128(); position.reserve0 += received.toUint128(); vault.ledger.reserve0 += received.toUint128(); }",
+      "model": "PositionOperations, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultPositions.sol",
+      "kind": "function",
+      "name": "addCollateral",
+      "sha256": "3de5b6155facdebf226646db0e63eb1b8b5a5a61b2bf955a42ae3ea812d6e3f3",
+      "reviewed_code": "function addCollateral(VaultStore storage store, uint256 positionId, uint256 amount) external { Position storage position = _owned(store, positionId); if (amount == 0) revert IMetricLendingVault.ZeroAmount(); Vault storage vault = store.vaults[position.vaultId]; VaultLedger.pull(vault, 1, msg.sender, amount); position.reserve1 += amount.toUint128(); vault.ledger.reserve1 += amount.toUint128(); position.basis += amount.toUint128(); emit IMetricLendingVault.CollateralAdded(positionId, amount); }",
+      "model": "PositionOperations, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultPositions.sol",
+      "kind": "function",
+      "name": "addCollateral0",
+      "sha256": "4a03730ff5240b1736468e21e0ecd803465ec042ed6edc59329563c19923f265",
+      "reviewed_code": "function addCollateral0(VaultStore storage store, uint256 positionId, uint256 amount) external { Position storage position = _owned(store, positionId); if (amount == 0) revert IMetricLendingVault.ZeroAmount(); Vault storage vault = store.vaults[position.vaultId]; (bool priced, uint160 sqrtBidX96) = VaultPricing.tryCloseBid(vault); if (!priced) revert IMetricLendingVault.InvalidBand(); VaultLedger.pull(vault, 0, msg.sender, amount); position.reserve0 += amount.toUint128(); vault.ledger.reserve0 += amount.toUint128(); position.basis += VaultMath.priceTimes(amount, sqrtBidX96, false).toUint128(); emit IMetricLendingVault.Collateral0Added(positionId, amount); }",
+      "model": "PositionOperations, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultPositions.sol",
+      "kind": "function",
+      "name": "addEscrow",
+      "sha256": "9051d8380c22269f0b97c5f238a098c634e93e8308e21a2cfcec9747a7fc7ad3",
+      "reviewed_code": "function addEscrow(VaultStore storage store, uint256 positionId, uint256 amount) external { Position storage position = _owned(store, positionId); if (amount == 0) revert IMetricLendingVault.ZeroAmount(); Vault storage vault = store.vaults[position.vaultId]; VaultLedger.pull(vault, 1, msg.sender, amount); position.escrow += amount.toUint128(); vault.ledger.escrow += amount.toUint128(); position.basis += amount.toUint128(); emit IMetricLendingVault.EscrowAdded(positionId, amount); _trySettle(vault, positionId, position, store.chargeStarts[positionId]); }",
+      "model": "PositionOperations, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultPositions.sol",
+      "kind": "function",
+      "name": "_trySettle",
+      "sha256": "ee69ad1cdff6186a2ab68958e90dd6a555ca0c324af5ea155ce1009d36fc63b7",
+      "reviewed_code": "function _trySettle(Vault storage vault, uint256 positionId, Position storage position, ChargeStart storage start) private returns (bool) { VaultAccrual.checkpoint(vault, position.vaultId); if (VaultBook.shortfall(vault, position, start) != 0) return false; Charge memory owed = VaultAccrual.charge(vault, position, start, false, 0); Charge memory unpaid = VaultBook.collect(vault, position, start, false, 0); assert(VaultBook.total(unpaid) == 0); position.delinquentSince = 0; emit IMetricLendingVault.Settled(positionId, owed.premium); return true; }",
+      "model": "PositionOperations, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultClosing.sol",
+      "kind": "function",
+      "name": "_portion",
+      "sha256": "83a67ed279b74f5741f48f6b5709411d2e81ff0609ce1fdc42327df40c765f2c",
+      "reviewed_code": "function _portion(Position storage position, uint256 fractionWad) private view returns (Closing memory closing) { if (fractionWad == 0) revert IMetricLendingVault.InvalidFraction(); if (fractionWad > WAD) revert IMetricLendingVault.InvalidFraction(); closing.fractionWad = fractionWad; closing.liquidity = VaultMath.portionDown(position.liquidity, fractionWad).toUint128(); if (closing.liquidity == 0) revert IMetricLendingVault.InvalidFraction(); closing.portion0 = VaultMath.portionDown(position.reserve0, fractionWad); closing.portion1 = VaultMath.portionDown(position.reserve1, fractionWad); closing.released0 = VaultMath.portionUp(position.released0, fractionWad); closing.released1 = VaultMath.portionUp(position.released1, fractionWad); }",
+      "model": "PositionOperations, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultClosing.sol",
+      "kind": "function",
+      "name": "_exitSwap",
+      "sha256": "f411dd61d8fb56c4f30769c413c93de398e7b2b857cdc95fb82e1a09ef4d057a",
+      "reviewed_code": "function _exitSwap( Vault storage vault, uint256 vaultId, Position storage position, Closing memory closing, ExitSwap memory exit ) private { if (exit.amountIn == 0) return; uint256 closedHeld = exit.zeroForOne ? closing.portion0 : closing.portion1; (uint256 paid, uint256 received, uint256 lost) = MetricVenue.exitSwap(vault, vaultId, exit, closedHeld); _applySwap(vault, position, exit.zeroForOne, paid, received); closing.portion0 = exit.zeroForOne ? closing.portion0 - paid : closing.portion0 + received; closing.portion1 = exit.zeroForOne ? closing.portion1 + received : closing.portion1 - paid; closing.exitLost = lost; }",
+      "model": "PositionOperations, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultClosing.sol",
+      "kind": "function",
+      "name": "_applySwap",
+      "sha256": "c8b9856d66fe567df130f591e0932ff4c8fba95669c5f00fd26676f05f1e12ea",
+      "reviewed_code": "function _applySwap(Vault storage vault, Position storage position, bool zeroForOne, uint256 paid, uint256 received) private { if (paid == 0) { if (received == 0) return; } if (zeroForOne) { position.reserve0 -= paid.toUint128(); vault.ledger.reserve0 -= paid.toUint128(); position.reserve1 += received.toUint128(); vault.ledger.reserve1 += received.toUint128(); return; } position.reserve1 -= paid.toUint128(); vault.ledger.reserve1 -= paid.toUint128(); position.reserve0 += received.toUint128(); vault.ledger.reserve0 += received.toUint128(); }",
+      "model": "PositionOperations, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultClosing.sol",
+      "kind": "function",
+      "name": "_repay",
+      "sha256": "381b68c294cfe15669428410a3ff5f9359c5b9d4e116b799162eddc923e16b40",
+      "reviewed_code": "function _repay(Vault storage vault, Closing memory closing) private { vault.ledger.reserve0 -= closing.repay0.toUint128(); vault.ledger.reserve1 -= closing.repay1.toUint128(); vault.ledger.buffer0 += closing.repay0.toUint128(); vault.ledger.buffer1 += closing.repay1.toUint128(); vault.accrual.outstanding0 -= _min(closing.released0, vault.accrual.outstanding0).toUint128(); vault.accrual.outstanding1 -= _min(closing.released1, vault.accrual.outstanding1).toUint128(); }",
+      "model": "PositionOperations, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultClosing.sol",
+      "kind": "function",
+      "name": "_payArrears",
+      "sha256": "ba3bb304758a34615bf94fa761b0bd16c6b7a722429519045dd8fa3e45514757",
+      "reviewed_code": "function _payArrears( Vault storage vault, Position storage position, Closing memory closing, Charge memory unpaid, bool partialClose ) private { uint256 due = VaultBook.total(unpaid); if (due == 0) return; if (partialClose) { if (due > closing.leftover1) revert IMetricLendingVault.PremiumUnpaid(); } uint256 from1 = _min(due, closing.leftover1); closing.leftover1 -= from1; vault.ledger.reserve1 -= from1.toUint128(); Charge memory remaining = VaultBook.payArrears(vault, unpaid, from1); uint256 remainingDue = VaultBook.total(remaining); if (remainingDue == 0) return; uint256 from0 = _min(VaultPricing.token0AtStrike(position, remainingDue), closing.leftover0); closing.leftover0 -= from0; vault.ledger.reserve0 -= from0.toUint128(); VaultBook.payArrearsInToken0(vault, from0); }",
+      "model": "PositionOperations, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultClosing.sol",
+      "kind": "function",
+      "name": "_takeProfitShare",
+      "sha256": "b41731ea331462f8547ede6df49819be65d97b4a9b86f43e4d9c1988b297cbd1",
+      "reviewed_code": "function _takeProfitShare(Vault storage vault, Position storage position, Closing memory closing) private returns (uint256 share) { closing.basis = VaultBook.closedBasis(position.basis, position.escrow, closing.fractionWad); if (closing.fractionWad == WAD) closing.refund = position.escrow; (bool ok, uint160 sqrtBidX96) = VaultPricing.tryCloseBid(vault); uint256 value0 = ok ? VaultMath.priceTimes(closing.leftover0, sqrtBidX96, false) : VaultPricing.atStrike(position, closing.leftover0); uint256 proceeds = value0 + closing.leftover1 + closing.refund + closing.exitLost; share = VaultBook.profit(proceeds, closing.basis) * vault.parameters.profitShareBps / BPS; if (share == 0) return 0; uint256 fromLeftover1 = _min(share, closing.leftover1); uint256 fromRefund = _min(share - fromLeftover1, closing.refund); uint256 rest = share - fromLeftover1 - fromRefund; uint256 owed0 = ok ? VaultPricing.token0At(sqrtBidX96, rest) : VaultPricing.token0AtStrike(position, rest); uint256 share0 = _min(owed0, closing.leftover0); closing.leftover0 -= share0; closing.leftover1 -= fromLeftover1; closing.refund -= fromRefund; vault.ledger.reserve0 -= share0.toUint128(); vault.ledger.reserve1 -= fromLeftover1.toUint128(); position.escrow -= fromRefund.toUint128(); vault.ledger.escrow -= fromRefund.toUint128(); VaultBook.payProfitShare(vault, share0, fromLeftover1 + fromRefund); }",
+      "model": "PositionOperations, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultClosing.sol",
+      "kind": "function",
+      "name": "_payOut",
+      "sha256": "3dd9849daf346600961de6f122e8a30868837199c1f7695aa560fad275b3df08",
+      "reviewed_code": "function _payOut(Vault storage vault, Position storage position, Closing memory closing, address recipient) private returns (uint256 paid0, uint256 paid1) { paid0 = closing.leftover0; paid1 = closing.leftover1 + closing.refund; vault.ledger.reserve0 -= closing.leftover0.toUint128(); vault.ledger.reserve1 -= closing.leftover1.toUint128(); if (closing.refund != 0) { position.escrow -= closing.refund.toUint128(); vault.ledger.escrow -= closing.refund.toUint128(); } VaultLedger.pushOrKeep(vault, 0, recipient, paid0); VaultLedger.pushOrKeep(vault, 1, recipient, paid1); }",
+      "model": "PositionOperations, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultClosing.sol",
+      "kind": "function",
+      "name": "_shrinkOrDelete",
+      "sha256": "900ffd3f20abfa874c0cb5038287f5fa2b5d06a7d12487b00b68eeade1f4feba",
+      "reviewed_code": "function _shrinkOrDelete( VaultStore storage store, Vault storage vault, uint256 positionId, Position storage position, Closing memory closing ) private { VaultBook.removeDebt(vault, position, position.liquidity); if (closing.fractionWad == WAD) { PositionIndex.remove(store.passivePositionIds[position.owner], store.indexInOwnerList, positionId); delete store.positions[positionId]; delete store.chargeStarts[positionId]; return; } uint128 remaining = position.liquidity - closing.liquidity; (uint160 sqrtLowerX96, uint160 sqrtUpperX96) = VaultMath.rangeSqrtPrices(position.tickLower, position.tickUpper); (uint256 maximum0, uint256 maximum1) = VaultMath.debtExtremes(remaining, sqrtLowerX96, sqrtUpperX96); position.liquidity = remaining; position.maximum0 = maximum0.toUint128(); position.maximum1 = maximum1.toUint128(); position.reserve0 -= closing.portion0.toUint128(); position.reserve1 -= closing.portion1.toUint128(); position.released0 -= _min(closing.released0, position.released0).toUint128(); position.released1 -= _min(closing.released1, position.released1).toUint128(); position.basis -= closing.basis.toUint128(); VaultBook.addDebt(vault, position, remaining); if (maximum1 < vault.parameters.minBorrowNotional) revert IMetricLendingVault.BelowMinimumBorrow(); if (!VaultMath.chordHolds(position.reserve0, position.reserve1, maximum0, maximum1)) { revert IMetricLendingVault.Insolvent(); } }",
+      "model": "PositionOperations, LedgerOperations: selected arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    }
+  ],
+  "unproved_dependencies": [
+    {
+      "path": "lib/v4-core/src/libraries/FullMath.sol",
+      "sha256": "a9607255a6fd604d9c92f6b7416811c38b9d86e5dfdb0c345a494ebd35f7a4a3",
+      "status": "Unproved implementation dependency; imported operation behavior and valid input bounds require separate verification."
+    },
+    {
+      "path": "lib/v4-core/src/libraries/SqrtPriceMath.sol",
+      "sha256": "42440c21bbab86c7eed4716b281ed5ca281cf14af8b5e06dc6dc3bc6864bcfdf",
+      "status": "Unproved implementation dependency; imported operation behavior and valid input bounds require separate verification."
+    },
+    {
+      "path": "lib/v4-core/src/libraries/TickMath.sol",
+      "sha256": "272d4f6d3ff9ae33596ebcdb84a71a3c2d4542ae8fb5c88ddf1aca8043f5d06b",
+      "status": "Unproved implementation dependency; imported operation behavior and valid input bounds require separate verification."
+    },
+    {
+      "path": "lib/v4-core/src/libraries/UnsafeMath.sol",
+      "sha256": "2de236e7ca0b9572a6b0184557565b6fd54e177224e202c727fe248785ede427",
+      "status": "Unproved assembly implementation dependency for nested ceiling amount0."
+    }
+  ],
+  "target_commit": "963d033f8ef04ef0203190b952cfb30a41ad27d5",
+  "target_commit_subject": "realized premium charge",
+  "first_capture_commit": "70917dfd46df29498fcff17e90fb5c60424a1c31",
+  "target_sources": [
+    {
+      "path": "core/src/metric/price-providers/CLAMMPriceProvider.sol",
+      "sha256": "4b427a42ace264da4f715b8d2aefe26c5d912afe69cb99852f530a6a9a558f0c"
+    },
+    {
+      "path": "core/src/metric/vault/MakerTypes.sol",
+      "sha256": "890b5fb8fbfcb2cb9cf4fbb0d244d630c998af2facbed698775b4d7ad8833878"
+    },
+    {
+      "path": "core/src/metric/vault/MetricLendingVault.sol",
+      "sha256": "aece0c11d743519ba1ce27e226ca28b2a1541e82e057a061e4ad0d6c0242b760"
+    },
+    {
+      "path": "core/src/metric/vault/VaultTypes.sol",
+      "sha256": "c1a169312a1541c70880ab6c77a82b6a0d04669924af508d790422049dcbc939"
+    },
+    {
+      "path": "core/src/metric/vault/interfaces/IMakerBook.sol",
+      "sha256": "bcd84c0af2ac59dfd2d3263e4eb62ffb94370dd47944799eab72559bfa16adb8"
+    },
+    {
+      "path": "core/src/metric/vault/interfaces/IMetricLendingVault.sol",
+      "sha256": "46fb1687f81714888949f57cea3a2fd8782ffae7ed9bc54c8945282a67db3956"
+    },
+    {
+      "path": "core/src/metric/vault/interfaces/IMetricPool.sol",
+      "sha256": "f6569181a41e7a62800c57d1074b9343eee405df20b09d4c5c38ae8c3087c536"
+    },
+    {
+      "path": "core/src/metric/vault/interfaces/ISwapVenue.sol",
+      "sha256": "a0549f581b7cd5dd7ee7d2895776c5e5026b50b74bff9ed1045f502fd8e539bf"
+    },
+    {
+      "path": "core/src/metric/vault/interfaces/IVaultPriceSource.sol",
+      "sha256": "6de22526d35e5dabfae026d9382598b698aaa025340271c993b728e3150f53f9"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/DebtValuation.sol",
+      "sha256": "9174ceb1ad8fb22a2471166836bfafd5c3a900e1f8c90dd7d46320195dc66d0b"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerAccounting.sol",
+      "sha256": "b55361f4109b0d8ed24ece3d474303f0be9ddc69011ea3fdfaf4e5ee9ba32582"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerBook.sol",
+      "sha256": "9950196fea3573ae50fe060dffa2a2012253cc815828eacaa327095b83aeb009"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerClosing.sol",
+      "sha256": "937a4f93d69ab2faf73afe9643d5c21bbc6558440b7fd33b67f3d02826176774"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerMath.sol",
+      "sha256": "ab6c65f52714691b48577b1e7c7ea6b572a01c6dc44cbf63f769591a851f81e6"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerPositions.sol",
+      "sha256": "188547225f3b489265c33ec53b39133f67d89e09b3f305d2e9b0b327de50b56e"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerSettlement.sol",
+      "sha256": "e3184d092836e5dba41003e52f608ef42240ff73ed7ce34e9e278a3949981083"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MetricPrice.sol",
+      "sha256": "fd468591ad01854268673f2d09b1605fe8eb7c4adb168703d285bd0007e3081b"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MetricState.sol",
+      "sha256": "1fe06b91c11fd8643e57cbfc0ae53fe892ee34361c0ac52efd690c4d8e1d90a2"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MetricVenue.sol",
+      "sha256": "e62f12a8f637f1e82201d4bd4a51b61743eddb7af4d71b5a1d1c41d91d6e3d6b"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/PositionIndex.sol",
+      "sha256": "42cc9890dc3e910bb148bc69d998f8ebc37898465627dafd401e8708d2e27b8c"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "sha256": "f2876126ee8b3de6eed5148bdfe99ca8367fa67fd221e6753d41e285619302cd"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultAccrual.sol",
+      "sha256": "34733ef50f77bae7880fd0addb723e398ccd2079effb93e6f342f45f3d97fff5"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultAdmin.sol",
+      "sha256": "0c757273190d15e51ba1df2c1ee89627b84bdfe6f2a22aa035a70c026de1e7c5"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultBook.sol",
+      "sha256": "a5693da0179127a21a5948abc9469e83e972fdaf9f24d8dd8ecbd25eb5bb4690"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultCallback.sol",
+      "sha256": "3720111f4cd4a41f8f6391ac0d619e540ff2a312aaa48f804d7f58611191b489"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultClosing.sol",
+      "sha256": "7cf2e6d99d73f3bae11db2389bc62f18eca657ef3fad74c5ec18ac38d6212b99"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultLedger.sol",
+      "sha256": "fe5d37b6e692e7fde171f2840b66a2696120f2f530973229182121d51544f70e"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultLending.sol",
+      "sha256": "87405abbb622366b4fb0cca617eba3842c085580dc093e899fd86639c38179bf"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultMath.sol",
+      "sha256": "9599371ab01a3689bcb64ad4f763bc2d8a91b264fe32321b65b199bb9909834a"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultPositions.sol",
+      "sha256": "132afc78b116f2bf8302319e60dbe8003f74c8215e5f2c8c296fa31f58474f89"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultPricing.sol",
+      "sha256": "105442bd1f2adace958d56003f121bec04a0cf87df65ef41dee4774e72e3a032"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VenueSwap.sol",
+      "sha256": "bf9d6fb38b0b4b82adb2630d34114eefdcea2f4c1202d5a2ff213028afbc8101"
+    },
+    {
+      "path": "core/src/metric/vault/venues/RouterVenue.sol",
+      "sha256": "751fb4fff031d8c2a09ce9aa1a54d3e7ef528e45cc1e4326900ce8eab84caca5"
+    }
+  ]
+}

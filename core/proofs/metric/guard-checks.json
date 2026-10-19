@@ -1,0 +1,5 @@
+{
+  "unused_axiom": "rejected as expected",
+  "unused_unfinished_definition": "rejected as expected",
+  "changed_solidity_function": "rejected as expected"
+}
