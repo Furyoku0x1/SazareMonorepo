@@ -22,7 +22,6 @@ contract MetricVenueCapAndGasTest is MetricFixture {
         parameters.pool = address(newPool);
         parameters.weightCapBps = weightCapBps;
         parameters.binCount = binCount;
-        parameters.recenterDistance = binCount / 2 - 1;
         vm.prank(owner);
         newVaultId = vault.createVault(parameters, defaultCurves());
     }

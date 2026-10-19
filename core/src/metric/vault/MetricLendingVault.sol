@@ -133,10 +133,6 @@ contract MetricLendingVault is
         return VaultLending.withdrawAfterSwap(_store, vaultId, shares, minimum0, minimum1, receiver, swap);
     }
 
-    function recenter(uint256 vaultId) external nonReentrant returns (bool) {
-        return VaultLending.recenter(_store, vaultId);
-    }
-
     // ---------------------------------------------------------------- traders
 
     function open(OpenRequest calldata request) external nonReentrant returns (uint256) {

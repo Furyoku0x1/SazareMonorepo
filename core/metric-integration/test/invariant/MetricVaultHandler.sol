@@ -123,7 +123,6 @@ contract MetricVaultHandler is Test {
     uint256 public flags;
     uint256[3] public forceCloses;
     uint256 public outsideSwaps;
-    uint256 public recenters;
 
     constructor(
         MetricLendingVault vault_,
@@ -213,14 +212,6 @@ contract MetricVaultHandler is Test {
                     NONE
                 ]
             );
-        }
-    }
-
-    function recenter() external watchActiveBin {
-        try vault.recenter(vaultId) returns (bool moved) {
-            if (moved) recenters += 1;
-        } catch (bytes memory reason) {
-            _allow(reason, "recenter", [NONE, NONE, NONE, NONE, NONE, NONE]);
         }
     }
 

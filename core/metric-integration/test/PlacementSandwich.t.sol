@@ -21,16 +21,14 @@ contract LimitSwapper is IMetricOmmSwapCallback {
 }
 
 /// @notice Audit finding X-1: anyone could push Metric's cursor off the oracle reference, trigger a vault placement
-/// (a deposit, a close, or the permissionless `recenter`), and trade back, buying the vault's newly placed base below
-/// the reference (or its quote above). On a 400,000 USD vault a 5% push took 3.8% of lender value. The vault now places
-/// and re-centers only while the cursor's bin holds the reference.
+/// (a deposit or a close), and trade back, buying the vault's newly placed base below the reference (or its quote
+/// above). On a 400,000 USD vault a 5% push took 3.8% of lender value. The vault now places only while the cursor's bin
+/// holds the reference.
 contract PlacementSandwichTest is MetricFixture {
     /// @dev The fixture's reference price, in whole quote per whole base.
     uint256 internal constant REFERENCE_PRICE = 2_000;
     /// @dev Inside the outsider's ±4% of depth, and ten bins of 0.2% off the reference.
     uint256 internal constant PUSH_BPS = 200;
-    /// @dev Enough recenter calls to have walked the old window ten bins, four a call.
-    uint256 internal constant RECENTER_CALLS = 5;
 
     LimitSwapper internal swapper;
     address internal secondLender = makeAddr("lender2");
@@ -49,18 +47,18 @@ contract PlacementSandwichTest is MetricFixture {
         deposit(lender, 100e18, 200_000e6);
     }
 
-    /// @dev Pushed down, re-centering moves nothing, so it puts no more base below the reference than the push itself
-    /// sold into the vault's quote bins (bought cheaply, which is harmless); the round trip only costs the swapper the
-    /// pool's fees. A window that followed the pushed cursor would place base below the reference for the swapper to
-    /// buy back cheaply, the X-1 sandwich.
-    function test_pushDownThenRecenter_placesNoBaseBelowTheReference() public {
+    /// @dev Pushed down, a lender's base deposit waits in the buffer, so it puts no more base below the reference than
+    /// the push itself sold into the vault's quote bins (bought cheaply, which is harmless); the round trip only costs
+    /// the swapper the pool's fees. A deposit placed around the pushed cursor would put base below the reference for
+    /// the swapper to buy back cheaply, the X-1 sandwich.
+    function test_pushDownThenDeposit_placesNoBaseBelowTheReference() public {
         uint256 walletBefore = _walletValue();
         _push(true);
         uint256 belowAfterPush = _baseBelowReference();
-        // RECENTER_CALLS == 5
-        for (uint256 callIndex = 0; callIndex < RECENTER_CALLS; ++callIndex) {
-            assertFalse(vault.recenter(vaultId), "the window does not follow a pushed cursor");
-        }
+        uint256 buffer0Before = vault.ledgerOf(vaultId).buffer0;
+        vm.prank(secondLender);
+        vault.deposit(vaultId, 1e18, 0, 0, secondLender);
+        assertEq(vault.ledgerOf(vaultId).buffer0, buffer0Before + 1e18, "the deposit waits in the buffer");
         assertEq(_baseBelowReference(), belowAfterPush, "no base moved below the reference");
         _reverse(true);
         assertLe(_walletValue(), walletBefore, "the sandwich does not pay");

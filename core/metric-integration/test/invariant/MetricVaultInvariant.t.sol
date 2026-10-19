@@ -12,7 +12,7 @@ import {MetricFixture} from "../utils/MetricFixture.sol";
 import {MetricVaultHandler, PoolReads} from "./MetricVaultHandler.sol";
 
 /// @notice Invariants of one Metric Lending Vault on a real Metric pool, under lenders, traders, force closes with
-/// the pool live, paused or unpriced, outside trading, re-centering, time and a moving reference.
+/// the pool live, paused or unpriced, outside trading, time and a moving reference.
 contract MetricVaultInvariantTest is MetricFixture {
     MetricVaultHandler internal handler;
 
@@ -21,23 +21,22 @@ contract MetricVaultInvariantTest is MetricFixture {
         deposit(lender, 20e18, 40_000e6);
         handler = new MetricVaultHandler(vault, vaultId, pool, provider, base, quote, outsider, address(this));
         targetContract(address(handler));
-        bytes4[] memory selectors = new bytes4[](16);
+        bytes4[] memory selectors = new bytes4[](15);
         selectors[0] = MetricVaultHandler.deposit.selector;
         selectors[1] = MetricVaultHandler.withdraw.selector;
-        selectors[2] = MetricVaultHandler.recenter.selector;
+        selectors[2] = MetricVaultHandler.open.selector;
         selectors[3] = MetricVaultHandler.open.selector;
-        selectors[4] = MetricVaultHandler.open.selector;
-        selectors[5] = MetricVaultHandler.close.selector;
-        selectors[6] = MetricVaultHandler.settle.selector;
-        selectors[7] = MetricVaultHandler.flag.selector;
-        selectors[8] = MetricVaultHandler.forceClose.selector;
+        selectors[4] = MetricVaultHandler.close.selector;
+        selectors[5] = MetricVaultHandler.settle.selector;
+        selectors[6] = MetricVaultHandler.flag.selector;
+        selectors[7] = MetricVaultHandler.forceClose.selector;
+        selectors[8] = MetricVaultHandler.swapOutside.selector;
         selectors[9] = MetricVaultHandler.swapOutside.selector;
-        selectors[10] = MetricVaultHandler.swapOutside.selector;
-        selectors[11] = MetricVaultHandler.moveReference.selector;
-        selectors[12] = MetricVaultHandler.warp.selector;
-        selectors[13] = MetricVaultHandler.openThroughVenue.selector;
-        selectors[14] = MetricVaultHandler.closeThroughVenue.selector;
-        selectors[15] = MetricVaultHandler.withdrawThroughVenue.selector;
+        selectors[10] = MetricVaultHandler.moveReference.selector;
+        selectors[11] = MetricVaultHandler.warp.selector;
+        selectors[12] = MetricVaultHandler.openThroughVenue.selector;
+        selectors[13] = MetricVaultHandler.closeThroughVenue.selector;
+        selectors[14] = MetricVaultHandler.withdrawThroughVenue.selector;
         targetSelector(StdInvariant.FuzzSelector({addr: address(handler), selectors: selectors}));
     }
 
@@ -189,7 +188,6 @@ contract MetricVaultInvariantTest is MetricFixture {
         emit log_named_uint("settles", handler.settles());
         emit log_named_uint("flags", handler.flags());
         emit log_named_uint("outside swaps", handler.outsideSwaps());
-        emit log_named_uint("recenters that moved", handler.recenters());
         emit log_named_uint("open positions", handler.openCount());
         emit log_named_uint("dilution checks", handler.dilutionChecks());
         emit log_named_uint("refused: Insolvent", handler.refusals(IMetricLendingVault.Insolvent.selector));
@@ -211,10 +209,11 @@ contract MetricVaultInvariantTest is MetricFixture {
         );
     }
 
-    /// @notice Refreshes the holdings (`recenter` ends with `refresh`), reads them independently, removes the whole
-    /// position as the vault, and reverts with the results so nothing persists.
+    /// @notice Refreshes the holdings through a small deposit (every vault action ends with `refresh`; between the
+    /// handler's actions the pool is live and priced), reads them independently, removes the whole position as the
+    /// vault, and reverts with the results so nothing persists.
     function probeHoldings() external {
-        vault.recenter(vaultId);
+        deposit(lender, 0, 1e6);
         Venue memory venue = vault.venueOf(vaultId);
         uint256 binCount = vault.parametersOf(vaultId).binCount;
         (uint256 read0, uint256 read1) = PoolReads.holdings(

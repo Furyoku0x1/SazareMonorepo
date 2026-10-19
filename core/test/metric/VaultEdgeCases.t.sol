@@ -668,8 +668,6 @@ contract VaultEdgeCasesTest is MakerFixture {
         vm.expectRevert(IMetricLendingVault.UnknownVault.selector);
         vault.withdraw(unknownVaultId, 1, 0, 0, lender);
         vm.expectRevert(IMetricLendingVault.UnknownVault.selector);
-        vault.recenter(unknownVaultId);
-        vm.expectRevert(IMetricLendingVault.UnknownVault.selector);
         vault.payProtocol(unknownVaultId);
         vm.expectRevert(IMetricLendingVault.UnknownVault.selector);
         vault.depositOrder(unknownVaultId, LEVEL_10X, true, 1_000e6, 0, lender);

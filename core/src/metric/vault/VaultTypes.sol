@@ -41,8 +41,6 @@ struct VaultParameters {
     uint128 minBorrowNotional;
     /// @notice Metric bins the vault places idle capital in, at most `MetricVenue.MAX_BINS`; even.
     uint8 binCount;
-    /// @notice How far, in bins, the active bin may drift from the window's center before re-centering moves it.
-    uint8 recenterDistance;
     /// @notice The most of a bin's shares the vault may hold, where others hold some; 10,000 for no cap.
     uint16 weightCapBps;
 }
@@ -102,8 +100,7 @@ struct Stream {
 }
 
 /// @notice The vault's liquidity in its Metric pool.
-/// @dev All of it lies in the window `[lowestBin, lowestBin + binCount)`; re-centering moves the window only after
-/// emptying the bins it leaves.
+/// @dev All of it lies in the window `[lowestBin, lowestBin + binCount)`, fixed at the first placement.
 struct Venue {
     int16 lowestBin;
     /// @dev Whether the window has been set; it is set at the first placement, centered on the active bin.

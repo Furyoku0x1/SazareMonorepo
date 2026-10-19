@@ -204,7 +204,7 @@ contract GapPoolsIsolationTest is GapPoolsBase {
         _assertCustody();
     }
 
-    /// @dev Every action on the first vault (deposit, outside swap and re-centering, opens with and without an entry
+    /// @dev Every action on the first vault (deposit, outside swap, opens with and without an entry
     /// swap, partial and full closes, a force close buying its shortfall, protocol payment and a gathering withdrawal)
     /// leaves the second vault's ledger, venue, accrual, debts, position, Metric shares and pool exactly as they were,
     /// while the shared quote balance stays split between the two ledgers. The singleton holds every vault's quote in
@@ -262,11 +262,9 @@ contract GapPoolsIsolationTest is GapPoolsBase {
         vm.prank(trader);
         uint256 positionId = vault.open(_longRequest(acting.vaultId, 100e6, 0));
         _check("open");
-        // Buying base walks the acting pool's cursor several bins up, past the re-centering distance.
+        // Buying base walks the acting pool's cursor several bins up.
         (int128 baseOut,) = outsider.swap(acting.pool, false, int128(int256(250_000e6)));
         _check("outside swap");
-        assertFalse(vault.recenter(acting.vaultId), "a pushed cursor does not move the acting window");
-        _check("recenter");
         // Selling it back returns the cursor near the band, so a later entry swap is not priced above it.
         outsider.swap(acting.pool, true, -baseOut);
         _check("outside swap back");

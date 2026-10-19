@@ -28,7 +28,7 @@ contract ReentrantVenue is ISwapVenue {
     }
 
     function swapForVault(address, address, uint256, bytes calldata) external {
-        vault.recenter(vaultId);
+        vault.payProtocol(vaultId);
     }
 }
 

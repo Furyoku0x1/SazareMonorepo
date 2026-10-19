@@ -42,17 +42,18 @@ contract BacktestCrossCheckTest is VaultFixture {
         vm.warp(start + 6 days);
         _close(longC);
         vm.warp(start + 10 days);
-        // A checkpoint releases the fully vested income into the buffer.
-        vault.recenter(checkId);
         Ledger memory ledger = vault.ledgerOf(checkId);
         Stream memory stream = vault.streamOf(checkId);
-        assertEq(stream.remaining0 + stream.remaining1, 0, "all income vested");
+        // All income has vested. No action has run since the last close, so it still sits in the stream; the next
+        // checkpoint moves all of it to the buffer, which is what the simulator reports.
+        assertLe(stream.vestingEnd0, block.timestamp, "token0 income vested");
+        assertLe(stream.vestingEnd1, block.timestamp, "token1 income vested");
         console2.log(
             string.concat(
                 "crosscheck|buffer0=",
-                vm.toString(ledger.buffer0),
+                vm.toString(uint256(ledger.buffer0) + stream.remaining0),
                 "|buffer1=",
-                vm.toString(ledger.buffer1),
+                vm.toString(uint256(ledger.buffer1) + stream.remaining1),
                 "|treasury1=",
                 vm.toString(ledger.treasury1)
             )

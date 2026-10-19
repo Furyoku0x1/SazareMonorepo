@@ -369,17 +369,22 @@ contract GapCallbacksTest is MetricFixture {
     /// vault call that places.
     function refusedPlacementsInOneTransaction(InsideSwapCallback caller) external {
         probe.setMode(ProbeMode.RefuseAdds);
-        _depositInto(probedVaultId, 0, 50_000e6);
+        // The caller holds the shares, so it can withdraw from inside the swap callback below.
+        vm.prank(lender);
+        vault.deposit(probedVaultId, 0, 50_000e6, 0, address(caller));
         probe.setMode(ProbeMode.Passive);
         assertEq(vault.ledgerOf(probedVaultId).buffer1, 50_000e6, "the refused add left the deposit in the buffer");
         assertEq(vault.venueOf(probedVaultId).holdings1, 0, "nothing placed");
         _assertNoExpectationLeft(address(probedPool));
-        caller.swapAndCall(probedPool, abi.encodeCall(vault.recenter, (probedVaultId)));
-        assertTrue(caller.succeeded(), "the recenter caught Metric's refusal");
-        assertEq(vault.ledgerOf(probedVaultId).buffer1, 50_000e6, "Metric's lock refused the add");
+        // With nothing lent a withdrawal needs no price, so it reaches its placement inside the swap callback.
+        uint256 shares = vault.sharesOf(probedVaultId, address(caller)) / 10_000;
+        caller.swapAndCall(probedPool, abi.encodeCall(vault.withdraw, (probedVaultId, shares, 0, 0, address(caller))));
+        assertTrue(caller.succeeded(), "the withdrawal caught Metric's refusal");
+        assertEq(vault.venueOf(probedVaultId).holdings1, 0, "Metric's lock refused the add");
+        assertGt(vault.ledgerOf(probedVaultId).buffer1, 49_990e6, "the rest waits in the buffer");
         _assertNoExpectationLeft(address(probedPool));
         // Another vault call, outside the lock: it sets, and is paid on, its own expectation.
-        vault.recenter(probedVaultId);
+        _depositInto(probedVaultId, 0, 1e6);
         assertLt(vault.ledgerOf(probedVaultId).buffer1, 1_000e6, "placed once Metric accepts the add");
         _assertNoExpectationLeft(address(probedPool));
     }

@@ -56,7 +56,7 @@ struct Market {
 }
 
 /// @notice Edge cases G16 (tokens of 6/18, 8/6 and 18/18 decimals, at ordinary prices and near the raw-price bounds)
-/// and G17 (gas of a full 32-bin window's exit, re-centering and force close) from the spec's untested table.
+/// and G17 (gas of a full 32-bin window's exit and force close) from the spec's untested table.
 /// @dev Metric scales every token to 18 decimals with `scale = 10^(18 − decimals)`, so the raw price is the whole
 /// price times `scale0 / scale1`. The vault refuses raw prices outside [2^-64, 2^64): the ceiling is reachable for
 /// 6/18 and 18/18, the floor for 8/6 and 18/18. A 6/18 floor needs a Q64 reference under one unit, and an 8/6 ceiling
@@ -71,8 +71,6 @@ contract GapDecimalsAndGasTest is MetricFixture {
     uint256 internal constant OUTSIDE_BINS = 40;
     uint8 internal constant NARROW_WINDOW_BINS = 16;
     uint8 internal constant WIDE_WINDOW_BINS = 32;
-    /// @dev `MetricVenue.MAX_RECENTER_BINS`.
-    int256 internal constant MAX_RECENTER_BINS = 4;
     /// @dev The vault's raw-price floor, `VaultPricing.MIN_SQRT_X96`.
     uint160 internal constant MIN_SQRT_X96 = 1 << 64;
     /// @dev About half of a 30M-gas block: an action that fits leaves room for the rest of the block.
@@ -236,31 +234,6 @@ contract GapDecimalsAndGasTest is MetricFixture {
         assertEq(vault.totalSharesOf(market.vaultId), 0, "no lender left");
         assertApproxEqRel(amount0, market.configuration.deposit0, 1e9, "token0 back");
         assertApproxEqRel(amount1, market.configuration.deposit1, 1e9, "token1 back");
-        _assertLedgerOf(market);
-    }
-
-    /// @dev After outside buying lifts the cursor well past the window's center, a re-centering call leaves the window
-    /// where it is, since the cursor is off the reference (audit finding X-1), and costs little. Measured cold, it
-    /// stays under the bound, and every share of the vault stays inside the window. A re-centering costlier than a
-    /// block can hold would leave the window stranded away from the price.
-    function test_gas_recenterAfterALargeJumpOnThirtyTwoBins() public {
-        Market memory market = _market(_wideWindowConfiguration());
-        _depositAndCheck(market);
-        _assertWindowFull(market);
-        // About 210 base sit in bins 0 to 11, so 450,000 quote lifts the cursor a dozen bins.
-        outsider.swap(market.pool, false, int128(int256(450_000e6)));
-        Venue memory venueBefore = vault.venueOf(market.vaultId);
-        int256 driftBins = int256(MetricState.cursor(address(market.pool)).binIndex) - venueBefore.lowestBin - 16;
-        assertGt(driftBins, 3 + MAX_RECENTER_BINS, "a jump past the re-centering distance plus a full step");
-        _coolMarket(market);
-        uint256 gasBefore = gasleft();
-        bool windowMoved = vault.recenter{gas: GAS_BOUND}(market.vaultId);
-        uint256 gasUsed = gasBefore - gasleft();
-        emit log_named_uint("re-center gas, 32-bin window, four-bin step", gasUsed);
-        assertLt(gasUsed, GAS_BOUND, "within the operational bound");
-        assertFalse(windowMoved, "a pushed cursor does not move the window");
-        assertEq(vault.venueOf(market.vaultId).lowestBin, venueBefore.lowestBin, "the window held still");
-        _assertInsideWindow(market);
         _assertLedgerOf(market);
     }
 

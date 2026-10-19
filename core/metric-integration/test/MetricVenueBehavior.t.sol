@@ -74,28 +74,6 @@ contract CallbackWithdrawer is IMetricOmmSwapCallback {
 contract MetricVenueBehaviorTest is MetricFixture {
     int24 internal constant PRICE_TICK = -200_311;
 
-    // ---------------------------------------------------------------- re-centering
-
-    /// @dev Audit finding X-1: outside trading that pushes the cursor well past the window's center must not drag the
-    /// window, or the pusher buys the vault's re-placed tokens back at a discount. Re-centering leaves it in place.
-    function test_recenter_doesNotFollowAPushedCursor() public {
-        deposit(lender, 20e18, 40_000e6);
-        Venue memory before = vault.venueOf(vaultId);
-        // Buying 60 base walks the cursor up through six of the outsider's ten-base bins, and the vault's.
-        outsider.swap(pool, false, int128(int256(250_000e6)));
-        int16 activeBin = MetricState.cursor(address(pool)).binIndex;
-        assertGt(activeBin, before.lowestBin + 8 + 3, "cursor beyond the re-centering distance");
-        assertFalse(vault.recenter(vaultId), "the window holds still");
-        assertEq(vault.venueOf(vaultId).lowestBin, before.lowestBin, "unchanged");
-        _assertAllInsideWindow();
-        assertLedger();
-    }
-
-    function test_recenter_noOpNearTheCenter() public {
-        deposit(lender, 20e18, 40_000e6);
-        assertFalse(vault.recenter(vaultId), "nothing to move");
-    }
-
     // ---------------------------------------------------------------- lender income
 
     /// @dev Outside round trips pay the spread into the bins; the vault's lenders hold more value than they put in.

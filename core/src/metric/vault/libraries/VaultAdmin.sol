@@ -131,7 +131,6 @@ library VaultAdmin {
         if (parameters.binCount < 2) revert IMetricLendingVault.InvalidParameters();
         if (parameters.binCount > MetricVenue.MAX_BINS) revert IMetricLendingVault.InvalidParameters();
         if (parameters.binCount % 2 != 0) revert IMetricLendingVault.InvalidParameters();
-        if (parameters.recenterDistance >= parameters.binCount / 2) revert IMetricLendingVault.InvalidParameters();
         if (parameters.weightCapBps == 0) revert IMetricLendingVault.InvalidParameters();
         if (parameters.weightCapBps > BPS) revert IMetricLendingVault.InvalidParameters();
     }

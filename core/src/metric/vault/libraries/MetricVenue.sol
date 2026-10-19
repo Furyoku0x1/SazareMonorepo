@@ -18,7 +18,7 @@ import {VaultPricing} from "./VaultPricing.sol";
 import {VenueSwap} from "./VenueSwap.sol";
 
 /// @notice The vault's idle capital in its Metric pool: placement around the active bin, withdrawal from the edges,
-/// re-centering, and reads of what the position holds.
+/// and reads of what the position holds.
 /// @dev A linked library: its public functions are delegatecalled from the vault's other libraries, so they run in the
 /// singleton's context and keep the callers small. Every bin the vault holds lies in its window. Deposits go to the window's bins on the side of the cursor that
 /// holds each token, never to the active bin, since Metric picks a deposit's token by the bin's side of the cursor at
@@ -29,8 +29,6 @@ library MetricVenue {
 
     /// @dev Bounds every loop over the window. Fits the uint8 `binCount`.
     uint256 internal constant MAX_BINS = 32;
-    /// @dev The most bins one re-centering moves, which bounds its removal and placement work.
-    uint256 internal constant MAX_RECENTER_BINS = 4;
     uint256 internal constant BPS = 10_000;
     uint256 internal constant E18 = 1e18;
 
@@ -124,19 +122,20 @@ library MetricVenue {
         read.anchored1 += bin1;
     }
 
-    /// @notice Places the lenders' buffer in the window's bins, first moving the window toward the active bin if it
-    /// has drifted (see `recenter`). What a bin cannot take (below Metric's minimum share delta, or past the weight
-    /// cap) stays in the buffer. Every action that moves the vault's Metric holdings ends here, so the holdings are
-    /// re-read last: the next accrual interval samples them after the action's own swaps and placement.
-    /// @dev Placement and window moves run only while the cursor's bin holds the oracle reference; otherwise the
-    /// tokens wait in the buffer (audit finding X-1, see `_atReference`).
+    /// @notice Places the lenders' buffer in the window's bins. What a bin cannot take (below Metric's minimum share
+    /// delta, or past the weight cap) stays in the buffer. Every action that moves the vault's Metric holdings ends
+    /// here, so the holdings are re-read last: the next accrual interval samples them after the action's own swaps and
+    /// placement.
+    /// @dev Placement runs only while the cursor's bin holds the oracle reference; otherwise the tokens wait in the
+    /// buffer until the next action that places (audit finding X-1, see `_atReference`). The window never needs to
+    /// move: it is set once, centered on the reference bin, and Metric's bins keep their distance from the reference,
+    /// so the window follows the oracle by itself.
     function place(Vault storage vault, uint256 vaultId) public {
         address pool = vault.parameters.pool;
         if (pool == address(0)) return;
         MetricState.Cursor memory current = MetricState.cursor(pool);
         if (_atReference(pool, current)) {
             _recordReference(vault, pool, current);
-            _shift(vault, vaultId, current.binIndex);
             _place(vault, vaultId, current.binIndex);
         }
         refresh(vault, vaultId);
@@ -216,44 +215,6 @@ library MetricVenue {
         // An open's escrow check reads rates right after its release: they must count what just left (X-3).
         refresh(vault, vaultId);
         return vault.ledger.buffer0 >= need0 && vault.ledger.buffer1 >= need1;
-    }
-
-    /// @notice Moves the window toward the active bin once it has drifted more than `recenterDistance` bins from the
-    /// window's center, then places and re-reads the holdings. Every placement does the same move; this lets anyone
-    /// trigger it without another action. Returns whether the window moved. Like `place`, it does nothing while the
-    /// cursor is off the reference, so a pushed cursor cannot drag the window (audit finding X-1).
-    function recenter(Vault storage vault, uint256 vaultId) public returns (bool moved) {
-        address pool = vault.parameters.pool;
-        if (pool == address(0)) return false;
-        MetricState.Cursor memory current = MetricState.cursor(pool);
-        if (_atReference(pool, current)) {
-            _recordReference(vault, pool, current);
-            moved = _shift(vault, vaultId, current.binIndex);
-            _place(vault, vaultId, current.binIndex);
-        }
-        refresh(vault, vaultId);
-    }
-
-    /// @dev Moves the window at most MAX_RECENTER_BINS bins toward the active bin, emptying the bins it gives up. A
-    /// window far behind a jump catches up over several calls. Nothing moves if the pool refuses the removal.
-    function _shift(Vault storage vault, uint256 vaultId, int16 activeBin) private returns (bool) {
-        if (!vault.venue.windowSet) return false;
-        int256 lowest = vault.venue.lowestBin;
-        uint256 count = vault.parameters.binCount;
-        int256 drift = int256(activeBin) - (lowest + int256(count / 2));
-        uint256 distance = drift < 0 ? uint256(-drift) : uint256(drift);
-        if (distance <= vault.parameters.recenterDistance) return false;
-        uint256 shift = distance < MAX_RECENTER_BINS ? distance : MAX_RECENTER_BINS;
-        int256 newLowest = _clampWindow(vault, drift > 0 ? lowest + int256(shift) : lowest - int256(shift));
-        if (newLowest == lowest) return false;
-        // The vault's shares in the active bin can never all be removed, so a window holding the active bin must keep
-        // it. Outside the old window the vault holds nothing there, and the window may pass it by.
-        if (_inWindow(activeBin, lowest, count)) {
-            if (!_inWindow(activeBin, newLowest, count)) return false;
-        }
-        if (!_emptyOutside(vault, vaultId, newLowest)) return false;
-        vault.venue.lowestBin = int16(newLowest);
-        return true;
     }
 
     function _inWindow(int256 binIndex, int256 lowest, uint256 count) private pure returns (bool) {
@@ -772,26 +733,9 @@ library MetricVenue {
         return shares;
     }
 
-    /// @dev Empties every bin the window gives up when it moves to start at `newLowest`; the caller has checked the
-    /// vault holds nothing in the active bin among them. Returns whether the pool allowed it.
-    function _emptyOutside(Vault storage vault, uint256 vaultId, int256 newLowest) private returns (bool) {
-        Plan memory plan = _emptyPlan();
-        address pool = vault.parameters.pool;
-        uint256 count = vault.parameters.binCount;
-        // count <= MAX_BINS
-        for (uint256 offset = 0; offset < count; ++offset) {
-            int16 binIndex = int16(int256(vault.venue.lowestBin) + int256(offset));
-            if (_inWindow(binIndex, newLowest, count)) continue;
-            uint256 ours = MetricState.positionShares(pool, address(this), uint80(vaultId), binIndex);
-            if (ours == 0) continue;
-            _push(plan, binIndex, ours);
-        }
-        return _remove(vault, vaultId, plan);
-    }
-
-    /// @dev Returns false, changing nothing, if the pool refuses the removal; callers then see the buffer unchanged.
-    function _remove(Vault storage vault, uint256 vaultId, Plan memory plan) private returns (bool) {
-        if (plan.count == 0) return true;
+    /// @dev Changes nothing if the pool refuses the removal; the caller then sees the buffer unchanged.
+    function _remove(Vault storage vault, uint256 vaultId, Plan memory plan) private {
+        if (plan.count == 0) return;
         _trim(plan);
         (uint256 before0, uint256 before1) = _balances(vault);
         try IMetricPool(vault.parameters.pool)
@@ -800,10 +744,7 @@ library MetricVenue {
         ) {
             (uint256 after0, uint256 after1) = _balances(vault);
             _creditRemoval(vault, after0 - before0, after1 - before1);
-            return true;
-        } catch {
-            return false;
-        }
+        } catch {}
     }
 
     /// @dev Credits what actually arrived from a removal, not what the pool reports (audit findings B1 and B2).

@@ -314,15 +314,16 @@ contract GapLendersTest is VaultFixture {
     /// vesting at the exit.
     function _assertLeaverForgoesUnvested(uint256 exitAt) internal returns (uint256 unvestedAtExit) {
         vm.warp(exitAt);
-        // A checkpoint, as the withdrawal's own: what has vested joins the buffer.
-        vault.recenter(vaultId);
-        unvestedAtExit = vault.streamOf(vaultId).remaining1;
+        // Release moves income from the stream to the buffer, so this sum is the lenders', released or not.
+        uint256 lenders1 = uint256(vault.ledgerOf(vaultId).buffer1) + vault.streamOf(vaultId).remaining1;
         uint256 shares = vault.sharesOf(vaultId, lender);
         uint256 ownershipWad = FullMath.mulDiv(shares, WAD, vault.totalSharesOf(vaultId) + VIRTUAL_SHARES);
-        uint256 vestedShare = FullMath.mulDiv(vault.ledgerOf(vaultId).buffer1, ownershipWad, WAD);
         (, uint256 leaver1) = _redeemAll(lender);
-        assertEq(leaver1, vestedShare, "a share of vested capital only");
-        assertEq(vault.streamOf(vaultId).remaining1, unvestedAtExit, "the unvested income stays");
+        // The withdrawal's own checkpoint released what had vested into the buffer, which then paid the leaver.
+        unvestedAtExit = vault.streamOf(vaultId).remaining1;
+        uint256 vestedAtExit = vault.ledgerOf(vaultId).buffer1 + leaver1;
+        assertEq(leaver1, FullMath.mulDiv(vestedAtExit, ownershipWad, WAD), "a share of vested capital only");
+        assertEq(vestedAtExit + unvestedAtExit, lenders1, "the unvested income stays");
         vm.warp(exitAt + 2 days);
         (, uint256 stayer1) = _redeemAll(otherLender);
         assertApproxEqAbs(stayer1, leaver1 + unvestedAtExit, ROUND_TRIP_UNITS, "the stayer receives it");
@@ -348,8 +349,9 @@ contract GapLendersTest is VaultFixture {
         vm.warp(block.timestamp + 30 days);
         _closeAtBid(firstPositionId);
         vm.warp(block.timestamp + 12 hours);
-        vault.recenter(vaultId);
-        unvestedBefore = vault.streamOf(vaultId).remaining1;
+        // The stream vests linearly over the day, so half of what the first close funded is still unvested.
+        uint256 funded = vault.streamOf(vaultId).remaining1;
+        unvestedBefore = funded - funded * 12 hours / 1 days;
         assertGt(unvestedBefore, 0, "half vested");
         _closeAtBid(secondPositionId);
         assertEq(vault.streamOf(vaultId).vestingEnd1, block.timestamp + 1 days, "vesting restarts");

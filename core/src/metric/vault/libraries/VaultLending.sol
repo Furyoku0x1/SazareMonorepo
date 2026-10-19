@@ -117,13 +117,6 @@ library VaultLending {
         emit IMetricLendingVault.Withdrawn(vaultId, msg.sender, amount0, amount1, burned);
     }
 
-    /// @notice Moves the vault's Metric window toward the active bin. Anyone may call.
-    function recenter(VaultStore storage store, uint256 vaultId) external returns (bool moved) {
-        Vault storage vault = _vault(store, vaultId);
-        VaultAccrual.checkpoint(vault, vaultId);
-        return MetricVenue.recenter(vault, vaultId);
-    }
-
     /// @notice The vault's value for deposits: idle at the ask plus the debts' holdings at the ask, rounded up.
     function valueHigh(Vault storage vault, uint160 sqrtAskX96) internal view returns (uint256) {
         uint256 idleValue =

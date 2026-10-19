@@ -302,25 +302,21 @@ contract MetricVaultFuzzTest is MetricFixture {
         _assertAllInsideWindow();
     }
 
-    // ---------------------------------------------------------------- re-centering after a jump
+    // ---------------------------------------------------------------- placement after a jump
 
-    /// @dev Audit finding X-1: however far outside trading pushes the cursor, re-centering never moves the window and
-    /// a deposit waits in the buffer, so the vault's tokens never land on the wrong side of the oracle price. Every
+    /// @dev Audit finding X-1: however far outside trading pushes the cursor, a deposit waits in the buffer and the
+    /// window holds still, so the vault's tokens never land on the wrong side of the oracle price. Every
     /// share stays inside the window and the ledger holds; once the trade is reversed, a deposit places again.
-    function testFuzz_recenter_neverFollowsAPushedCursor(bool up, uint256 sizeSeed) public {
+    function testFuzz_pushedCursor_depositWaitsForTheReference(bool up, uint256 sizeSeed) public {
         deposit(lender, 20e18, 40_000e6);
         Venue memory before = vault.venueOf(vaultId);
         uint256 outsiderBase = base.balanceOf(address(outsider));
         if (up) outsider.swap(pool, false, int128(int256(bound(sizeSeed, 150_000e6, 800_000e6))));
         else outsider.swap(pool, true, int128(int256(bound(sizeSeed, 75e18, 400e18))));
-        // ten calls: the old window caught up four bins a call
-        for (uint256 call = 0; call < 10; ++call) {
-            assertFalse(vault.recenter(vaultId), "never moves toward a pushed cursor");
-        }
-        assertEq(vault.venueOf(vaultId).lowestBin, before.lowestBin, "the window held still");
         uint256 buffer1Before = vault.ledgerOf(vaultId).buffer1;
         deposit(lender, 0, 10_000e6);
         assertEq(vault.ledgerOf(vaultId).buffer1, buffer1Before + 10_000e6, "the deposit waits in the buffer");
+        assertEq(vault.venueOf(vaultId).lowestBin, before.lowestBin, "the window held still");
         _assertAllInsideWindow();
         assertLedger();
         // Reverse the trade: the cursor returns to the reference and the waiting quote is placed.

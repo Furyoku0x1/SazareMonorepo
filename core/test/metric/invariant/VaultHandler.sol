@@ -9,7 +9,8 @@ import {
     IncreaseRequest,
     Ledger,
     OpenRequest,
-    Position
+    Position,
+    Stream
 } from "../../../src/metric/vault/VaultTypes.sol";
 import {IMetricLendingVault} from "../../../src/metric/vault/interfaces/IMetricLendingVault.sol";
 import {DebtTotals, VaultMath} from "../../../src/metric/vault/libraries/VaultMath.sol";
@@ -136,8 +137,6 @@ contract VaultHandler is VaultFixture {
         uint256 shares = vault.sharesOf(someVaultId, someLender) * bound(fractionWad, 0.01e18, WAD) / WAD;
         if (shares == 0) return;
         bytes32[VAULT_COUNT] memory before = _snapshot();
-        // For a vault without a pool, recenter only checkpoints; the withdrawal then sees exactly the state priced here.
-        vault.recenter(someVaultId);
         uint160 sqrtBidX96 = source.sqrtBidX96();
         uint256 sharePriceNumerator = _valueLow(someVaultId, sqrtBidX96) + VIRTUAL_VALUE;
         uint256 sharePriceDenominator = vault.totalSharesOf(someVaultId) + VIRTUAL_SHARES;
@@ -612,10 +611,34 @@ contract VaultHandler is VaultFixture {
     }
 
     /// @dev `VaultLending.valueLow` for a vault without a pool, whose idle capital is its buffer.
+    /// @dev The vault's value as the next action's checkpoint sees it, so a withdrawal is priced on exactly this state.
     function _valueLow(uint256 someVaultId, uint160 sqrtBidX96) private view returns (uint256) {
-        Ledger memory ledger = vault.ledgerOf(someVaultId);
+        (uint256 buffer0, uint256 buffer1) = _bufferAtNow(someVaultId);
         (uint256 debtValue,) = vault.debtValuesAt(someVaultId, sqrtBidX96);
-        return VaultMath.valueInToken1(ledger.buffer0, ledger.buffer1, sqrtBidX96, false) + debtValue;
+        return VaultMath.valueInToken1(buffer0, buffer1, sqrtBidX96, false) + debtValue;
+    }
+
+    /// @dev The buffer once a checkpoint now has released each stream's part vested since the last one, as
+    /// `VaultAccrual.release` does. With no lenders, or no time passed, nothing is released.
+    function _bufferAtNow(uint256 someVaultId) private view returns (uint256 buffer0, uint256 buffer1) {
+        Ledger memory ledger = vault.ledgerOf(someVaultId);
+        buffer0 = ledger.buffer0;
+        buffer1 = ledger.buffer1;
+        uint256 from = vault.accrualOf(someVaultId).updatedAt;
+        if (block.timestamp == from) return (buffer0, buffer1);
+        if (vault.totalSharesOf(someVaultId) == 0) return (buffer0, buffer1);
+        Stream memory stream = vault.streamOf(someVaultId);
+        buffer0 += _releasable(stream.remaining0, stream.vestingEnd0, from);
+        buffer1 += _releasable(stream.remaining1, stream.vestingEnd1, from);
+    }
+
+    function _releasable(uint256 remaining, uint256 vestingEnd, uint256 from) private view returns (uint256) {
+        if (remaining == 0) return 0;
+        if (vestingEnd <= from) return remaining;
+        uint256 elapsedSeconds = block.timestamp - from;
+        uint256 leftSeconds = vestingEnd - from;
+        if (elapsedSeconds >= leftSeconds) return remaining;
+        return remaining * elapsedSeconds / leftSeconds;
     }
 
     /// @dev The closer's reward is a share of what is left after repayment, so it can never exceed that share of the

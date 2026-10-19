@@ -284,9 +284,10 @@ contract GapMakerFillsTest is MetricFixture {
         }
     }
 
-    /// @dev Re-reads the passive holdings through a lender-side call and compares them with the pool's shares.
+    /// @dev Re-reads the passive holdings through a lender-side call (a small deposit, which ends with a refresh) and
+    /// compares them with the pool's shares.
     function _assertHoldingsMatchShares() internal {
-        vault.recenter(vaultId);
+        deposit(lender, 0, 1e6);
         (uint256 amount0, uint256 amount1) = _poolHoldings();
         Venue memory venue = vault.venueOf(vaultId);
         assertEq(venue.holdings0, amount0, "cached base holdings match the pool's shares");

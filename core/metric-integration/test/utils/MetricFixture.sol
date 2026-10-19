@@ -156,7 +156,6 @@ abstract contract MetricFixture is Test {
         parameters.utilizationCeilingBps = 9_000;
         parameters.minBorrowNotional = 100e6;
         parameters.binCount = 16;
-        parameters.recenterDistance = 3;
         parameters.weightCapBps = 10_000;
     }
 
