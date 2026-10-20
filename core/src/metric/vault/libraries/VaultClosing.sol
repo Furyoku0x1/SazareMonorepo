@@ -2,7 +2,6 @@
 pragma solidity 0.8.37;
 
 import {FullMath} from "v4-core/src/libraries/FullMath.sol";
-import {SqrtPriceMath} from "v4-core/src/libraries/SqrtPriceMath.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {PositionIndex} from "./PositionIndex.sol";
 import {ChargeStart, CloseRequest, ExitSwap, Position, Vault, VaultStore} from "../VaultTypes.sol";
@@ -253,7 +252,8 @@ library VaultClosing {
             VaultPricing.requireNoPriceWaitOver(position.delinquentSince, vault.parameters.graceSeconds);
             return false;
         }
-        (uint256 target0, uint256 target1) = _target(position.liquidity, sqrtLowerX96, sqrtUpperX96, sqrtBidX96);
+        (uint256 target0, uint256 target1) =
+            VaultMath.repaymentTarget(position.liquidity, sqrtLowerX96, sqrtUpperX96, sqrtBidX96);
         // The targets always pass; a failure would be a rounding surprise, and scaling needs no price.
         if (!VaultMath.repays(target0, target1, position.liquidity, sqrtLowerX96, sqrtUpperX96)) return false;
         if (!_buyShortfall(vault, position, target0, target1, closing)) return false;
@@ -264,21 +264,6 @@ library VaultClosing {
         closing.leftover0 = position.reserve0 - target0;
         closing.leftover1 = position.reserve1 - target1;
         return true;
-    }
-
-    function _target(uint128 liquidity, uint160 sqrtLowerX96, uint160 sqrtUpperX96, uint160 sqrtPriceX96)
-        private
-        pure
-        returns (uint256 target0, uint256 target1)
-    {
-        uint160 inside = sqrtPriceX96 < sqrtLowerX96 ? sqrtLowerX96 : sqrtPriceX96;
-        inside = inside > sqrtUpperX96 ? sqrtUpperX96 : inside;
-        target0 = SqrtPriceMath.getAmount0Delta(inside, sqrtUpperX96, liquidity, true);
-        target1 = SqrtPriceMath.getAmount1Delta(sqrtLowerX96, inside, liquidity, true);
-        // A unit of each token the range holds at this price, for rounding; none of a token it does not hold, so a
-        // position past its range never needs a swap for a unit its debt does not need (as `MakerClosing._legTarget`).
-        if (target0 != 0) target0 += 1;
-        if (target1 != 0) target1 += 1;
     }
 
     function _buyShortfall(

@@ -107,6 +107,23 @@ library VaultMath {
         amount1 = SqrtPriceMath.getAmount1Delta(sqrtLowerX96, sqrtPriceX96, liquidity, false);
     }
 
+    /// @notice What repays the range at a price: its holdings there rounded up, plus a unit of each token it holds.
+    /// @dev Always passes `repays` for ranges within `MAX_RANGE_TICK` (Lean `target_repays_in_range`). Holdings rounded
+    /// down plus a unit can fail at a range's end (finding C5). No unit of a token the range does not hold, so a range
+    /// past its end never needs a swap for a unit its debt does not need.
+    function repaymentTarget(uint128 liquidity, uint160 sqrtLowerX96, uint160 sqrtUpperX96, uint160 sqrtPriceX96)
+        internal
+        pure
+        returns (uint256 target0, uint256 target1)
+    {
+        uint160 inside = sqrtPriceX96 < sqrtLowerX96 ? sqrtLowerX96 : sqrtPriceX96;
+        inside = inside > sqrtUpperX96 ? sqrtUpperX96 : inside;
+        target0 = SqrtPriceMath.getAmount0Delta(inside, sqrtUpperX96, liquidity, true);
+        target1 = SqrtPriceMath.getAmount1Delta(sqrtLowerX96, inside, liquidity, true);
+        if (target0 != 0) target0 += 1;
+        if (target1 != 0) target1 += 1;
+    }
+
     /// @notice The tokens released at open: the range's cheapest holdings across the price band, `(x(ask), y(bid))`.
     /// @dev `x` falls and `y` rises with price, so this is at most the holdings at any price inside the band. Lenders
     /// lose nothing at open while the true price is inside it.

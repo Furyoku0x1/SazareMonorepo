@@ -21,8 +21,10 @@ library VaultPricing {
     /// without a price (the owner's decision): pauses are usually brief, and scaling hands lenders whichever tokens the
     /// reserves hold rather than the debt's holdings at the bid, at a loss to one side or the other.
     uint256 internal constant NO_PRICE_WAIT_SECONDS = 30 days;
-    /// @dev Bands are kept inside the ranges' price bounds, so every valuation stays in VaultMath's exact domain.
-    uint160 internal constant MIN_SQRT_X96 = 18446744073709551616; // 2^64, tick -443636
+    /// @dev Bands are kept inside the ranges' price bounds, so every valuation stays in VaultMath's exact domain. The
+    /// floor is the lowest range end's price, `getSqrtPriceAtTick(-MAX_RANGE_TICK)`, just above 2^64: at 2^64 a price
+    /// lies in the tick below it, and the charge tree counted it inside a range at that tick, not past it (finding C6).
+    uint160 internal constant MIN_SQRT_X96 = 18447090764788882728; // tick -443636
     uint160 internal constant MAX_SQRT_X96 = 340282366920938463463374607431768211455; // just under 2^128
 
     /// @notice The band: from the Metric pool when the vault has one, otherwise from its price source. Reverts when

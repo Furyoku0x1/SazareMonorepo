@@ -335,8 +335,9 @@ library MakerClosing {
         _applySwap(vault, position, !buyToken0, paid, received);
     }
 
-    /// @dev Each leg's holdings at a price plus a unit of each held token, and whether every leg's amounts pass its
-    /// repayment rule; they always should, and a failure sends the force close to the scaling fallback before any swap.
+    /// @dev Each leg's repayment target at a price, and whether every leg's target passes its repayment rule; it always
+    /// does for legs within `MAX_RANGE_TICK` (Lean `target_repays_in_range`), and a failure would send the force close
+    /// to the scaling fallback before any swap.
     function _holdingsAt(
         VaultStore storage store,
         Vault storage vault,
@@ -357,16 +358,14 @@ library MakerClosing {
         }
     }
 
-    /// @dev One leg's holdings at a price plus a unit of each held token, and whether they pass its repayment rule.
+    /// @dev One leg's repayment target at a price, and whether it passes the leg's repayment rule.
     function _legTarget(Vault storage vault, Leg storage leg, uint160 sqrtPriceX96)
         private
         view
         returns (uint256 amount0, uint256 amount1, bool repaid)
     {
         (uint160 sqrtLowerX96, uint160 sqrtUpperX96) = MakerAccounting.range(vault.book, leg.bucketId);
-        (amount0, amount1) = VaultMath.holdingsAt(leg.liquidity, sqrtLowerX96, sqrtUpperX96, sqrtPriceX96);
-        if (amount0 != 0) amount0 += 1;
-        if (amount1 != 0) amount1 += 1;
+        (amount0, amount1) = VaultMath.repaymentTarget(leg.liquidity, sqrtLowerX96, sqrtUpperX96, sqrtPriceX96);
         repaid = VaultMath.repays(amount0, amount1, leg.liquidity, sqrtLowerX96, sqrtUpperX96);
     }
 
