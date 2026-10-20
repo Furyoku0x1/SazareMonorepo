@@ -250,8 +250,9 @@ theorem walkRates_single_version (fromTime untilTime yearlyRate : Nat) (h : from
       ⟨untilTime, untilTime - fromTime, growth yearlyRate (untilTime - fromTime)⟩ := by
   simp [walkRates, Nat.not_le.mpr h]
 
-/-- Appending a newer last boundary makes it the final checkpoint time. This
-requires that earlier boundaries do not exceed the actual checkpoint time. -/
+/-- Every visited boundary stays at or below the checkpoint time when all
+input boundaries and the initial cursor obey that bound. This proves an upper
+bound; exact arrival at the final boundary needs a separate result. -/
 theorem walkRates_final_bound (fromTime bound : Nat) (versions : List (Nat × Nat))
     (hfrom : fromTime ≤ bound) (hversions : ∀ version ∈ versions, version.1 ≤ bound) :
     (walkRates fromTime versions).finalTime ≤ bound := by
@@ -270,6 +271,40 @@ theorem walkRates_final_bound (fromTime bound : Nat) (versions : List (Nat × Na
 /-- The two rounded weights used by `VaultAccrual.charge`. -/
 def blended (delta0 delta1 weight0 : Nat) : Nat :=
   ceilDiv (delta0 * weight0) wad + ceilDiv (delta1 * (wad - weight0)) wad
+
+/-- The exact index-premium floor in VaultAccrual.charge, in WAD of raw token1. -/
+def indexPremium (maximum1 delta0 delta1 weight0 : Nat) : Nat :=
+  maximum1 * blended delta0 delta1 weight0 / 10 ^ 9
+
+theorem indexPremium_rounding (maximum1 delta0 delta1 weight0 : Nat) :
+    indexPremium maximum1 delta0 delta1 weight0 * 10 ^ 9 ≤
+        maximum1 * blended delta0 delta1 weight0 ∧
+      maximum1 * blended delta0 delta1 weight0 <
+        (indexPremium maximum1 delta0 delta1 weight0 + 1) * 10 ^ 9 := by
+  have h := Nat.mod_add_div (maximum1 * blended delta0 delta1 weight0) (10 ^ 9)
+  have hr := Nat.mod_lt (maximum1 * blended delta0 delta1 weight0) (by norm_num : 0 < 10 ^ 9)
+  unfold indexPremium
+  omega
+
+/-- A close rounds the complete source premium sum, not the realized component
+alone. If that complete amount is collected, the lender share still covers the
+realized component and surcharge. Escrow caps or forgiven arrears are separate. -/
+theorem complete_close_lender_coverage
+    (maximum1 delta0 delta1 weight0 carry realized surcharge protocol : Nat)
+    (hp : protocol < bps) :
+    realized * (bps + surcharge) ≤
+      lenderPart (ceilDiv (indexPremium maximum1 delta0 delta1 weight0 + carry +
+        grossUp realized surcharge protocol) wad) protocol * wad * bps := by
+  have hg := (grossUp_bounds realized surcharge protocol hp).1
+  have hu := (ceilDiv_bounds
+    (indexPremium maximum1 delta0 delta1 weight0 + carry + grossUp realized surcharge protocol)
+    wad wad_pos).1
+  have hl := lender_fraction_lower
+    (ceilDiv (indexPremium maximum1 delta0 delta1 weight0 + carry +
+      grossUp realized surcharge protocol) wad) protocol hp.le
+  have hm := Nat.mul_le_mul_right (bps - protocol) hu
+  have hlm := Nat.mul_le_mul_right wad hl
+  nlinarith
 
 theorem blended_rounding (delta0 delta1 weight0 : Nat) :
     delta0 * weight0 + delta1 * (wad - weight0) ≤ blended delta0 delta1 weight0 * wad ∧

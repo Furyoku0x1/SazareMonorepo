@@ -54,6 +54,11 @@ struct VaultParameters {
     /// last increase was at least `RealizedCharge.MIN_SURCHARGE_LEVERAGE`, in basis points (owner, 2026-10-19:
     /// ×1.03–1.05). Zero for none.
     uint16 highLeverageSurchargeBps;
+    /// @notice How far the active bin's far edge may lie from the oracle reference for the vault to place in it, in
+    /// millionths of the price. A sandwich that pushes the cursor and has the vault place there gains at most this on
+    /// each unit placed, so a pool with wide bins sets it under one bin's width, which keeps the active bin empty
+    /// (owner, 2026-10-19: 300 for 1 bp majors). Zero always keeps it empty.
+    uint32 activeBinEdgeE6;
 }
 
 /// @notice One version of the two premium curves and the time it took effect. Rate indices integrate each version over
@@ -107,11 +112,13 @@ struct ChargeStart {
     /// @dev Leverage at least `RealizedCharge.MIN_SURCHARGE_LEVERAGE` at the open or the last increase.
     bool highLeverage;
     /// @dev The trees' sums, at the start, over the intervals starting inside the range and below it, and the rent
-    /// over the intervals starting past it.
+    /// over the intervals starting below it and above it, one per side, so a change in what the position holds can
+    /// never subtract one side's rent from the other's.
     int256 rootInsideX96;
     int256 moveInsideX96;
     int256 moveBelowX96;
-    int256 rentPastBpsSeconds;
+    int256 rentBelowBpsSeconds;
+    int256 rentAboveBpsSeconds;
 }
 
 /// @notice The premium rate indices and the released amounts they are computed on.

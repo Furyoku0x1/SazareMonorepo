@@ -1,0 +1,296 @@
+{
+  "status": "Explicitly approved by the user on2026-10-19; approved isolated-copy runs started.",
+  "destination": "Anthropic Claude service, through the signed-in local Claude Code CLI",
+  "purpose": "Independent proof/source review and proposed FullMath inverse-seed Lean proof",
+  "total_bytes": 644623,
+  "files": [
+    {
+      "path": "core/proofs/metric/MetricProofs/Accrual.lean",
+      "bytes": 16954,
+      "sha256": "592cbd18c686136be8d6e95ad121daf40e1c7c920f2e625c4eef0331f277afee"
+    },
+    {
+      "path": "core/proofs/metric/MetricProofs/Allocation.lean",
+      "bytes": 7627,
+      "sha256": "e2f635071879bb45e5cce0f6bc31a1cc1e9d0d46c621dc4229fb0dc905e3fc65"
+    },
+    {
+      "path": "core/proofs/metric/MetricProofs/DebtValuation.lean",
+      "bytes": 25469,
+      "sha256": "1408ed37f20107a262739870fbbad7f51094bc3c548a3427d65e410ab61d5e37"
+    },
+    {
+      "path": "core/proofs/metric/MetricProofs/ForceClose.lean",
+      "bytes": 7379,
+      "sha256": "5cf80ecaf6127b0b9c9f5d80f2e26f9174e23e9c24b2fb5e51f3e18de99ec041"
+    },
+    {
+      "path": "core/proofs/metric/MetricProofs/ForceCloseIntegration.lean",
+      "bytes": 3399,
+      "sha256": "bd866e181d76c7a64d4c932a28235b3f997034b40382f50c96ae4f2d42239ab0"
+    },
+    {
+      "path": "core/proofs/metric/MetricProofs/FullMathCRT.lean",
+      "bytes": 9276,
+      "sha256": "5b2c4ea089e52d9dcfaedfcc7a4eb8e7384879662b5dbbbbd31b2fb209587c6b"
+    },
+    {
+      "path": "core/proofs/metric/MetricProofs/FullMathSteps.lean",
+      "bytes": 6545,
+      "sha256": "9d9cfede80917e35fa7e5304f1c9860c4d1a734bbf93c7f36d78591eba102a16"
+    },
+    {
+      "path": "core/proofs/metric/MetricProofs/LedgerOperations.lean",
+      "bytes": 13926,
+      "sha256": "d772d302948f023a0664e2f1c3389432934898ecae7491841ee835c40702857a"
+    },
+    {
+      "path": "core/proofs/metric/MetricProofs/MakerSafety.lean",
+      "bytes": 14072,
+      "sha256": "9035e6c6c16368fa357a044cdc335eb15ae06256e2970e7f726e14b91c75455b"
+    },
+    {
+      "path": "core/proofs/metric/MetricProofs/PositionOperations.lean",
+      "bytes": 14894,
+      "sha256": "a5af93a6eecb216aebe145e958f3a81fd1fa306ed42b34198e24a253122da17f"
+    },
+    {
+      "path": "core/proofs/metric/MetricProofs/RealizedCharge.lean",
+      "bytes": 21692,
+      "sha256": "0968f339a7646f20bf0c9829347203ab818221a65dbff85bcaebfbea3de9475f"
+    },
+    {
+      "path": "core/proofs/metric/MetricProofs/Repayment.lean",
+      "bytes": 10803,
+      "sha256": "d2fdfa436b3fa1b1d6d3239c045b9637e8f2359a18811efc70f881900ff26a08"
+    },
+    {
+      "path": "core/proofs/metric/MetricProofs/Rounding.lean",
+      "bytes": 10047,
+      "sha256": "36d17a6589ee1399823856f373cbeba7f04bbbc490a5069e4aa32e2128fa21fe"
+    },
+    {
+      "path": "core/proofs/metric/MetricProofs/Settlement.lean",
+      "bytes": 2470,
+      "sha256": "d34a4adc04d64011fbb20267f2dd95d277c16d398fb0fa5845a930b5fe57cff8"
+    },
+    {
+      "path": "core/proofs/metric/MetricProofs/Solvency.lean",
+      "bytes": 11882,
+      "sha256": "414f23ea1bffd1a9e22cd2471644fa8a764daf9b0ea376da568228f6429dda82"
+    },
+    {
+      "path": "core/proofs/metric/README.md",
+      "bytes": 11460,
+      "sha256": "716308af79e59984c31f33c9aecd12d42b36f85e16b3ebe3ba45a83df81249f6"
+    },
+    {
+      "path": "core/proofs/metric/MetricProofs.lean",
+      "bytes": 607,
+      "sha256": "0fca98eaeff5c358934810b57c107d928bc6f2dabd7159e71e2b72657cfa47a8"
+    },
+    {
+      "path": "core/proofs/metric/reviews/internal-math-review.md",
+      "bytes": 5191,
+      "sha256": "e4a5e1b83d564abac744a445bb86e82b2ae9b64ed2ea8cfbe5a88b085b609c86"
+    },
+    {
+      "path": "core/proofs/metric/reviews/internal-operations-review.md",
+      "bytes": 9326,
+      "sha256": "607b0a1cb5a44481de291f8396af402735baefaa98583b19fdc1e546f8a15a01"
+    },
+    {
+      "path": "core/proofs/metric/reviews/crt-independent-review.md",
+      "bytes": 3775,
+      "sha256": "25388f4b6f63ba53c48e462c9227f045f68c70493cd0aa53887b60518f8bd65c"
+    },
+    {
+      "path": "core/src/metric/price-providers/CLAMMPriceProvider.sol",
+      "bytes": 111,
+      "sha256": "4b427a42ace264da4f715b8d2aefe26c5d912afe69cb99852f530a6a9a558f0c"
+    },
+    {
+      "path": "core/src/metric/vault/MakerTypes.sol",
+      "bytes": 7743,
+      "sha256": "890b5fb8fbfcb2cb9cf4fbb0d244d630c998af2facbed698775b4d7ad8833878"
+    },
+    {
+      "path": "core/src/metric/vault/MetricLendingVault.sol",
+      "bytes": 17770,
+      "sha256": "aece0c11d743519ba1ce27e226ca28b2a1541e82e057a061e4ad0d6c0242b760"
+    },
+    {
+      "path": "core/src/metric/vault/VaultTypes.sol",
+      "bytes": 15446,
+      "sha256": "c1a169312a1541c70880ab6c77a82b6a0d04669924af508d790422049dcbc939"
+    },
+    {
+      "path": "core/src/metric/vault/interfaces/IMakerBook.sol",
+      "bytes": 2755,
+      "sha256": "bcd84c0af2ac59dfd2d3263e4eb62ffb94370dd47944799eab72559bfa16adb8"
+    },
+    {
+      "path": "core/src/metric/vault/interfaces/IMetricLendingVault.sol",
+      "bytes": 3975,
+      "sha256": "46fb1687f81714888949f57cea3a2fd8782ffae7ed9bc54c8945282a67db3956"
+    },
+    {
+      "path": "core/src/metric/vault/interfaces/IMetricPool.sol",
+      "bytes": 3502,
+      "sha256": "f6569181a41e7a62800c57d1074b9343eee405df20b09d4c5c38ae8c3087c536"
+    },
+    {
+      "path": "core/src/metric/vault/interfaces/ISwapVenue.sol",
+      "bytes": 777,
+      "sha256": "a0549f581b7cd5dd7ee7d2895776c5e5026b50b74bff9ed1045f502fd8e539bf"
+    },
+    {
+      "path": "core/src/metric/vault/interfaces/IVaultPriceSource.sol",
+      "bytes": 566,
+      "sha256": "6de22526d35e5dabfae026d9382598b698aaa025340271c993b728e3150f53f9"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/DebtValuation.sol",
+      "bytes": 9399,
+      "sha256": "9174ceb1ad8fb22a2471166836bfafd5c3a900e1f8c90dd7d46320195dc66d0b"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerAccounting.sol",
+      "bytes": 9838,
+      "sha256": "b55361f4109b0d8ed24ece3d474303f0be9ddc69011ea3fdfaf4e5ee9ba32582"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerBook.sol",
+      "bytes": 30924,
+      "sha256": "9950196fea3573ae50fe060dffa2a2012253cc815828eacaa327095b83aeb009"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerClosing.sol",
+      "bytes": 32214,
+      "sha256": "937a4f93d69ab2faf73afe9643d5c21bbc6558440b7fd33b67f3d02826176774"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerMath.sol",
+      "bytes": 13717,
+      "sha256": "ab6c65f52714691b48577b1e7c7ea6b572a01c6dc44cbf63f769591a851f81e6"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerPositions.sol",
+      "bytes": 23737,
+      "sha256": "188547225f3b489265c33ec53b39133f67d89e09b3f305d2e9b0b327de50b56e"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerSettlement.sol",
+      "bytes": 12039,
+      "sha256": "e3184d092836e5dba41003e52f608ef42240ff73ed7ce34e9e278a3949981083"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MetricPrice.sol",
+      "bytes": 10083,
+      "sha256": "fd468591ad01854268673f2d09b1605fe8eb7c4adb168703d285bd0007e3081b"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MetricState.sol",
+      "bytes": 3196,
+      "sha256": "1fe06b91c11fd8643e57cbfc0ae53fe892ee34361c0ac52efd690c4d8e1d90a2"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MetricVenue.sol",
+      "bytes": 49787,
+      "sha256": "e62f12a8f637f1e82201d4bd4a51b61743eddb7af4d71b5a1d1c41d91d6e3d6b"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/PositionIndex.sol",
+      "bytes": 1455,
+      "sha256": "42cc9890dc3e910bb148bc69d998f8ebc37898465627dafd401e8708d2e27b8c"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "bytes": 26043,
+      "sha256": "f2876126ee8b3de6eed5148bdfe99ca8367fa67fd221e6753d41e285619302cd"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultAccrual.sol",
+      "bytes": 11155,
+      "sha256": "34733ef50f77bae7880fd0addb723e398ccd2079effb93e6f342f45f3d97fff5"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultAdmin.sol",
+      "bytes": 12666,
+      "sha256": "0c757273190d15e51ba1df2c1ee89627b84bdfe6f2a22aa035a70c026de1e7c5"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultBook.sol",
+      "bytes": 6815,
+      "sha256": "a5693da0179127a21a5948abc9469e83e972fdaf9f24d8dd8ecbd25eb5bb4690"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultCallback.sol",
+      "bytes": 3653,
+      "sha256": "3720111f4cd4a41f8f6391ac0d619e540ff2a312aaa48f804d7f58611191b489"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultClosing.sol",
+      "bytes": 29094,
+      "sha256": "7cf2e6d99d73f3bae11db2389bc62f18eca657ef3fad74c5ec18ac38d6212b99"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultLedger.sol",
+      "bytes": 3880,
+      "sha256": "fe5d37b6e692e7fde171f2840b66a2696120f2f530973229182121d51544f70e"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultLending.sol",
+      "bytes": 10761,
+      "sha256": "87405abbb622366b4fb0cca617eba3842c085580dc093e899fd86639c38179bf"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultMath.sol",
+      "bytes": 12979,
+      "sha256": "9599371ab01a3689bcb64ad4f763bc2d8a91b264fe32321b65b199bb9909834a"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultPositions.sol",
+      "bytes": 23585,
+      "sha256": "132afc78b116f2bf8302319e60dbe8003f74c8215e5f2c8c296fa31f58474f89"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VaultPricing.sol",
+      "bytes": 9316,
+      "sha256": "105442bd1f2adace958d56003f121bec04a0cf87df65ef41dee4774e72e3a032"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/VenueSwap.sol",
+      "bytes": 1472,
+      "sha256": "bf9d6fb38b0b4b82adb2630d34114eefdcea2f4c1202d5a2ff213028afbc8101"
+    },
+    {
+      "path": "core/src/metric/vault/venues/RouterVenue.sol",
+      "bytes": 4290,
+      "sha256": "751fb4fff031d8c2a09ce9aa1a54d3e7ef528e45cc1e4326900ce8eab84caca5"
+    },
+    {
+      "path": "lib/v4-core/src/libraries/FullMath.sol",
+      "bytes": 5463,
+      "sha256": "a9607255a6fd604d9c92f6b7416811c38b9d86e5dfdb0c345a494ebd35f7a4a3"
+    },
+    {
+      "path": "lib/v4-core/src/libraries/SqrtPriceMath.sol",
+      "bytes": 14076,
+      "sha256": "42440c21bbab86c7eed4716b281ed5ca281cf14af8b5e06dc6dc3bc6864bcfdf"
+    },
+    {
+      "path": "lib/v4-core/src/libraries/TickMath.sol",
+      "bytes": 12382,
+      "sha256": "272d4f6d3ff9ae33596ebcdb84a71a3c2d4542ae8fb5c88ddf1aca8043f5d06b"
+    },
+    {
+      "path": "lib/v4-core/src/libraries/UnsafeMath.sol",
+      "bytes": 1165,
+      "sha256": "2de236e7ca0b9572a6b0184557565b6fd54e177224e202c727fe248785ede427"
+    }
+  ],
+  "public_reference_material": "Pinned public Lean/mathlib source may also be read to resolve theorem names. No credentials, environment secrets, unrelated repository files or external messages are part of the requested payload.",
+  "user_approval": "Yes, approve this code disclosure",
+  "snapshot_root": "/private/tmp/metric-claude-approved-payload-20261019"
+}

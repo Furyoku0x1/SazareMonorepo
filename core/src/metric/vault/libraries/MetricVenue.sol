@@ -51,6 +51,8 @@ library MetricVenue {
         uint256 count;
         uint256 cost0;
         uint256 cost1;
+        /// @dev Whether a placement may use the active bin: its far edge is within `activeBinEdgeE6` of the reference.
+        bool activeAllowed;
     }
 
     /// @notice Updates the cached holdings from the pool, and the holdings premium rates read: the same position as it
@@ -591,6 +593,7 @@ library MetricVenue {
     /// is planned first and the other side gets what that leaves.
     function _plan(Vault storage vault, uint256 vaultId, int16 activeBin) private view returns (Plan memory plan) {
         plan = _emptyPlan();
+        plan.activeAllowed = _activeAllowed(vault, activeBin);
         uint256 buffer0 = vault.ledger.buffer0;
         uint256 buffer1 = vault.ledger.buffer1;
         if (_side(vault, activeBin) < 0) {
@@ -613,13 +616,13 @@ library MetricVenue {
         uint256 otherBudget
     ) private view {
         if (amount == 0) return;
-        uint256 totalWeight = _sideWeight(vault, activeBin, tokenIndex);
+        uint256 totalWeight = _sideWeight(vault, activeBin, tokenIndex, plan.activeAllowed);
         if (totalWeight == 0) return;
         uint256 count = _windowBins(vault);
         // count <= MAX_BINS + 1
         for (uint256 offset = 0; offset < count; ++offset) {
             int16 binIndex = int16(int256(vault.venue.lowestBin) + int256(offset));
-            uint256 weight = _weight(vault, activeBin, binIndex, tokenIndex);
+            uint256 weight = _weight(vault, activeBin, binIndex, tokenIndex, plan.activeAllowed);
             if (weight == 0) continue;
             uint256 part = amount * weight / totalWeight;
             if (binIndex == activeBin) _planActive(vault, vaultId, plan, binIndex, tokenIndex, part, otherBudget);
@@ -719,7 +722,7 @@ library MetricVenue {
         return shares < limit ? shares : limit;
     }
 
-    function _sideWeight(Vault storage vault, int16 activeBin, uint256 tokenIndex)
+    function _sideWeight(Vault storage vault, int16 activeBin, uint256 tokenIndex, bool activeAllowed)
         private
         view
         returns (uint256 total)
@@ -728,7 +731,30 @@ library MetricVenue {
         // count <= MAX_BINS + 1
         for (uint256 offset = 0; offset < count; ++offset) {
             int16 binIndex = int16(int256(vault.venue.lowestBin) + int256(offset));
-            total += _weight(vault, activeBin, binIndex, tokenIndex);
+            total += _weight(vault, activeBin, binIndex, tokenIndex, activeAllowed);
+        }
+    }
+
+    /// @dev Whether the active bin may take a share: it lies in the window and its far edge is within the vault's
+    /// `activeBinEdgeE6` of the reference. That edge bounds what a sandwich gains on each unit the vault places there.
+    function _activeAllowed(Vault storage vault, int16 activeBin) private view returns (bool) {
+        if (!_inWindow(vault, activeBin)) return false;
+        return _activeEdgeE6(vault, activeBin) <= vault.parameters.activeBinEdgeE6;
+    }
+
+    /// @dev How far the active bin's far edge lies from the reference, in millionths of the price: the lengths of the
+    /// bins from the reference to that edge. With the reference inside its bin, that whole bin counts, which overstates
+    /// the distance and so errs toward leaving the active bin empty.
+    function _activeEdgeE6(Vault storage vault, int16 activeBin) private view returns (uint256 edgeE6) {
+        int256 referenceBin = vault.venue.referenceBin;
+        int256 fromBin = activeBin < referenceBin ? int256(activeBin) : referenceBin;
+        int256 toBin = activeBin < referenceBin ? referenceBin : int256(activeBin);
+        if (activeBin < referenceBin) {
+            if (vault.venue.referenceOnEdge) toBin -= 1;
+        }
+        // The active bin is in the window, so toBin - fromBin <= MAX_BINS + 1
+        for (int256 binIndex = fromBin; binIndex <= toBin; ++binIndex) {
+            edgeE6 += MetricState.bin(vault.parameters.pool, int16(binIndex)).lengthE6;
         }
     }
 
@@ -736,13 +762,16 @@ library MetricVenue {
     /// the side's other bins, so four bins a side split a side 40/20/20/20 (owner, 2026-10-19, replacing a 4:3:2:1
     /// pyramid). The active bin counts on its side of the reference. Zero for the bin holding the reference, which
     /// straddles the price, and for any other bin Metric would not give this token, on the wrong side of the cursor.
-    function _weight(Vault storage vault, int16 activeBin, int16 binIndex, uint256 tokenIndex)
+    function _weight(Vault storage vault, int16 activeBin, int16 binIndex, uint256 tokenIndex, bool activeAllowed)
         private
         view
         returns (uint256)
     {
         if (binIndex != activeBin) {
             if (!_holds(activeBin, binIndex, tokenIndex)) return 0;
+        }
+        if (binIndex == activeBin) {
+            if (!activeAllowed) return 0;
         }
         int256 side = _side(vault, binIndex);
         if (side == 0) return 0;

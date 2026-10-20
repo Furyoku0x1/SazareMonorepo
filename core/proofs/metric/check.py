@@ -146,9 +146,12 @@ def main():
         "source_excerpts": bindings,
         "source_files": len(manifest.get("target_sources", [])),
         "target_commit": manifest.get("target_commit"),
+        "base_commit": manifest.get("base_commit", manifest.get("target_commit")),
+        "source_snapshot_kind": manifest.get("source_snapshot_kind", "commit"),
+        "source_snapshot_id": manifest.get("source_snapshot_id"),
         "approved_axioms": ["propext", "Classical.choice", "Quot.sound"],
         "proof_input_sha256": inputs_before,
-        "scope": "Checked Lean models, source-excerpt freshness, and axiom dependencies. Not Solidity/EVM equivalence or a FullMath assembly proof.",
+        "scope": "Checked Lean arithmetic/operation models, source freshness, and axiom dependencies. Source-to-model, EVM and compiler correspondence are not machine verified.",
     }
     (PROJECT / "last-run.json").write_text(json.dumps(report, indent=2) + "\n")
     print(f"PASS: {report['theorems']} theorems, build+audit {report['build_and_audit_seconds']:.2f}s. Source excerpts unchanged.")

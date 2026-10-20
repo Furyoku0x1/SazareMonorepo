@@ -11,7 +11,8 @@ The rational model proves the nonnegative loss of a concentrated-liquidity range
 including moves crossing either end. It is the mathematical target of `_heldX64`,
 `_valueX64` and `_holdingTimesMoveX64`, BEFORE their separate integer roundings.
 The integer models follow `_average`, the sample cap, `_toWad`, and first-interval
-bookkeeping. They do NOT identify the rounded tree calculation with rational loss.
+bookkeeping. Independent below/above rent snapshots are modeled in ChargeHistory.
+They do NOT identify the rounded tree calculation with rational loss.
 Signed magnitude truncation and the nonnegative-loss clamp are not additive;
 counterexamples below prevent claiming checkpoint independence. FullMath,
 TickMath, Fenwick storage, SafeCast, overflow and time validity remain separate.
@@ -215,8 +216,8 @@ theorem prefix_differences_telescope (first middle last : Int) :
 def correctedLoss (prefixNow prefixStart firstOwn firstRecorded startValue lastValue : Int) : Int :=
   prefixNow - prefixStart + (firstOwn - firstRecorded) - (lastValue - startValue)
 
-/-- A new position excludes every interval before opening and replaces its first
-recorded interval by the stretch starting at its own price. -/
+/-- Conditional bookkeeping identity for a supplied prefix decomposition. The
+concrete independent-side history representation is proved in ChargeHistory. -/
 theorem correctedLoss_excludes_preopen (before firstRecorded firstOwn tail startValue lastValue : Int) :
     correctedLoss (before + firstRecorded + tail) before firstOwn firstRecorded startValue lastValue =
       firstOwn + tail - (lastValue - startValue) := by unfold correctedLoss; omega
@@ -357,18 +358,18 @@ theorem replaced_rent_nonnegative (tail : Int) (ownPast : Bool) (rate ownTime ne
     simp only [pastRent, ↓reduceIte]
     exact add_nonneg htail (Int.natCast_nonneg _)
 
-/-- Start fields relevant to `restart` and `_settledStart`. The four sum snapshots
+/-- Start fields relevant to `restart` and `_settledStart`. The five sum snapshots
 are represented by one vector; the surcharge deliberately survives a restart. -/
 structure Start where
   point : Nat
   sqrtPrice : Nat
   startedAt : Nat
   highLeverage : Bool
-  snapshots : Int × Int × Int × Int
+  snapshots : Int × Int × Int × Int × Int
   deriving DecidableEq
 
 /-- Caller supplies the actual latest price point and newly queried tree snapshots. -/
-def restart (count lastPrice lastTime : Nat) (sums : Int × Int × Int × Int) (begin : Start) : Start :=
+def restart (count lastPrice lastTime : Nat) (sums : Int × Int × Int × Int × Int) (begin : Start) : Start :=
   if count = 0 then begin
   else if count - 1 ≤ begin.point then begin
   else { point := count - 1, sqrtPrice := lastPrice, startedAt := lastTime,
@@ -379,12 +380,12 @@ def settledStart (count lastPrice lastTime : Nat) (begin : Start) : Nat × Nat :
 
 /-- Restart never discards the opening's own-price stub without a new price point. -/
 theorem restart_without_new_point (count lastPrice lastTime : Nat)
-    (sums : Int × Int × Int × Int) (begin : Start) (h : count - 1 ≤ begin.point) :
+    (sums : Int × Int × Int × Int × Int) (begin : Start) (h : count - 1 ≤ begin.point) :
     restart count lastPrice lastTime sums begin = begin := by
   simp [restart, h]
 
 theorem restart_after_new_point (count lastPrice lastTime : Nat)
-    (sums : Int × Int × Int × Int) (begin : Start) (h : begin.point < count - 1) :
+    (sums : Int × Int × Int × Int × Int) (begin : Start) (h : begin.point < count - 1) :
     restart count lastPrice lastTime sums begin =
       { point := count - 1, sqrtPrice := lastPrice, startedAt := lastTime,
         highLeverage := begin.highLeverage, snapshots := sums } := by
@@ -393,7 +394,7 @@ theorem restart_after_new_point (count lastPrice lastTime : Nat)
 
 /-- Stubbing before or after the restart chooses the same price/time boundary. -/
 theorem settledStart_matches_restart (count lastPrice lastTime : Nat)
-    (sums : Int × Int × Int × Int) (begin : Start) (_hc : 0 < count) :
+    (sums : Int × Int × Int × Int × Int) (begin : Start) (_hc : 0 < count) :
     settledStart count lastPrice lastTime begin =
       ((restart count lastPrice lastTime sums begin).sqrtPrice,
        (restart count lastPrice lastTime sums begin).startedAt) := by
@@ -405,14 +406,14 @@ theorem settledStart_matches_restart (count lastPrice lastTime : Nat)
 
 /-- Multiple settlements at the same latest point cannot advance the start again. -/
 theorem restart_idempotent (count lastPrice lastTime : Nat)
-    (sums : Int × Int × Int × Int) (begin : Start) :
+    (sums : Int × Int × Int × Int × Int) (begin : Start) :
     restart count lastPrice lastTime sums (restart count lastPrice lastTime sums begin) =
       restart count lastPrice lastTime sums begin := by
   unfold restart
   split_ifs <;> simp_all
 
 theorem restart_preserves_surcharge (count lastPrice lastTime : Nat)
-    (sums : Int × Int × Int × Int) (begin : Start) :
+    (sums : Int × Int × Int × Int × Int) (begin : Start) :
     (restart count lastPrice lastTime sums begin).highLeverage = begin.highLeverage := by
   unfold restart
   split_ifs <;> rfl

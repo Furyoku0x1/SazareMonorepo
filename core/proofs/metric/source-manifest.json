@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "captured_on": "2026-10-19",
+  "captured_on": "2026-10-20",
   "scope": "Manual mathematical models, not a verified Solidity translator or bytecode equivalence proof. Fingerprints detect drift; they do not prove model equivalence. Do not refresh fingerprints without reviewing the models and proof statements.",
   "bindings": [
     {
@@ -382,15 +382,6 @@
       "name": "_firstIntervalX64",
       "sha256": "f4768e46ab3ff7e078eaffbae7a4310e6d1151298d8469996ea10aaa4c4ec9dc",
       "reviewed_code": "function _firstIntervalX64(Vault storage vault, Range memory range, ChargeStart memory begin) private view returns (int256) { uint160 sqrtPointX96 = vault.prices.points[begin.point].sqrtPriceX96; uint160 sqrtNextX96 = vault.prices.points[uint256(begin.point) + 1].sqrtPriceX96; return _holdingTimesMoveX64(range, begin.sqrtPriceX96, sqrtNextX96) - _holdingTimesMoveX64(range, sqrtPointX96, sqrtNextX96); }",
-      "model": "RealizedCharge: selected ideal geometry and integer arithmetic",
-      "scope": "Selected arithmetic properties only. This is not a whole-function verification."
-    },
-    {
-      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
-      "kind": "function",
-      "name": "_rentThroughLastBpsSeconds",
-      "sha256": "855ebdd6809975e9ad9cce6658aab9875eca5b5c75938de8cf563033d7a1c88f",
-      "reviewed_code": "function _rentThroughLastBpsSeconds( Vault storage vault, Position storage position, Range memory range, ChargeStart memory begin, Sums memory sums ) private view returns (uint256) { PricePoint memory point = vault.prices.points[begin.point]; uint256 nextRecordedAt = vault.prices.points[uint256(begin.point) + 1].recordedAt; int256 rentBpsSeconds = sums.rentPastBpsSeconds - begin.rentPastBpsSeconds; if (_isPast(position, range, point.sqrtPriceX96)) { rentBpsSeconds -= (uint256(point.rentRateBps) * (nextRecordedAt - point.recordedAt)).toInt256(); } if (_isPast(position, range, begin.sqrtPriceX96)) { rentBpsSeconds += (uint256(point.rentRateBps) * (nextRecordedAt - begin.startedAt)).toInt256(); } return rentBpsSeconds > 0 ? uint256(rentBpsSeconds) : 0; }",
       "model": "RealizedCharge: selected ideal geometry and integer arithmetic",
       "scope": "Selected arithmetic properties only. This is not a whole-function verification."
     },
@@ -825,13 +816,112 @@
       "reviewed_code": "function _shrinkOrDelete( VaultStore storage store, Vault storage vault, uint256 positionId, Position storage position, Closing memory closing ) private { VaultBook.removeDebt(vault, position, position.liquidity); if (closing.fractionWad == WAD) { PositionIndex.remove(store.passivePositionIds[position.owner], store.indexInOwnerList, positionId); delete store.positions[positionId]; delete store.chargeStarts[positionId]; return; } uint128 remaining = position.liquidity - closing.liquidity; (uint160 sqrtLowerX96, uint160 sqrtUpperX96) = VaultMath.rangeSqrtPrices(position.tickLower, position.tickUpper); (uint256 maximum0, uint256 maximum1) = VaultMath.debtExtremes(remaining, sqrtLowerX96, sqrtUpperX96); position.liquidity = remaining; position.maximum0 = maximum0.toUint128(); position.maximum1 = maximum1.toUint128(); position.reserve0 -= closing.portion0.toUint128(); position.reserve1 -= closing.portion1.toUint128(); position.released0 -= _min(closing.released0, position.released0).toUint128(); position.released1 -= _min(closing.released1, position.released1).toUint128(); position.basis -= closing.basis.toUint128(); VaultBook.addDebt(vault, position, remaining); if (maximum1 < vault.parameters.minBorrowNotional) revert IMetricLendingVault.BelowMinimumBorrow(); if (!VaultMath.chordHolds(position.reserve0, position.reserve1, maximum0, maximum1)) { revert IMetricLendingVault.Insolvent(); } }",
       "model": "PositionOperations, LedgerOperations: selected arithmetic",
       "scope": "Selected arithmetic properties only. This is not a whole-function verification."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_addInterval",
+      "sha256": "e0f6f1b806a945dc201f4392c001f7262eb4b9cbd01c5b03cd16b5a4af7f0e6d",
+      "reviewed_code": "function _addInterval( PriceRecord storage prices, PricePoint memory last, uint160 sqrtPriceX96, uint256 elapsedSeconds ) private { uint256 sqrtPreviousX96 = last.sqrtPriceX96; uint256 sqrtCurrentX96 = sqrtPriceX96; uint256 sqrtChangeX96 = sqrtCurrentX96 > sqrtPreviousX96 ? sqrtCurrentX96 - sqrtPreviousX96 : sqrtPreviousX96 - sqrtCurrentX96; int256 sign = sqrtCurrentX96 >= sqrtPreviousX96 ? int256(1) : int256(-1); uint256 sqrtSumX96 = sqrtCurrentX96 + sqrtPreviousX96; ChargeNode memory delta; delta.perRootX96 = sign * FullMath.mulDiv(sqrtChangeX96, sqrtSumX96, sqrtPreviousX96).toInt256(); delta.perMoveX96 = sign * FullMath.mulDiv(sqrtChangeX96, sqrtSumX96, Q96).toInt256(); delta.rentBpsSeconds = (uint256(last.rentRateBps) * elapsedSeconds).toInt256(); prices.rentTotalBpsSeconds += delta.rentBpsSeconds; _addAt(prices, _priceIndex(last.sqrtPriceX96), delta); }",
+      "model": "ChargeHistory: independent side snapshots, interval-list history and exact first-interval cancellation",
+      "scope": "Selected arithmetic and state projections; Fenwick/EVM refinement remains open."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_sums",
+      "sha256": "ff220a2beae294e3ea636b1855643c6bd4a767458f73d6d28aeb0ef4ee8895ed",
+      "reviewed_code": "function _sums(Vault storage vault, Position storage position) private view returns (Sums memory sums) { PriceRecord storage prices = vault.prices; ChargeNode memory below = _prefix(prices, _belowIndex(position.tickLower)); ChargeNode memory underUpper = _prefix(prices, _belowIndex(position.tickUpper)); sums.rootInsideX96 = underUpper.perRootX96 - below.perRootX96; sums.moveInsideX96 = underUpper.perMoveX96 - below.perMoveX96; sums.moveBelowX96 = below.perMoveX96; sums.rentBelowBpsSeconds = below.rentBpsSeconds; sums.rentAboveBpsSeconds = prices.rentTotalBpsSeconds - underUpper.rentBpsSeconds; }",
+      "model": "ChargeHistory: independent side snapshots, interval-list history and exact first-interval cancellation",
+      "scope": "Selected arithmetic and state projections; Fenwick/EVM refinement remains open."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_snapshotSums",
+      "sha256": "68929972225eb7a54f336c451ce3fa4af1b37d4898b7654cb2104c5b6970a900",
+      "reviewed_code": "function _snapshotSums(Vault storage vault, Position storage position, ChargeStart storage charge) private { Sums memory sums = _sums(vault, position); charge.rootInsideX96 = sums.rootInsideX96; charge.moveInsideX96 = sums.moveInsideX96; charge.moveBelowX96 = sums.moveBelowX96; charge.rentBelowBpsSeconds = sums.rentBelowBpsSeconds; charge.rentAboveBpsSeconds = sums.rentAboveBpsSeconds; }",
+      "model": "ChargeHistory: independent side snapshots, interval-list history and exact first-interval cancellation",
+      "scope": "Selected arithmetic and state projections; Fenwick/EVM refinement remains open."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "start",
+      "sha256": "fed705232fffd937c4edf56d44e9f0c660a9175b409bec3bd92441ee4b7ce801",
+      "reviewed_code": "function start(Vault storage vault, Position storage position, ChargeStart storage charge, uint160 sqrtNowX96) public { if (vault.prices.count == 0) _append(vault, sqrtNowX96); charge.sqrtPriceX96 = sqrtNowX96; charge.point = uint32(vault.prices.count - 1); charge.startedAt = uint40(block.timestamp); charge.highLeverage = _isHighLeverage(position, sqrtNowX96); _snapshotSums(vault, position, charge); }",
+      "model": "ChargeHistory: independent side snapshots, interval-list history and exact first-interval cancellation",
+      "scope": "Selected arithmetic and state projections; Fenwick/EVM refinement remains open."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_rentThroughLastWeighted",
+      "sha256": "dc3baf23354a9cf3ee8a6ae509170b6f99de9106f6d16e029e6f1fa7fa314dc1",
+      "reviewed_code": "function _rentThroughLastWeighted( Vault storage vault, Position storage position, Range memory range, ChargeStart memory begin, Sums memory sums ) private view returns (uint256) { PricePoint memory point = vault.prices.points[begin.point]; uint256 nextRecordedAt = vault.prices.points[uint256(begin.point) + 1].recordedAt; int256 pointBpsSeconds = (uint256(point.rentRateBps) * (nextRecordedAt - point.recordedAt)).toInt256(); int256 ownBpsSeconds = (uint256(point.rentRateBps) * (nextRecordedAt - begin.startedAt)).toInt256(); int256 belowBpsSeconds = sums.rentBelowBpsSeconds - begin.rentBelowBpsSeconds; int256 aboveBpsSeconds = sums.rentAboveBpsSeconds - begin.rentAboveBpsSeconds; if (_pastBelow(range, point.sqrtPriceX96)) belowBpsSeconds -= pointBpsSeconds; if (_pastAbove(range, point.sqrtPriceX96)) aboveBpsSeconds -= pointBpsSeconds; if (_pastBelow(range, begin.sqrtPriceX96)) belowBpsSeconds += ownBpsSeconds; if (_pastAbove(range, begin.sqrtPriceX96)) aboveBpsSeconds += ownBpsSeconds; return _weighted(position, belowBpsSeconds, aboveBpsSeconds); }",
+      "model": "ChargeHistory: independent side snapshots, interval-list history and exact first-interval cancellation",
+      "scope": "Selected arithmetic and state projections; Fenwick/EVM refinement remains open."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_pastBelow",
+      "sha256": "7d40e4d879953f43739ecc23f8333e79fd4a57073e94881ac570ef4c794fbfd0",
+      "reviewed_code": "function _pastBelow(Range memory range, uint160 sqrtPriceX96) private pure returns (bool) { return sqrtPriceX96 < range.sqrtLowerX96; }",
+      "model": "ChargeHistory: independent side snapshots, interval-list history and exact first-interval cancellation",
+      "scope": "Selected arithmetic and state projections; Fenwick/EVM refinement remains open."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_pastAbove",
+      "sha256": "6b81a764d62170e0e4fef35ca206dc6d4d4de0138464bd6f07a3e1638667e4c2",
+      "reviewed_code": "function _pastAbove(Range memory range, uint160 sqrtPriceX96) private pure returns (bool) { return sqrtPriceX96 >= range.sqrtUpperX96; }",
+      "model": "ChargeHistory: independent side snapshots, interval-list history and exact first-interval cancellation",
+      "scope": "Selected arithmetic and state projections; Fenwick/EVM refinement remains open."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_weighted",
+      "sha256": "d2d5b5999bb79fe58a499c58d59ae50cb3dc020a500c15c337846a0a037b55e9",
+      "reviewed_code": "function _weighted(Position storage position, int256 belowBpsSeconds, int256 aboveBpsSeconds) private view returns (uint256) { uint256 weight0Wad = position.weight0Wad; uint256 belowWad = belowBpsSeconds > 0 ? uint256(belowBpsSeconds) * (WAD - weight0Wad) : 0; uint256 aboveWad = aboveBpsSeconds > 0 ? uint256(aboveBpsSeconds) * weight0Wad : 0; return belowWad + aboveWad; }",
+      "model": "ChargeHistory: independent side snapshots, interval-list history and exact first-interval cancellation",
+      "scope": "Selected arithmetic and state projections; Fenwick/EVM refinement remains open."
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_rentWad",
+      "sha256": "cc3f1173f8f9a8ba2f75962f1fe207b33ef8f855c65a469799a3c009b084c3a8",
+      "reviewed_code": "function _rentWad(Position storage position, uint256 weightedBpsSecondsWad) private view returns (uint256) { if (weightedBpsSecondsWad == 0) return 0; return FullMath.mulDiv(position.maximum1, weightedBpsSecondsWad, BPS * YEAR_SECONDS); }",
+      "model": "ChargeHistory: independent side snapshots, interval-list history and exact first-interval cancellation",
+      "scope": "Selected arithmetic and state projections; Fenwick/EVM refinement remains open."
+    },
+    {
+      "path": "lib/v4-core/src/libraries/FullMath.sol",
+      "kind": "function",
+      "name": "mulDiv",
+      "sha256": "561f403a023bcb20035afb281bfb39aba0ebc41847aa4f25ddbfb40b461d8072",
+      "reviewed_code": "function mulDiv(uint256 a, uint256 b, uint256 denominator) internal pure returns (uint256 result) { unchecked { uint256 prod0 = a * b; uint256 prod1; assembly (\"memory-safe\") { let mm := mulmod(a, b, not(0)) prod1 := sub(sub(mm, prod0), lt(mm, prod0)) } require(denominator > prod1); if (prod1 == 0) { assembly (\"memory-safe\") { result := div(prod0, denominator) } return result; } uint256 remainder; assembly (\"memory-safe\") { remainder := mulmod(a, b, denominator) } assembly (\"memory-safe\") { prod1 := sub(prod1, gt(remainder, prod0)) prod0 := sub(prod0, remainder) } uint256 twos = (0 - denominator) & denominator; assembly (\"memory-safe\") { denominator := div(denominator, twos) } assembly (\"memory-safe\") { prod0 := div(prod0, twos) } assembly (\"memory-safe\") { twos := add(div(sub(0, twos), twos), 1) } prod0 |= prod1 * twos; uint256 inv = (3 * denominator) ^ 2; inv *= 2 - denominator * inv; inv *= 2 - denominator * inv; inv *= 2 - denominator * inv; inv *= 2 - denominator * inv; inv *= 2 - denominator * inv; inv *= 2 - denominator * inv; result = prod0 * inv; return result; } }",
+      "model": "FullMathSource: complete mathematical word-operation model, guards and exact floor/ceiling",
+      "scope": "Manual source correspondence. EVM instruction and compiler refinement remain open."
+    },
+    {
+      "path": "lib/v4-core/src/libraries/FullMath.sol",
+      "kind": "function",
+      "name": "mulDivRoundingUp",
+      "sha256": "cc8d19854be7e0852ef2f447f8ef48ef15b6b8cddaf100a8548d9c5724b12c34",
+      "reviewed_code": "function mulDivRoundingUp(uint256 a, uint256 b, uint256 denominator) internal pure returns (uint256 result) { unchecked { result = mulDiv(a, b, denominator); if (mulmod(a, b, denominator) != 0) { require(++result > 0); } } }",
+      "model": "FullMathSource: complete mathematical word-operation model, guards and exact floor/ceiling",
+      "scope": "Manual source correspondence. EVM instruction and compiler refinement remain open."
     }
   ],
   "unproved_dependencies": [
     {
       "path": "lib/v4-core/src/libraries/FullMath.sol",
       "sha256": "a9607255a6fd604d9c92f6b7416811c38b9d86e5dfdb0c345a494ebd35f7a4a3",
-      "status": "Unproved implementation dependency; imported operation behavior and valid input bounds require separate verification."
+      "status": "Complete mathematical word-operation model proved in FullMathSource. The source-to-model, EVM and compiler correspondence is not machine verified."
     },
     {
       "path": "lib/v4-core/src/libraries/SqrtPriceMath.sol",
@@ -849,8 +939,8 @@
       "status": "Unproved assembly implementation dependency for nested ceiling amount0."
     }
   ],
-  "target_commit": "963d033f8ef04ef0203190b952cfb30a41ad27d5",
-  "target_commit_subject": "realized premium charge",
+  "target_commit": null,
+  "target_commit_subject": null,
   "first_capture_commit": "70917dfd46df29498fcff17e90fb5c60424a1c31",
   "target_sources": [
     {
@@ -867,11 +957,11 @@
     },
     {
       "path": "core/src/metric/vault/VaultTypes.sol",
-      "sha256": "c1a169312a1541c70880ab6c77a82b6a0d04669924af508d790422049dcbc939"
+      "sha256": "2cebdf2aa1524e2a0e46f943d42ec862a1655a271026c50a7e8c423850546da2"
     },
     {
       "path": "core/src/metric/vault/interfaces/IMakerBook.sol",
-      "sha256": "bcd84c0af2ac59dfd2d3263e4eb62ffb94370dd47944799eab72559bfa16adb8"
+      "sha256": "fa0807ff51001b35718f55ba95699ee0f329eb86af0eb9885e76c1cf4818eeb4"
     },
     {
       "path": "core/src/metric/vault/interfaces/IMetricLendingVault.sol",
@@ -903,7 +993,7 @@
     },
     {
       "path": "core/src/metric/vault/libraries/MakerClosing.sol",
-      "sha256": "937a4f93d69ab2faf73afe9643d5c21bbc6558440b7fd33b67f3d02826176774"
+      "sha256": "e4761b88a39f9618a6e405fa8e2c694a69c6e87c1a0833fdb6f3e35e9bbfdc1a"
     },
     {
       "path": "core/src/metric/vault/libraries/MakerMath.sol",
@@ -927,7 +1017,7 @@
     },
     {
       "path": "core/src/metric/vault/libraries/MetricVenue.sol",
-      "sha256": "e62f12a8f637f1e82201d4bd4a51b61743eddb7af4d71b5a1d1c41d91d6e3d6b"
+      "sha256": "41c5927eb6e1c1061e1c617c3b4f2cf2b4ea39e61d3353a45f72adda619e8d90"
     },
     {
       "path": "core/src/metric/vault/libraries/PositionIndex.sol",
@@ -935,7 +1025,7 @@
     },
     {
       "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
-      "sha256": "f2876126ee8b3de6eed5148bdfe99ca8367fa67fd221e6753d41e285619302cd"
+      "sha256": "35df7876c816ca413d0297d5b79645670a9b83f2d81e29f2d096b2f551add4c4"
     },
     {
       "path": "core/src/metric/vault/libraries/VaultAccrual.sol",
@@ -985,5 +1075,210 @@
       "path": "core/src/metric/vault/venues/RouterVenue.sol",
       "sha256": "751fb4fff031d8c2a09ce9aa1a54d3e7ef528e45cc1e4326900ce8eab84caca5"
     }
-  ]
+  ],
+  "previous_source_snapshots": [
+    {
+      "captured_on": "2026-10-19",
+      "target_commit": "963d033f8ef04ef0203190b952cfb30a41ad27d5",
+      "target_commit_subject": "realized premium charge",
+      "target_sources": [
+        {
+          "path": "core/src/metric/price-providers/CLAMMPriceProvider.sol",
+          "sha256": "4b427a42ace264da4f715b8d2aefe26c5d912afe69cb99852f530a6a9a558f0c"
+        },
+        {
+          "path": "core/src/metric/vault/MakerTypes.sol",
+          "sha256": "890b5fb8fbfcb2cb9cf4fbb0d244d630c998af2facbed698775b4d7ad8833878"
+        },
+        {
+          "path": "core/src/metric/vault/MetricLendingVault.sol",
+          "sha256": "aece0c11d743519ba1ce27e226ca28b2a1541e82e057a061e4ad0d6c0242b760"
+        },
+        {
+          "path": "core/src/metric/vault/VaultTypes.sol",
+          "sha256": "c1a169312a1541c70880ab6c77a82b6a0d04669924af508d790422049dcbc939"
+        },
+        {
+          "path": "core/src/metric/vault/interfaces/IMakerBook.sol",
+          "sha256": "bcd84c0af2ac59dfd2d3263e4eb62ffb94370dd47944799eab72559bfa16adb8"
+        },
+        {
+          "path": "core/src/metric/vault/interfaces/IMetricLendingVault.sol",
+          "sha256": "46fb1687f81714888949f57cea3a2fd8782ffae7ed9bc54c8945282a67db3956"
+        },
+        {
+          "path": "core/src/metric/vault/interfaces/IMetricPool.sol",
+          "sha256": "f6569181a41e7a62800c57d1074b9343eee405df20b09d4c5c38ae8c3087c536"
+        },
+        {
+          "path": "core/src/metric/vault/interfaces/ISwapVenue.sol",
+          "sha256": "a0549f581b7cd5dd7ee7d2895776c5e5026b50b74bff9ed1045f502fd8e539bf"
+        },
+        {
+          "path": "core/src/metric/vault/interfaces/IVaultPriceSource.sol",
+          "sha256": "6de22526d35e5dabfae026d9382598b698aaa025340271c993b728e3150f53f9"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/DebtValuation.sol",
+          "sha256": "9174ceb1ad8fb22a2471166836bfafd5c3a900e1f8c90dd7d46320195dc66d0b"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/MakerAccounting.sol",
+          "sha256": "b55361f4109b0d8ed24ece3d474303f0be9ddc69011ea3fdfaf4e5ee9ba32582"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/MakerBook.sol",
+          "sha256": "9950196fea3573ae50fe060dffa2a2012253cc815828eacaa327095b83aeb009"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/MakerClosing.sol",
+          "sha256": "937a4f93d69ab2faf73afe9643d5c21bbc6558440b7fd33b67f3d02826176774"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/MakerMath.sol",
+          "sha256": "ab6c65f52714691b48577b1e7c7ea6b572a01c6dc44cbf63f769591a851f81e6"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/MakerPositions.sol",
+          "sha256": "188547225f3b489265c33ec53b39133f67d89e09b3f305d2e9b0b327de50b56e"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/MakerSettlement.sol",
+          "sha256": "e3184d092836e5dba41003e52f608ef42240ff73ed7ce34e9e278a3949981083"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/MetricPrice.sol",
+          "sha256": "fd468591ad01854268673f2d09b1605fe8eb7c4adb168703d285bd0007e3081b"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/MetricState.sol",
+          "sha256": "1fe06b91c11fd8643e57cbfc0ae53fe892ee34361c0ac52efd690c4d8e1d90a2"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/MetricVenue.sol",
+          "sha256": "e62f12a8f637f1e82201d4bd4a51b61743eddb7af4d71b5a1d1c41d91d6e3d6b"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/PositionIndex.sol",
+          "sha256": "42cc9890dc3e910bb148bc69d998f8ebc37898465627dafd401e8708d2e27b8c"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+          "sha256": "f2876126ee8b3de6eed5148bdfe99ca8367fa67fd221e6753d41e285619302cd"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/VaultAccrual.sol",
+          "sha256": "34733ef50f77bae7880fd0addb723e398ccd2079effb93e6f342f45f3d97fff5"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/VaultAdmin.sol",
+          "sha256": "0c757273190d15e51ba1df2c1ee89627b84bdfe6f2a22aa035a70c026de1e7c5"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/VaultBook.sol",
+          "sha256": "a5693da0179127a21a5948abc9469e83e972fdaf9f24d8dd8ecbd25eb5bb4690"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/VaultCallback.sol",
+          "sha256": "3720111f4cd4a41f8f6391ac0d619e540ff2a312aaa48f804d7f58611191b489"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/VaultClosing.sol",
+          "sha256": "7cf2e6d99d73f3bae11db2389bc62f18eca657ef3fad74c5ec18ac38d6212b99"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/VaultLedger.sol",
+          "sha256": "fe5d37b6e692e7fde171f2840b66a2696120f2f530973229182121d51544f70e"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/VaultLending.sol",
+          "sha256": "87405abbb622366b4fb0cca617eba3842c085580dc093e899fd86639c38179bf"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/VaultMath.sol",
+          "sha256": "9599371ab01a3689bcb64ad4f763bc2d8a91b264fe32321b65b199bb9909834a"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/VaultPositions.sol",
+          "sha256": "132afc78b116f2bf8302319e60dbe8003f74c8215e5f2c8c296fa31f58474f89"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/VaultPricing.sol",
+          "sha256": "105442bd1f2adace958d56003f121bec04a0cf87df65ef41dee4774e72e3a032"
+        },
+        {
+          "path": "core/src/metric/vault/libraries/VenueSwap.sol",
+          "sha256": "bf9d6fb38b0b4b82adb2630d34114eefdcea2f4c1202d5a2ff213028afbc8101"
+        },
+        {
+          "path": "core/src/metric/vault/venues/RouterVenue.sol",
+          "sha256": "751fb4fff031d8c2a09ce9aa1a54d3e7ef528e45cc1e4326900ce8eab84caca5"
+        }
+      ]
+    }
+  ],
+  "historical_bindings": [
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_rentThroughLastBpsSeconds",
+      "sha256": "855ebdd6809975e9ad9cce6658aab9875eca5b5c75938de8cf563033d7a1c88f",
+      "reviewed_code": "function _rentThroughLastBpsSeconds( Vault storage vault, Position storage position, Range memory range, ChargeStart memory begin, Sums memory sums ) private view returns (uint256) { PricePoint memory point = vault.prices.points[begin.point]; uint256 nextRecordedAt = vault.prices.points[uint256(begin.point) + 1].recordedAt; int256 rentBpsSeconds = sums.rentPastBpsSeconds - begin.rentPastBpsSeconds; if (_isPast(position, range, point.sqrtPriceX96)) { rentBpsSeconds -= (uint256(point.rentRateBps) * (nextRecordedAt - point.recordedAt)).toInt256(); } if (_isPast(position, range, begin.sqrtPriceX96)) { rentBpsSeconds += (uint256(point.rentRateBps) * (nextRecordedAt - begin.startedAt)).toInt256(); } return rentBpsSeconds > 0 ? uint256(rentBpsSeconds) : 0; }",
+      "model": "RealizedCharge: selected ideal geometry and integer arithmetic",
+      "scope": "Selected arithmetic properties only. This is not a whole-function verification.",
+      "historical_target_commit": "963d033f8ef04ef0203190b952cfb30a41ad27d5"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_sums",
+      "sha256": "28a13a10a5be631a636c0ad20be8133c305a7b671e624d370e70c29934e4093e",
+      "reviewed_code": "function _sums(Vault storage vault, Position storage position) private view returns (Sums memory sums) { PriceRecord storage prices = vault.prices; ChargeNode memory below = _prefix(prices, _belowIndex(position.tickLower)); ChargeNode memory underUpper = _prefix(prices, _belowIndex(position.tickUpper)); sums.rootInsideX96 = underUpper.perRootX96 - below.perRootX96; sums.moveInsideX96 = underUpper.perMoveX96 - below.perMoveX96; sums.moveBelowX96 = below.perMoveX96; if (position.released1 != 0) sums.rentPastBpsSeconds += below.rentBpsSeconds; if (position.released0 != 0) { sums.rentPastBpsSeconds += prices.rentTotalBpsSeconds - underUpper.rentBpsSeconds; } }",
+      "model": "RentSnapshot: selected cumulative rent and stale selector arithmetic",
+      "scope": "Arithmetic fragments and a counterexample; not full external-call reachability.",
+      "historical_target_commit": "963d033f8ef04ef0203190b952cfb30a41ad27d5"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "kind": "function",
+      "name": "_snapshotSums",
+      "sha256": "d88a7cccfd7adaf7b769bc2f07a734fd1e75665ba8d92d26f225a508695134a4",
+      "reviewed_code": "function _snapshotSums(Vault storage vault, Position storage position, ChargeStart storage charge) private { Sums memory sums = _sums(vault, position); charge.rootInsideX96 = sums.rootInsideX96; charge.moveInsideX96 = sums.moveInsideX96; charge.moveBelowX96 = sums.moveBelowX96; charge.rentPastBpsSeconds = sums.rentPastBpsSeconds; }",
+      "model": "RentSnapshot: selected cumulative rent and stale selector arithmetic",
+      "scope": "Arithmetic fragments and a counterexample; not full external-call reachability.",
+      "historical_target_commit": "963d033f8ef04ef0203190b952cfb30a41ad27d5"
+    }
+  ],
+  "base_commit": "4e7fc7dc64cb2415a2dec0f5bebbb93a02914fc0",
+  "source_snapshot_kind": "reviewed_worktree",
+  "source_snapshot_id": "c82e354d29b29c288d03f17780062c0cfba9f9f5eb9a9e232aa661c7e1a2a61a",
+  "reviewed_worktree_overlay": [
+    {
+      "path": "core/src/metric/vault/VaultTypes.sol",
+      "sha256": "2cebdf2aa1524e2a0e46f943d42ec862a1655a271026c50a7e8c423850546da2"
+    },
+    {
+      "path": "core/src/metric/vault/interfaces/IMakerBook.sol",
+      "sha256": "fa0807ff51001b35718f55ba95699ee0f329eb86af0eb9885e76c1cf4818eeb4"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MakerClosing.sol",
+      "sha256": "e4761b88a39f9618a6e405fa8e2c694a69c6e87c1a0833fdb6f3e35e9bbfdc1a"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/MetricVenue.sol",
+      "sha256": "41c5927eb6e1c1061e1c617c3b4f2cf2b4ea39e61d3353a45f72adda619e8d90"
+    },
+    {
+      "path": "core/src/metric/vault/libraries/RealizedCharge.sol",
+      "sha256": "35df7876c816ca413d0297d5b79645670a9b83f2d81e29f2d096b2f551add4c4"
+    }
+  ],
+  "source_review_notes": {
+    "RealizedCharge.sol": "Replaced selector-combined historical rent with per-side baselines and fixed release-value weighting; ChargeHistory models the new arithmetic. RealizedCharge.Start updated to five snapshots. RentSnapshot retains only a historical counterexample.",
+    "VaultTypes.sol": "ChargeStart now has separate rentBelow/rentAbove fields; activeBinEdgeE6 setting added. No storage-layout/compiler proof claimed.",
+    "MetricVenue.sol": "Active-bin admission/weighting now uses configured edge distance. Existing ledger/position fragments already exclude complete venue traces; no venue-placement proof claimed.",
+    "MakerClosing.sol": "Scaled leg path adds shortfall flag and event; allocation and repayment math used by existing maker proofs is unchanged.",
+    "IMakerBook.sol": "Added shortfall event; arithmetic models unaffected."
+  }
 }

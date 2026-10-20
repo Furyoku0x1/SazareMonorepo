@@ -379,7 +379,7 @@ library MakerClosing {
         uint256 positionId,
         uint256[8] memory repay0,
         uint256[8] memory repay1
-    ) private view {
+    ) private {
         MakerPosition storage position = store.makerPositions[positionId];
         uint256 legCount = position.legCount;
         // legCount <= MAX_LEGS
@@ -387,22 +387,26 @@ library MakerClosing {
             Leg storage leg = store.legs[positionId][index];
             uint256 part0 = MakerMath.allocation(position.reserve0, legCount, leg.maximum0, position.maximum0);
             uint256 part1 = MakerMath.allocation(position.reserve1, legCount, leg.maximum1, position.maximum1);
-            (repay0[index], repay1[index]) = _scaled(vault, leg, part0, part1);
+            bool short;
+            (repay0[index], repay1[index], short) = _scaled(vault, leg, part0, part1);
+            if (short) emit IMakerBook.LegRepaidShort(positionId, leg.bucketId);
         }
     }
 
-    /// @dev The least fraction of a leg's part that repays it, rounded up; the whole part should it ever fail the rule.
+    /// @dev The least fraction of a leg's part that repays it, rounded up. Should the part ever fail the rule, the
+    /// whole part, and `short`: reverting instead would leave the position impossible to close and its lent capital
+    /// locked.
     function _scaled(Vault storage vault, Leg storage leg, uint256 part0, uint256 part1)
         private
         view
-        returns (uint256, uint256)
+        returns (uint256, uint256, bool short)
     {
         (uint160 sqrtLowerX96, uint160 sqrtUpperX96) = MakerAccounting.range(vault.book, leg.bucketId);
-        if (!VaultMath.repays(part0, part1, leg.liquidity, sqrtLowerX96, sqrtUpperX96)) return (part0, part1);
+        if (!VaultMath.repays(part0, part1, leg.liquidity, sqrtLowerX96, sqrtUpperX96)) return (part0, part1, true);
         uint256 fractionWad = VaultMath.scaleToRepay(part0, part1, leg.liquidity, sqrtLowerX96, sqrtUpperX96);
         uint256 scaled0 = VaultMath.portionUp(part0, fractionWad);
         uint256 scaled1 = VaultMath.portionUp(part1, fractionWad);
-        return (scaled0 < part0 ? scaled0 : part0, scaled1 < part1 ? scaled1 : part1);
+        return (scaled0 < part0 ? scaled0 : part0, scaled1 < part1 ? scaled1 : part1, false);
     }
 
     /// @dev Returns a leg's repayment to its bucket: the liquidity stops counting as lent, and the tokens leave the

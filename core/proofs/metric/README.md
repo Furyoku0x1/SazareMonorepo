@@ -1,7 +1,9 @@
 # Metric Lean proofs
 
-Target Solidity commit: `963d033f8ef04ef0203190b952cfb30a41ad27d5`
-(`realized premium charge`). This project does not change Solidity.
+Reviewed Solidity snapshot: working tree on 2026-10-20, based on commit
+`4e7fc7dc64cb2415a2dec0f5bebbb93a02914fc0`, with five reviewed source overlays.
+The exact 33-file content hashes and snapshot identifier are in
+`source-manifest.json`. Earlier commit-bound snapshots are retained as history.
 
 **No Lean installation is needed on this Mac.** The local `.tools/` folder
 contains Lean 4.35.0. Mathlib and its dependencies are pinned in
@@ -21,9 +23,11 @@ python3 /Users/MiyamotoMushashi/SazareMono/core/proofs/metric/check.py --rebuild
 
 ## Checked results
 
-The suite contains 296 named theorems in 15 modules. The first batch had 87.
-The next batch adds 209. Some results are helper lemmas or checked counterexamples.
-These counts do not mean 296 Solidity functions are verified.
+The clean 2026-10-20 run checked **438 named theorems across 25 modules** in
+**42.36 seconds**, including the axiom audit. This adds 115 results to the previous
+323-theorem run. Exact timings and input hashes are recorded in `last-run.json`.
+Some results are helper lemmas or historical counterexamples. The count is not a
+count of fully verified Solidity functions.
 
 | Module | Theorems | Properties |
 | --- | ---: | --- |
@@ -35,12 +39,22 @@ These counts do not mean 296 Solidity functions are verified.
 | Settlement | 9 | WAD carry conservation and size; split settlement for already supplied integer dues. |
 | FullMathSteps | 15 | Canonical product limbs; quotient-fit guard; remainder subtraction; Newton precision doubling. |
 | FullMathCRT | 15 | Actual CRT formula; both wrapped subtractions; complete product reconstruction; uint256 guard connection. |
+| FullMathWrapping | 12 | Wrapping each Newton operation matches integer residues; six wrapped steps give the inverse from a four-bit seed. |
+| FullMathSeed | 9 | Source XOR seed is correct modulo 16 for odd denominators; uint256 bound; seed and six wrapped rounds compose. |
+| FullMathPowers | 24 | Canonical power-of-two factor; derived odd denominator; two-word division and arithmetic flip. |
+| FullMathDivision | 20 | Source remainder borrow; exact modular quotient recovery; floor fast path; ceiling increment and overflow guard. |
+| FullMathLowBit | 6 | Actual wrapped subtraction and AND yield the canonical factor, for arbitrary positive bounded input. |
+| FullMathLimbMerge | 11 | Actual wrapped multiplication and OR yield the reduced numerator low word, including factor=1. |
+| FullMathSource | 14 | Complete floor/ceiling instruction model, including fast path, zero denominator and overflow rejection; source arithmetic composition. |
 | Solvency | 12 | Exact nested debt ceilings; chord implies rounded repayment under explicit sqrt-price bounds. |
 | MakerSafety | 18 | Aggregate allocation budget; each leg repays; exact waiting-token inverse; active withdrawal utilization ceiling. |
 | DebtValuation | 49 | Endpoint sums match a loan list; X64 error and value bounds; add/remove preservation; empty and off-price cases. |
+| RentSnapshot | 5 | Historical counterexample for the old combined rent snapshot; this is not a claim about the corrected current source. |
+| ChargeHistory | 23 | Separate-side snapshots cancel actual prefix lists; weighted rent ignores earlier history and release counter changes; exact rounded first-interval cancellation after restart. |
+| EscrowPositions | 15 | Sum of all escrow contributions equals the vault escrow through funding, collection, profit share and refund; other entries are unchanged. |
 | RealizedCharge | 37 | Exact rational range loss; average and cap bounds; signed truncation; restart behavior; selected interval algebra. |
-| Accrual | 36 | Gross-up coverage when paid; rate bounds; growth and blend rounding; version-walk time; stream conservation. |
-| LedgerOperations | 25 | Conditional custody and liability conservation for operation arithmetic fragments. |
+| Accrual | 38 | Complete rounded premium-sum coverage when paid; index-premium floor; rate bounds; growth and blend rounding; version-walk time; stream conservation. |
+| LedgerOperations | 26 | Conditional custody and liability conservation for operation arithmetic fragments. |
 | PositionOperations | 17 | Entry budgets; collateral repayment preservation; settlement assertion; close complements; released/debt accounting. |
 
 ## Contract operation coverage
@@ -52,7 +66,8 @@ They are not a verified Solidity translation or a bytecode proof.
 | --- | --- | --- |
 | `open` / `increase` | The chord guard implies repayment for the modeled post-entry reserves. The entry request budget protects old reserves on increase. Debt replacement adds only the new liquidity. | TickMath bounds, exact external swap effects, storage representation, checked casts and the complete call sequence. |
 | `addCollateral` / `addCollateral0` | Adding either reserve cannot break repayment. Matching token receipt preserves modeled custody. | Exact transfer, basis valuation, caller and storage checks. |
-| `addEscrow` / `settle` | The rounded-up shortfall guard makes the rounded-down collection assertion hold. Paid units and the WAD carry conserve the supplied charge. | Both reads must use the same post-checkpoint charge. Complete charge history and storage refinement remain open. |
+| `addEscrow` / `settle` | The rounded-up shortfall guard makes the rounded-down collection assertion hold. Paid units and the WAD carry conserve the supplied charge. | Both reads must use the same post-checkpoint charge. Collection uses one position's escrow and preserves the other positions' escrow. Complete charge history and storage refinement remain open. |
+| Escrow map updates | Funding, collection, profit share and full refund preserve the sum of all escrow entries and do not change other entries. | The finite domain must represent every escrow contribution to the vault, including maker positions. Storage-map correspondence, identifier allocation and caller checks remain open. |
 | Partial / full close | An exit swap applied to both the whole and closed portion leaves the unclosed reserves unchanged. Debt and released counters preserve the other positions' amounts. | External swap input bound, complete restore/profit/fee paths, storage and authorization. |
 | Premium / arrears / profit | Funded amounts split without loss between income, treasury and fee vault. Quote profit can use both reserves and escrow. | The result covers what was paid. It does not guarantee payment of forgiven arrears. |
 | Close payout | Reserve and escrow refund deductions match the payout. A refused transfer becomes an unclaimed balance. | Successful transfer debits exactly its amount; refused transfer removes no custody; unclaimed owner storage. |
@@ -67,10 +82,13 @@ partition before its matching credit or payout runs.
 
 ## Limits that matter
 
-- **FullMath is not fully proved.** CRT reconstruction now includes both wrapped
-  subtractions. The XOR inverse seed, powers-of-two/bit operations, full remainder
-  borrow integration and final division path still need proofs and composition.
-  EVM instruction and compiler correspondence remain separate.
+- **FullMath has arithmetic proofs, with a refinement limit.** CRT, exact
+  remainder subtraction, canonical factorization, actual AND/OR operations,
+  wrapped Newton steps and final quotient recovery are proved. The complete
+  floor/ceiling instruction model also checks, including failed denominator and
+  overflow guards. These are mathematical specifications of word
+  operations. A verified Solidity translation, compiler and EVM semantics remain
+  separate; do not call this a bytecode verification.
 - **TickMath and assembly dependencies remain open.** The solvency theorem needs
   `2^64 ≤ lower ≤ upper ≤ 2^128 - 2^64`. A checked counterexample shows that the
   broader `upper ≤ 2^128` bound alone is insufficient for arbitrary sqrt inputs.
@@ -81,8 +99,9 @@ partition before its matching credit or payout runs.
   correspondence, storage sums and machine arithmetic still need refinement.
 - **Realized loss has two models.** Exact rational loss is nonnegative for range
   crossings. The rounded tree calculation is not yet proved equal or close to
-  that target. The first-interval cancellation is conditional algebra. Its
-  required rounded-tree representation remains open.
+  that target. ChargeHistory proves exact cancellation of the rounded first
+  interval after an aligned restart. Complete tree/loss correspondence and
+  accumulation bounds remain open.
 - **Checkpoint independence is not proved.** Gross-up ceilings, signed truncation,
   clamps and stream floors have checked examples of non-additivity. The gross-up
   example differs by one WAD subunit of a raw token unit, or `10^-18` raw units.
@@ -102,10 +121,15 @@ positive fraction even though zero would pass.
 
 ## Source and proof guards
 
-`source-manifest.json` pins 95 reviewed function/constant excerpts, all 33 Metric
-Solidity files from the target commit, and four unproved dependency file hashes.
+`source-manifest.json` pins 105 reviewed current excerpts, all 33 Metric Solidity
+files in the reviewed working snapshot, and four dependency file hashes. Five
+source files differ from the base commit. Their changes were reviewed before
+rebinding. In particular, the rent model now uses separate per-side baselines
+and fixed release weights. Venue placement changes remain outside the current
+complete-operation proofs. Historical bindings are archived separately.
+
 The full-file pins guard freshness. They do not mean every pinned file is proved.
-The source files were compared with `git show` at the target commit when pinned.
+Source snapshot metadata distinguishes a commit from reviewed uncommitted edits.
 
 `check.py` checks source contents and inventory before and after the build. It
 also rejects proof/configuration changes during a run. Do not refresh hashes
@@ -124,6 +148,9 @@ The suite does not use `bv_decide` or exhaustive 256-bit search.
 and proof-input hashes. Timing includes project elaboration and the axiom audit.
 It excludes first-time downloads. It is a local measurement, not a future bound.
 
+See `last-run.json` for the latest clean build measurement.
+The negative guard checks cover four deliberately invalid cases.
+
 Run the negative guard checks with:
 
 ```sh
@@ -135,14 +162,31 @@ a changed Solidity function, and a changed full source snapshot.
 
 ## Independent reviews and Claude
 
-Internal reviews are in `reviews/internal-math-review.md` and
-`reviews/internal-operations-review.md`. Read their scope limits with the results.
+Internal reviews are in `reviews/internal-math-review.md`,
+`reviews/internal-operations-review.md`, `reviews/next-batch-review.md` and
+`reviews/charge-history-review.md`. Their source snapshots and limits are stated
+in each report. Read those limits with the results.
 
-Claude was asked to review the statements and source mappings, and help construct
-another FullMath proof. The attempted run failed before inference because its
-OAuth session had expired. `reviews/claude-review.json` records that result.
-Claude has not verified this batch. Run `claude auth login` and retry the saved
-request in `reviews/claude-request.txt` after login.
+The user approved disclosure of the listed code to Anthropic's Claude service.
+Claude ran against an isolated snapshot of the approved files, with read tools
+only. It proposed eight FullMath seed lemmas. Those lemmas compiled unchanged.
+Codex added the connection to the wrapped Newton iteration. The combined result
+requires an odd denominator and mathematical word-operation specifications.
+Later local proofs derive the power-of-two factor, actual bitwise merge and
+final division arithmetic; the Claude report predates those additions.
+
+Claude's independent source review is complete in `reviews/claude-source-review.md`.
+It found a stale rent snapshot after a partial close. A public-call test
+reproduced the old zero-payment defect. The current per-side weighted-rent
+source passes the converted regression: expected and paid rent are both
+797,488 raw quote units. See `reviews/rent-snapshot-investigation.md`.
+The arithmetic counterexample is retained in `RentSnapshot`; ChargeHistory
+models the corrected source.
+The finding dispositions are recorded in `reviews/claude-findings-triage.md`.
+The original seed proposal is saved in `reviews/claude-seed-proposal.md`. The
+approved snapshot and file hashes are in `reviews/claude-payload-manifest.json`.
+The review concerns that snapshot, before the new seed/wrapping modules. Local
+versions may contain later proof or documentation changes.
 
 See [FULLMATH-RESEARCH.md](FULLMATH-RESEARCH.md) for the earlier proof search.
 No completed reusable proof of the exact local FullMath implementation was found
@@ -165,6 +209,6 @@ package, shell profile or editor extension was changed by this work.
 
 1. Prove Fenwick update/prefix storage matches the endpoint representation.
 2. Bound rounded realized-charge history against the exact loss target.
-3. Close FullMath seed, power-of-two, borrow and final quotient gaps.
+3. Connect the complete FullMath arithmetic model to a verified source/EVM translation.
 4. Establish TickMath bounds and machine limits from actual call sites.
 5. Compose pool/token operations and storage updates into complete operation proofs.

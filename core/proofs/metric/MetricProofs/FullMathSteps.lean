@@ -11,9 +11,10 @@ These are reusable arithmetic steps behind the locally vendored
 `lib/v4-core/src/libraries/FullMath.sol`. They are NOT a completed verification of
 `FullMath.mulDiv` or `mulDivRoundingUp`.
 
-In particular, the canonical high/low limbs below have not been connected to the
-assembly CRT reconstruction. Remainder subtraction is proved for the full natural
-number, not yet for the assembly borrow operations. The Newton lemmas use integers;
+`FullMathCRT` connects the canonical high/low limbs below to the CRT reconstruction
+under mathematical instruction specifications. Remainder subtraction is proved for
+the full natural number, not yet for the assembly borrow operations. The Newton
+lemmas here use integers; `FullMathWrapping` connects them to modular word steps.
 they do not prove the XOR seed, the factor-of-two operations, or the correspondence
 of unchecked EVM arithmetic with modular arithmetic. The six-round result explicitly
 requires the seed's four correct bits as a hypothesis.

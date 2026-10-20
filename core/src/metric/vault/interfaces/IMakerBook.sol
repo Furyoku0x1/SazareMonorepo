@@ -56,4 +56,8 @@ interface IMakerBook {
     event MakerIncreased(uint256 indexed positionId, uint256 legsAdded, uint256 maximum0, uint256 maximum1);
     /// @notice A leg's repayment reached its bucket; keepers watch for buckets whose level the price has passed.
     event LegRepaid(uint256 indexed positionId, uint256 indexed bucketId, uint256 repay0, uint256 repay1);
+    /// @notice A force close's scaled part could not repay its leg, so the bucket took all of it and still fell short.
+    /// The aggregate chord should make this unreachable; it is reported so a broken invariant cannot cost makers
+    /// silently.
+    event LegRepaidShort(uint256 indexed positionId, uint256 indexed bucketId);
 }

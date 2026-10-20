@@ -14,9 +14,10 @@ import {VaultPricing} from "./VaultPricing.sol";
 /// @notice The realized charge and the transformation rate (owner, 2026-10-19; hooks/docs/metric-lender-hedge-spec.md).
 /// A borrowed range costs its lenders the rebalancing loss `ℓ = x(P)·ΔP − ΔV` of every price move inside it, and while
 /// it is fully past the price, all in the token they did not lend, it keeps them in that token. Inside the range a
-/// position pays the `ℓ` of each interval between hourly price points; fully past it, `k·σ` a year on its `M1`, with
-/// `σ` from a volatility oracle on the same points. Both read three Fenwick trees keyed by the tick of each interval's
-/// first point, so a position's charge over any number of points takes two tree walks.
+/// position pays the `ℓ` of each interval between hourly price points; fully past it, `k·σ` a year on the share of
+/// its `M1` that lenders lent in the other token, with `σ` from a volatility oracle on the same points. Both read
+/// three Fenwick trees keyed by the tick of each interval's first point, so a position's charge over any number of
+/// points takes two tree walks.
 /// @dev A linked library: the singleton delegatecalls its public functions, so the tree code is deployed once rather
 /// than inlined into every library that charges premium. Amounts are in 2^-64 units of token1 until converted to WAD.
 library RealizedCharge {
@@ -61,12 +62,13 @@ library RealizedCharge {
     }
 
     /// @dev The trees' sums for one position: over the intervals starting inside its range and below it, and the rent
-    /// over the intervals starting past it.
+    /// over the intervals starting below it and above it.
     struct Sums {
         int256 rootInsideX96;
         int256 moveInsideX96;
         int256 moveBelowX96;
-        int256 rentPastBpsSeconds;
+        int256 rentBelowBpsSeconds;
+        int256 rentAboveBpsSeconds;
     }
 
     // ---------------------------------------------------------------- price points
@@ -218,7 +220,8 @@ library RealizedCharge {
         charge.rootInsideX96 = sums.rootInsideX96;
         charge.moveInsideX96 = sums.moveInsideX96;
         charge.moveBelowX96 = sums.moveBelowX96;
-        charge.rentPastBpsSeconds = sums.rentPastBpsSeconds;
+        charge.rentBelowBpsSeconds = sums.rentBelowBpsSeconds;
+        charge.rentAboveBpsSeconds = sums.rentAboveBpsSeconds;
     }
 
     /// @dev `MIN_SURCHARGE_LEVERAGE · |P − K| ≤ P`, with both prices in Q96.
@@ -248,14 +251,14 @@ library RealizedCharge {
         uint160 sqrtLastX96 = vault.prices.points[count - 1].sqrtPriceX96;
         int256 lossX64 = _treeTermsX64(range, begin, sums) + _firstIntervalX64(vault, range, begin)
             - _valueChangeX64(range, begin.sqrtPriceX96, sqrtLastX96);
-        uint256 rentBpsSeconds = _rentThroughLastBpsSeconds(vault, position, range, begin, sums);
-        return _toWad(lossX64) + _rentWad(position, rentBpsSeconds);
+        uint256 weightedBpsSecondsWad = _rentThroughLastWeighted(vault, position, range, begin, sums);
+        return _toWad(lossX64) + _rentWad(position, weightedBpsSecondsWad);
     }
 
     /// @notice What the position owes from where a settlement now would leave its start to `sqrtNowX96`, in WAD of
     /// token1, before the surcharge and the protocol's tenth: the stub `x(P_s)·(P_now − P_s) − (V(P_now) − V(P_s))`,
-    /// and the rent since then if the range was past at `P_s`. Closes and increases charge it; settlements, which read
-    /// no price, do not.
+    /// and the rent since then on the side the range was past at `P_s`. Closes and increases charge it; settlements,
+    /// which read no price, do not.
     function stubWad(Vault storage vault, Position storage position, ChargeStart storage charge, uint160 sqrtNowX96)
         public
         view
@@ -265,9 +268,10 @@ library RealizedCharge {
         Range memory range = _range(position);
         int256 lossX64 =
             _holdingTimesMoveX64(range, sqrtFromX96, sqrtNowX96) - _valueChangeX64(range, sqrtFromX96, sqrtNowX96);
-        uint256 rentBpsSeconds;
-        if (_isPast(position, range, sqrtFromX96)) rentBpsSeconds = rateBps * (block.timestamp - fromTimestamp);
-        return _toWad(lossX64) + _rentWad(position, rentBpsSeconds);
+        int256 rentBpsSeconds = (rateBps * (block.timestamp - fromTimestamp)).toInt256();
+        int256 belowBpsSeconds = _pastBelow(range, sqrtFromX96) ? rentBpsSeconds : int256(0);
+        int256 aboveBpsSeconds = _pastAbove(range, sqrtFromX96) ? rentBpsSeconds : int256(0);
+        return _toWad(lossX64) + _rentWad(position, _weighted(position, belowBpsSeconds, aboveBpsSeconds));
     }
 
     /// @dev Where a settlement now would leave the start: the last point if one came after the start, otherwise the
@@ -309,10 +313,11 @@ library RealizedCharge {
             - _holdingTimesMoveX64(range, sqrtPointX96, sqrtNextX96);
     }
 
-    /// @dev The rent from the start through the last point. The trees count the start's interval at its first point's
-    /// rate for its whole length; the position began inside it, so that interval is replaced by the stretch from the
-    /// start's own time, past or not at the start's own price.
-    function _rentThroughLastBpsSeconds(
+    /// @dev The rent from the start through the last point, each side weighted by what lenders lent there. The trees
+    /// count the start's interval at its first point's rate for its whole length; the position began inside it, so
+    /// that interval is replaced, on each side, by the stretch from the start's own time, past or not at the start's
+    /// own price. Each side's sum only grows, so neither goes below zero.
+    function _rentThroughLastWeighted(
         Vault storage vault,
         Position storage position,
         Range memory range,
@@ -321,29 +326,46 @@ library RealizedCharge {
     ) private view returns (uint256) {
         PricePoint memory point = vault.prices.points[begin.point];
         uint256 nextRecordedAt = vault.prices.points[uint256(begin.point) + 1].recordedAt;
-        int256 rentBpsSeconds = sums.rentPastBpsSeconds - begin.rentPastBpsSeconds;
-        if (_isPast(position, range, point.sqrtPriceX96)) {
-            rentBpsSeconds -= (uint256(point.rentRateBps) * (nextRecordedAt - point.recordedAt)).toInt256();
-        }
-        if (_isPast(position, range, begin.sqrtPriceX96)) {
-            rentBpsSeconds += (uint256(point.rentRateBps) * (nextRecordedAt - begin.startedAt)).toInt256();
-        }
-        return rentBpsSeconds > 0 ? uint256(rentBpsSeconds) : 0;
+        int256 pointBpsSeconds = (uint256(point.rentRateBps) * (nextRecordedAt - point.recordedAt)).toInt256();
+        int256 ownBpsSeconds = (uint256(point.rentRateBps) * (nextRecordedAt - begin.startedAt)).toInt256();
+        int256 belowBpsSeconds = sums.rentBelowBpsSeconds - begin.rentBelowBpsSeconds;
+        int256 aboveBpsSeconds = sums.rentAboveBpsSeconds - begin.rentAboveBpsSeconds;
+        if (_pastBelow(range, point.sqrtPriceX96)) belowBpsSeconds -= pointBpsSeconds;
+        if (_pastAbove(range, point.sqrtPriceX96)) aboveBpsSeconds -= pointBpsSeconds;
+        if (_pastBelow(range, begin.sqrtPriceX96)) belowBpsSeconds += ownBpsSeconds;
+        if (_pastAbove(range, begin.sqrtPriceX96)) aboveBpsSeconds += ownBpsSeconds;
+        return _weighted(position, belowBpsSeconds, aboveBpsSeconds);
     }
 
-    /// @dev Whether the range is fully past a price on a side lenders lent from: below it when they released token1,
-    /// above it when they released token0. Keyed on the release, not on the position's side, so a label cannot avoid
-    /// it; a range that straddled the price pays on both sides.
-    function _isPast(Position storage position, Range memory range, uint160 sqrtPriceX96) private view returns (bool) {
-        if (sqrtPriceX96 < range.sqrtLowerX96) return position.released1 != 0;
-        if (sqrtPriceX96 >= range.sqrtUpperX96) return position.released0 != 0;
-        return false;
+    /// @dev Fully below the range, all of it in token0: what lenders lent in token1 is transformed.
+    function _pastBelow(Range memory range, uint160 sqrtPriceX96) private pure returns (bool) {
+        return sqrtPriceX96 < range.sqrtLowerX96;
     }
 
-    /// @dev `M1 · rate · Δt / year`, the rate in basis points, in WAD of token1.
-    function _rentWad(Position storage position, uint256 rentBpsSeconds) private view returns (uint256) {
-        if (rentBpsSeconds == 0) return 0;
-        return FullMath.mulDiv(position.maximum1, rentBpsSeconds * WAD, BPS * YEAR_SECONDS);
+    /// @dev Fully above the range, all of it in token1: what lenders lent in token0 is transformed.
+    function _pastAbove(Range memory range, uint160 sqrtPriceX96) private pure returns (bool) {
+        return sqrtPriceX96 >= range.sqrtUpperX96;
+    }
+
+    /// @dev Each side's rent weighted by the share of the release lenders lent in the token that side transforms:
+    /// token1's share `WAD − weight0Wad` below the range, token0's `weight0Wad` above it. A long that released only
+    /// token1 pays nothing above its range, its resting side, and a range that released a dust unit of token0 pays dust
+    /// there. The weights are fixed at the open and change only at an increase, which restarts the charge.
+    function _weighted(Position storage position, int256 belowBpsSeconds, int256 aboveBpsSeconds)
+        private
+        view
+        returns (uint256)
+    {
+        uint256 weight0Wad = position.weight0Wad;
+        uint256 belowWad = belowBpsSeconds > 0 ? uint256(belowBpsSeconds) * (WAD - weight0Wad) : 0;
+        uint256 aboveWad = aboveBpsSeconds > 0 ? uint256(aboveBpsSeconds) * weight0Wad : 0;
+        return belowWad + aboveWad;
+    }
+
+    /// @dev `M1 · rate · Δt / year`, from the weighted basis-point seconds in WAD, in WAD of token1.
+    function _rentWad(Position storage position, uint256 weightedBpsSecondsWad) private view returns (uint256) {
+        if (weightedBpsSecondsWad == 0) return 0;
+        return FullMath.mulDiv(position.maximum1, weightedBpsSecondsWad, BPS * YEAR_SECONDS);
     }
 
     // ---------------------------------------------------------------- range terms
@@ -402,10 +424,8 @@ library RealizedCharge {
         sums.rootInsideX96 = underUpper.perRootX96 - below.perRootX96;
         sums.moveInsideX96 = underUpper.perMoveX96 - below.perMoveX96;
         sums.moveBelowX96 = below.perMoveX96;
-        if (position.released1 != 0) sums.rentPastBpsSeconds += below.rentBpsSeconds;
-        if (position.released0 != 0) {
-            sums.rentPastBpsSeconds += prices.rentTotalBpsSeconds - underUpper.rentBpsSeconds;
-        }
+        sums.rentBelowBpsSeconds = below.rentBpsSeconds;
+        sums.rentAboveBpsSeconds = prices.rentTotalBpsSeconds - underUpper.rentBpsSeconds;
     }
 
     function _addAt(PriceRecord storage prices, uint256 index, ChargeNode memory delta) private {
